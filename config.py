@@ -1,5 +1,13 @@
 """CloudBase 项目配置"""
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 自动加载项目根目录下的 .env 文件（本地开发用，生产环境通过平台注入）
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
 
 # CloudBase 环境 ID
 ENV_ID = os.environ.get("TCB_ENV_ID", "knowlege-graph-env-d7cwud346b70b")
@@ -18,3 +26,24 @@ TCB_API_HOST = "tcb.tencentcloudapi.com"
 
 # 服务端口
 PORT = int(os.environ.get("PORT", 8080))
+
+# ==================== 火山引擎方舟模型配置 ====================
+
+# 火山方舟 API 地址（OpenAI 兼容接口）
+VOLCANO_BASE_URL = os.environ.get(
+    "VOLCANO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
+)
+
+# 火山方舟 API Key（在 https://console.volcengine.com/ark 创建）
+VOLCANO_API_KEY = os.environ.get("VOLCANO_API_KEY", "")
+
+# 【重要】模型 ID 必须是推理接入点 ID（Endpoint ID），而非模型名称
+# 步骤：控制台 → 在线推理 → 创建接入点 → 选择 doubao-1.5-vision-pro-32k → 获得 ep-xxx 格式 ID
+# 获取地址：https://console.volcengine.com/ark/region:ark+cn-beijing/endpoint
+VOLCANO_VISION_MODEL = os.environ.get("VOLCANO_VISION_MODEL", "")
+
+# 图片最大大小（字节，默认 10MB）
+VOLCANO_MAX_IMAGE_SIZE = int(os.environ.get("VOLCANO_MAX_IMAGE_SIZE", 10 * 1024 * 1024))
+
+# 支持的图片格式
+VOLCANO_IMAGE_FORMATS = ["png", "jpg", "jpeg", "webp", "bmp"]

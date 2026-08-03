@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from datetime import datetime
@@ -16,6 +17,8 @@ from typing import Any, Optional
 import httpx
 
 from config import ENV_ID, REGION, SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_API_HOST
+
+logger = logging.getLogger("scholar-admin.db")
 
 
 class CloudBaseNoSQLClient:
@@ -121,11 +124,27 @@ class CloudBaseNoSQLClient:
                 json=payload,
                 headers=headers,
             )
-            result = resp.json()
-            if "Response" in result and "Error" in result["Response"]:
+            raw_result = resp.json()
+            logger.debug(f"[DB] {action} 原始响应类型={type(raw_result).__name__}, "
+                         f"内容={json.dumps(raw_result, ensure_ascii=False)[:500]}")
+
+            # 兼容 list 类型的响应（某些 CloudBase API 返回包装数组，甚至嵌套数组）
+            result = raw_result
+            while isinstance(result, list):
+                if not result:
+                    raise Exception(f"API 返回空列表 (action={action})")
+                result = result[0]
+            if not isinstance(result, dict):
                 raise Exception(
-                    f"API Error [{result['Response']['Error']['Code']}]: "
-                    f"{result['Response']['Error']['Message']}"
+                    f"API 返回非预期类型 {type(result).__name__} (action={action})"
+                )
+
+            if "Response" in result and "Error" in result["Response"]:
+                error_code = result["Response"]["Error"]["Code"]
+                error_msg = result["Response"]["Error"]["Message"]
+                logger.error(f"[DB] API 错误 [{error_code}]: {error_msg}")
+                raise Exception(
+                    f"API Error [{error_code}]: {error_msg}"
                 )
             return result.get("Response", result)
 
@@ -145,9 +164,16 @@ class CloudBaseNoSQLClient:
                 }
             ],
         }
+        logger.info(f"[DB] _run_command → table={table_name}, type={command_type}")
         resp = await self._request("RunCommands", payload)
         data_list: list = resp.get("Data", [])
-        return data_list[0] if data_list else "[]"
+        if not data_list:
+            return "{}"
+        # 兼容 data_list[0] 已经是 dict/list 的情况
+        first = data_list[0]
+        if isinstance(first, str):
+            return first
+        return json.dumps(first)
 
     # ==================== 集合管理 ====================
 
@@ -226,9 +252,17 @@ class CloudBaseNoSQLClient:
         if isinstance(data, dict):
             data = [data]
 
+        logger.info(f"[DB] insert → collection={collection}, doc_count={len(data)}, env={self.env_id}")
         cmd = {"insert": collection, "documents": data}
         raw = await self._run_command(collection, "INSERT", cmd)
-        result = json.loads(raw)
+        result = json.loads(raw) if isinstance(raw, str) else raw
+
+        # 兼容 result 是 list 的情况
+        if isinstance(result, list):
+            logger.warning(f"[DB] insert 返回 list (len={len(result)}), 但视为成功")
+            return {"inserted_count": len(data), "ids": [""] * len(data)}
+
+        logger.info(f"[DB] insert 完成 → collection={collection}, 返回={json.dumps(result, ensure_ascii=False)[:300]}")
         return {
             "inserted_count": result.get("n", len(data)),
             "ids": [str(doc.get("_id", "")) for doc in data],

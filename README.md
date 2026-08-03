@@ -1,19 +1,22 @@
-# CloudBase NoSQL API
+# CloudBase NoSQL API + 火山引擎 AI 图片识别
 
-基于 FastAPI 的 CloudBase 文档型数据库 RESTful API 服务，提供集合管理和文档 CRUD 操作接口。
+基于 FastAPI 的 CloudBase 文档型数据库 RESTful API 服务 + 火山引擎豆包视觉模型英文教材图片识别服务。
 
 ## 项目结构
 
 ```
 scholar-admin/
-├── config.py              # 项目配置（环境变量读取）
+├── config.py              # 项目配置（.env 自动加载）
 ├── main.py                # FastAPI 应用入口 + API 路由
 ├── services/
 │   ├── __init__.py
-│   └── database.py        # CloudBase NoSQL 客户端（TC3 签名 + CRUD 封装）
+│   ├── database.py        # CloudBase NoSQL 客户端（TC3 签名 + CRUD 封装）
+│   └── volcano.py         # 火山引擎豆包视觉模型服务
 ├── requirements.txt       # Python 依赖
 ├── Dockerfile             # 容器构建文件
 ├── cloudbaserc.json       # CloudBase 部署配置
+├── .env.example           # 环境变量模板（可提交 git）
+├── .env                   # 真实环境变量（gitignore 保护）
 └── README.md
 ```
 
@@ -27,10 +30,9 @@ scholar-admin/
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量（见下方配置说明）
-export TCB_ENV_ID="your-env-id"
-export TENCENTCLOUD_SECRETID="your-secret-id"
-export TENCENTCLOUD_SECRETKEY="your-secret-key"
+# 配置环境变量（推荐方式：复制模板文件并填写）
+cp .env.example .env
+# 编辑 .env，填入 VOLCANO_API_KEY、TENCENTCLOUD_SECRETID 等
 
 # 启动服务（默认端口 8080）
 python main.py
@@ -78,6 +80,10 @@ CloudRun 环境下，`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCE
 | `TENCENTCLOUD_SECRETKEY` | (空) | 腾讯云 API SecretKey，**本地运行必须配置** |
 | `TENCENTCLOUD_SESSIONTOKEN` | (空) | 临时凭证 Token（CloudRun 自动注入，本地留空） |
 | `PORT` | `8080` | 服务监听端口 |
+| `VOLCANO_API_KEY` | (空) | 火山方舟 API Key，**使用图片识别功能必须配置** |
+| `VOLCANO_VISION_MODEL` | `doubao-1.5-vision-pro-32k` | 豆包视觉模型名称 |
+
+> **推荐：** 本地开发使用 `.env` 文件管理密钥。复制 `.env.example` 为 `.env` 并填写真实值，程序启动自动加载（`.env` 已加入 `.gitignore`，不会被提交）。
 
 ### 关键注意事项
 
@@ -110,6 +116,9 @@ CloudRun 环境下，`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCE
 | `PUT` | `/collections/{collection}/update` | 更新文档 |
 | `DELETE` | `/collections/{collection}/delete` | 删除文档 |
 | `GET` | `/collections/{collection}/count` | 统计文档数量 |
+| `POST` | `/vision/recognize` | 图片上传识别（multipart） |
+| `POST` | `/vision/recognize-url` | 图片 URL 识别（JSON） |
+| `POST` | `/vision/recognize-base64` | 图片 Base64 识别（JSON） |
 
 ### 查询示例
 
@@ -138,9 +147,103 @@ curl -X DELETE http://localhost:8080/collections/users/delete \
   -d '{"where": {"name": "张三"}}'
 ```
 
+### 图片识别示例
+
+#### 1. 上传本地图片识别
+
+```bash
+curl -X POST http://localhost:8080/vision/recognize \
+  -F "file=@/path/to/english-textbook.jpg"
+```
+
+#### 2. 通过图片 URL 识别
+
+```bash
+curl -X POST http://localhost:8080/vision/recognize-url \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/textbook-page.jpg"}'
+```
+
+#### 3. 通过 Base64 编码识别
+
+适用于前端 Canvas 截图、拍照后直接传 Base64 的场景。
+
+```bash
+# 生成 Base64 并直接调用
+BASE64=$(base64 -i /path/to/image.jpg | tr -d '\n')
+curl -X POST http://localhost:8080/vision/recognize-base64 \
+  -H "Content-Type: application/json" \
+  -d "{\"base64\": \"$BASE64\", \"mime_type\": \"image/jpeg\"}"
+
+# 也支持完整的 data:image 前缀
+curl -X POST http://localhost:8080/vision/recognize-base64 \
+  -H "Content-Type: application/json" \
+  -d '{"base64": "data:image/jpeg;base64,iVBORw0KGgo...", "mime_type": "image/jpeg"}'
+```
+
+#### 返回示例
+
+```json
+{
+  "language": "en",
+  "material_type": "textbook",
+  "title": "The Past and Present of Transport",
+  "sentences": [
+    {
+      "index": 1,
+      "text": "In the past, people traveled by horse.",
+      "translation": "过去，人们骑马出行。",
+      "level": "A2",
+      "keywords": ["traveled", "horse", "past"]
+    },
+    {
+      "index": 2,
+      "text": "Nowadays, high-speed trains connect major cities.",
+      "translation": "如今，高铁连接了各大城市。",
+      "level": "B1",
+      "keywords": ["nowadays", "high-speed trains", "connect", "major"]
+    }
+  ],
+  "total_sentences": 2,
+  "summary": "一张关于交通工具今昔对比的英语教材图片。",
+  "_storage": {
+    "stored": true,
+    "unit_id": "f3a2b1c4-...",
+    "paragraph_id": "d7e8f9a0-...",
+    "sentence_count": 2
+  }
+}
+```
+
+> 识别结果会**自动存储**到 CloudBase 文档型数据库的 `unit`、`paragraph`、`sentence` 三个集合中。非英文材料会跳过存储，`_storage.stored` 为 `false`。
+
+### 存储数据模型
+
+| 集合 | 说明 | 关键字段 |
+|------|------|----------|
+| `unit` | 教材单元 | `unit_id`, `title`, `material_type`, `summary`, `total_sentences` |
+| `paragraph` | 段落 | `paragraph_id`, `unit_id`, `sentence_ids` |
+| `sentence` | 单句 | `sentence_id`, `unit_id`, `paragraph_id`, `text`, `translation`, `level`, `keywords` |
+
+可通过已有的 CRUD 接口查询存储内容：
+
+```bash
+# 查询所有 unit
+curl -X POST http://localhost:8080/collections/unit/query \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# 查询某个 unit 下的所有句子
+curl -X POST http://localhost:8080/collections/sentence/query \
+  -H "Content-Type: application/json" \
+  -d '{"where": {"unit_id": "f3a2b1c4-..."}}'
+```
+
 ## 技术栈
 
 - **FastAPI** — Web 框架，自动生成 OpenAPI 文档
 - **uvicorn** — ASGI 服务器
 - **httpx** — 异步 HTTP 客户端，调用腾讯云 API
+- **OpenAI SDK** — 兼容接口调用火山引擎豆包视觉模型
+- **python-dotenv** — 从 `.env` 文件加载环境变量
 - **腾讯云 API v3 TC3-HMAC-SHA256** 签名机制
