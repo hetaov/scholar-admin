@@ -230,6 +230,60 @@ async def count_documents(
         raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
 
 
+# ==================== 学习掌握度追踪 ====================
+
+
+@app.get("/tracking/{scholar_id}")
+async def get_tracking_by_scholar_id(scholar_id: str):
+    """根据 scholar_id 查询学习掌握度追踪记录
+
+    查询 learning_mastery_tracking 集合中指定学者的所有掌握记录。
+
+    文档结构：
+    {
+      "scholar_id": "6d758f346a6daee000859c332ed11089",
+      "sentence_id": "dd2fe3f1-e797-477e-80d0-79b5fe6adfec",
+      "status": 1,
+      "times": 1,
+      "unit_id": "f836a964-a4c3-4753-b9c3-14d159140f78",
+      "update_time": [1785815342890]
+    }
+    """
+    try:
+        db = get_db()
+        result = await db.query(
+            collection="learning_mastery_tracking",
+            where={"scholar_id": scholar_id},
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@app.get("/textbook/{scholar_id}")
+async def get_textbook_by_scholar_id(scholar_id: str):
+    """根据 scholar_id 查询所有教材列表
+
+    直接查询 textbook 集合，获取指定学者的全部教材。
+
+    文档结构：
+    {
+      "scholar_id": "6d758f346a6daee000859c332ed11089",
+      "title": "新概念2"
+    }
+    """
+    try:
+        db = get_db()
+        result = await db.query(
+            collection="textbook",
+            where={"scholar_id": scholar_id},
+        )
+        logger.info(f"[查询] 查询 textbook 集合，scholar_id={scholar_id}，结果={result}")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
 # ==================== 火山引擎 AI 图片识别 ====================
 
 

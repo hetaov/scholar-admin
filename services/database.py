@@ -46,6 +46,31 @@ class CloudBaseNoSQLClient:
         self.region = region
         self.endpoint = f"https://{TCB_API_HOST}"
 
+    @staticmethod
+    def _normalize_types(obj):
+        """递归转换 Extended JSON 类型为 Python 原生类型
+
+        MongoDB Extended JSON:
+          {"$numberDouble": "1.5"} → 1.5
+          {"$numberInt": "3"}     → 3
+          {"$numberLong": "123"}  → 123
+        """
+        if isinstance(obj, dict):
+            keys = list(obj.keys())
+            if len(keys) == 1:
+                key = keys[0]
+                val = obj[key]
+                if key == "$numberDouble":
+                    return float(val)
+                if key == "$numberInt":
+                    return int(val)
+                if key == "$numberLong":
+                    return int(val)
+            return {k: CloudBaseNoSQLClient._normalize_types(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [CloudBaseNoSQLClient._normalize_types(item) for item in obj]
+        return obj
+
     def _sign_tc3(self, action: str, payload: dict) -> dict:
         """腾讯云 API v3 签名"""
         service = "tcb"
@@ -233,6 +258,13 @@ class CloudBaseNoSQLClient:
 
         raw = await self._run_command(collection, "QUERY", cmd)
         records = json.loads(raw)
+        # CloudBase NoSQL find 命令返回的文档是 JSON 字符串，需要二次解析
+        if isinstance(records, list):
+            records = [
+                json.loads(r) if isinstance(r, str) else r for r in records
+            ]
+        # 转换 Extended JSON 类型为 Python 原生类型
+        records = self._normalize_types(records)
         return {
             "records": records,
             "total": len(records),
