@@ -11,11 +11,9 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-
 from config import ENV_ID, REGION, PORT
 from services.database import CloudBaseNoSQLClient
 from services.volcano import VolcanoVisionService
@@ -44,10 +42,10 @@ app.add_middleware(
 )
 
 # 数据库客户端（单例）
-_db_client: Optional[CloudBaseNoSQLClient] = None
+_db_client: CloudBaseNoSQLClient | None = None
 
 # 火山视觉服务（单例）
-_vision_service: Optional[VolcanoVisionService] = None
+_vision_service: VolcanoVisionService | None = None
 
 
 def get_db() -> CloudBaseNoSQLClient:
@@ -69,10 +67,10 @@ def get_vision() -> VolcanoVisionService:
 
 class QueryRequest(BaseModel):
     where: dict = {}
-    order: Optional[list] = None
+    order: list | None = None
     offset: int = 0
     limit: int = 100
-    select: Optional[dict] = None
+    select: dict | None = None
 
 
 class InsertRequest(BaseModel):
@@ -216,7 +214,7 @@ async def delete_documents(collection: str, req: DeleteRequest):
 @app.get("/collections/{collection}/count")
 async def count_documents(
     collection: str,
-    where: Optional[str] = Query(None, description="JSON 查询条件"),
+    where: str | None = Query(None, description="JSON 查询条件"),
 ):
     """统计文档数量"""
     try:
@@ -260,11 +258,11 @@ async def get_tracking_by_scholar_id(scholar_id: str):
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
-@app.get("/textbook/{scholar_id}")
-async def get_textbook_by_scholar_id(scholar_id: str):
-    """根据 scholar_id 查询所有教材列表
+@app.get("/textbook")
+async def get_textbook_all():
+    """查询所有教材列表
 
-    直接查询 textbook 集合，获取指定学者的全部教材。
+    查询 textbook 集合全部数据。
 
     文档结构：
     {
@@ -276,12 +274,30 @@ async def get_textbook_by_scholar_id(scholar_id: str):
         db = get_db()
         result = await db.query(
             collection="textbook",
-            where={"scholar_id": scholar_id},
+            where={},
         )
-        logger.info(f"[查询] 查询 textbook 集合，scholar_id={scholar_id}，结果={result}")
+        logger.info(f"[查询] 查询 textbook 集合全部数据，结果={result}")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@app.post("/textbook")
+async def add_textbook(data: dict):
+    """添加教材
+
+    请求体：
+    {
+      "title": "新概念2"
+    }
+    """
+    try:
+        db = get_db()
+        result = await db.insert(collection="textbook", data=data)
+        logger.info(f"[插入] textbook 添加成功: {json_lib.dumps(data, ensure_ascii=False)}")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"添加失败: {str(e)}")
 
 
 # ==================== 火山引擎 AI 图片识别 ====================
@@ -291,6 +307,7 @@ async def _store_recognition_result(
     db: CloudBaseNoSQLClient,
     result: dict,
     image_source: str,
+    text_book_id: str | None = None,
 ) -> dict:
     """将识别结果存入 unit / paragraph / sentence 三张表
 
@@ -298,6 +315,7 @@ async def _store_recognition_result(
         db: 数据库客户端
         result: 识别返回的完整 JSON 结果
         image_source: 图片来源标识（upload / url / base64）
+        text_book_id: 关联的教材 ID（可选）
 
     Returns:
         {"unit_id": str, "paragraph_id": str, "sentence_count": int}
@@ -335,6 +353,7 @@ async def _store_recognition_result(
         "image_source": image_source,
         "total_sentences": len(sentences),
         "paragraph_count": 1,
+        "text_book_id": text_book_id or "",
         "created_at": now,
         "updated_at": now,
     }
@@ -377,6 +396,7 @@ async def _store_recognition_result(
                 "translation": s.get("translation", ""),
                 "level": s.get("level", ""),
                 "keywords": s.get("keywords", []),
+                "text_book_id": text_book_id or "",
                 "created_at": now,
             }
             sen_res = await db.insert(collection="sentence", data=sentence_doc)
@@ -396,7 +416,10 @@ async def _store_recognition_result(
 
 
 @app.post("/vision/recognize")
-async def recognize_image(file: UploadFile = File(...)):
+async def recognize_image(
+    file: UploadFile = File(...),
+    text_book_id: str | None = Form(None, alias="textbookId"),
+):
     """识别英文教材图片，提取语句并返回结构化 JSON
 
     上传一张英文教材/试题/教辅的图片，豆包视觉模型将：
@@ -404,6 +427,10 @@ async def recognize_image(file: UploadFile = File(...)):
     2. 提取所有英文语句
     3. 给出每句的 CEFR 等级、中文翻译、关键词
     4. 返回 JSON 结构化结果
+
+    参数：
+    - file: 图片文件（必填）
+    - text_book_id: 关联的教材 ID（选填）
 
     返回格式：
     {
@@ -436,7 +463,7 @@ async def recognize_image(file: UploadFile = File(...)):
 
         # 自动存储到数据库
         db = get_db()
-        store_info = await _store_recognition_result(db, result, "upload")
+        store_info = await _store_recognition_result(db, result, "upload", text_book_id)
         result["_storage"] = store_info
 
         return result
