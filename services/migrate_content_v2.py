@@ -42,6 +42,9 @@ OLD_TEXTBOOK = "textbook"
 OLD_UNIT = "unit"
 OLD_SENTENCE = "sentence"
 
+# 无章教材: 课直接挂在 book 下, 不创建 chapter(如新概念: 每课即顶层)
+NO_CHAPTER_TEXTBOOKS: set[str] = {"tb_db3e2209b3cc4e9e"}
+
 
 async def _has_record(db, collection: str, key: str, value: str) -> bool:
     result = await db.query(collection=collection, where={key: value}, limit=1)
@@ -108,8 +111,12 @@ async def migrate_content_to_v2(db, batch_size: int = 100) -> dict:
 
 
 async def _migrate_one_textbook(db, tb_id: str, stats: dict) -> None:
-    """迁移单本教材下的 unit/sentence 到 chapter/lesson/sentence_v2。"""
+    """迁移单本教材下的 unit/sentence 到 chapter/lesson/sentence_v2。
+
+    无章教材(NO_CHAPTER_TEXTBOOKS): 不创建 chapter, lesson 直接挂在 book 下(chapter_id="")。
+    """
     now = int(time.time())
+    chapterless = tb_id in NO_CHAPTER_TEXTBOOKS
 
     # 1. 取该教材全部 unit
     units_result = await db.query(
@@ -121,30 +128,15 @@ async def _migrate_one_textbook(db, tb_id: str, stats: dict) -> None:
     if not units:
         return
 
-    # 2. 分组建 chapter(幂等: textbook_id + order 唯一)
-    groups = group_units_into_chapters(units)
+    if chapterless:
+        await _repair_chapterless_textbook(db, tb_id, stats)
+
+    # 2. 建 chapter(有章教材), 或直接规划无章映射
     chapter_lesson_map: dict[str, str] = {}  # lesson_id -> chapter_id
 
-    for g in groups:
-        chapter_order = g["chapter_index"]
-        existing = await db.query(
-            collection=CHAPTER,
-            where={"textbook_id": tb_id, "order": chapter_order},
-            limit=1,
-        )
-        if existing.get("records"):
-            chapter = existing["records"][0]
-            chapter_id = chapter["chapter_id"]
-            stats["chapter_skipped"] += 1
-        else:
-            chapter_id = f"chapter_{uuid.uuid4().hex[:16]}"
-            await db.insert(collection=CHAPTER, data=build_chapter_doc(
-                chapter_id, tb_id, chapter_order,
-                f"Chapter {chapter_order}", len(g["units"]), now,
-            ))
-            stats["chapter_created"] += 1
-
-        for u in g["units"]:
+    if chapterless:
+        # 无章: lesson 直接挂 book 下
+        for u in units:
             lesson_id = u.get("unit_id", "")
             if not lesson_id:
                 continue
@@ -152,20 +144,57 @@ async def _migrate_one_textbook(db, tb_id: str, stats: dict) -> None:
                 stats["lesson_skipped"] += 1
             else:
                 await db.insert(collection=LESSON, data=build_lesson_doc(
-                    lesson_id, chapter_id, tb_id,
+                    lesson_id, "", tb_id,
                     u.get("unit_index", 1),
                     u.get("title", ""),
                     u.get("total_sentences", 0),
                     now,
                 ))
                 stats["lesson_created"] += 1
-            chapter_lesson_map[lesson_id] = chapter_id
+            chapter_lesson_map[lesson_id] = ""
+    else:
+        groups = group_units_into_chapters(units)
+        for g in groups:
+            chapter_order = g["chapter_index"]
+            existing = await db.query(
+                collection=CHAPTER,
+                where={"textbook_id": tb_id, "order": chapter_order},
+                limit=1,
+            )
+            if existing.get("records"):
+                chapter = existing["records"][0]
+                chapter_id = chapter["chapter_id"]
+                stats["chapter_skipped"] += 1
+            else:
+                chapter_id = f"chapter_{uuid.uuid4().hex[:16]}"
+                await db.insert(collection=CHAPTER, data=build_chapter_doc(
+                    chapter_id, tb_id, chapter_order,
+                    f"Chapter {chapter_order}", len(g["units"]), now,
+                ))
+                stats["chapter_created"] += 1
+
+            for u in g["units"]:
+                lesson_id = u.get("unit_id", "")
+                if not lesson_id:
+                    continue
+                if await _has_record(db, LESSON, "lesson_id", lesson_id):
+                    stats["lesson_skipped"] += 1
+                else:
+                    await db.insert(collection=LESSON, data=build_lesson_doc(
+                        lesson_id, chapter_id, tb_id,
+                        u.get("unit_index", 1),
+                        u.get("title", ""),
+                        u.get("total_sentences", 0),
+                        now,
+                    ))
+                    stats["lesson_created"] += 1
+                chapter_lesson_map[lesson_id] = chapter_id
 
     # 3. 迁移句子: 按 unit_id 查旧 sentence
     for u in units:
         lesson_id = u.get("unit_id", "")
-        chapter_id = chapter_lesson_map.get(lesson_id, "")
-        if not lesson_id or not chapter_id:
+        chapter_id = chapter_lesson_map.get(lesson_id)
+        if not lesson_id or chapter_id is None:
             continue
         sent_offset = 0
         while True:
@@ -192,6 +221,48 @@ async def _migrate_one_textbook(db, tb_id: str, stats: dict) -> None:
                 await db.insert(collection=SENTENCE_V2, data=v2)
                 stats["sentence_v2_created"] += 1
             sent_offset += len(records)
+
+
+async def _repair_chapterless_textbook(db, tb_id: str, stats: dict) -> None:
+    """修复无章教材的历史数据: 删除旧 chapter, 把已有 lesson/sentence_v2 的 chapter_id 置空。
+
+    幂等: chapter 不存在时跳过; lesson/sentence_v2 无 chapter_id 时跳过。
+    使用批量 update/delete 而非逐条, 减少与数据库的交互次数。
+    """
+    now = int(time.time())
+
+    # 1. 删除该教材的 chapter(无章教材不应有 chapter)
+    result = await db.delete(collection=CHAPTER, where={"textbook_id": tb_id}, multi=True)
+    deleted = result.get("deleted_count", 0)
+    stats["chapter_removed"] = stats.get("chapter_removed", 0) + deleted
+
+    # 2. 把该教材已迁移 lesson 的 chapter_id 置空（批量）
+    result = await db.update(
+        collection=LESSON,
+        where={"textbook_id": tb_id},
+        data={"$set": {"chapter_id": ""}},
+        multi=True,
+    )
+    stats["lesson_chapter_cleared"] = stats.get("lesson_chapter_cleared", 0) + result.get("modified_count", 0)
+
+    # 3. 把该教材已迁移 sentence_v2 的 chapter_id 置空（批量）
+    result = await db.update(
+        collection=SENTENCE_V2,
+        where={"textbook_id": tb_id},
+        data={"$set": {"chapter_id": ""}},
+        multi=True,
+    )
+    stats["sentence_chapter_cleared"] = stats.get("sentence_chapter_cleared", 0) + result.get("modified_count", 0)
+
+    # 4. 同步 textbook_v2 的 chapter_count 为 0
+    tb = await db.query(collection=TEXTBOOK_V2, where={"_id": tb_id}, limit=1)
+    if tb.get("records") and tb["records"][0].get("chapter_count"):
+        await db.update(
+            collection=TEXTBOOK_V2,
+            where={"_id": tb_id},
+            data={"$set": {"chapter_count": 0, "updated_at": now}},
+            multi=False,
+        )
 
 
 async def _migrate_orphan_units(db, stats: dict) -> None:

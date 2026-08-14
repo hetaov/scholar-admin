@@ -67,7 +67,7 @@ class TestServerSideAggregation:
         client = _client(monkeypatch, fake_db)
         resp = client.post(
             "/tracking/stats",
-            json={"scholar_id": "scholar_1", "textbook_id": "tb_1"},
+            json={"scholar_id": "scholar_1", "textbook_id": "tb_1", "detail": "full"},
         )
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -131,7 +131,7 @@ class TestServerSideAggregation:
         client = _client(monkeypatch, fake_db)
         resp = client.post(
             "/tracking/stats",
-            json={"scholar_id": "scholar_1", "textbook_id": "tb_1"},
+            json={"scholar_id": "scholar_1", "textbook_id": "tb_1", "detail": "full"},
         )
         assert resp.status_code == 200
         summary = resp.json()["data"]["summary"]
@@ -140,6 +140,27 @@ class TestServerSideAggregation:
         assert summary["learned_sentence_count"] == 0
         # 未学习时仍返回完整结构
         assert len(resp.json()["data"]["chapters"]) == 1
+
+    def test_default_lesson_detail_returns_summary_and_lessons(self, monkeypatch, fake_db):
+        """默认 detail="lesson": 只返回 summary + 课级统计, 不返回章节/句子明细。"""
+        _seed_content(fake_db)
+        _seed_states(fake_db)
+        client = _client(monkeypatch, fake_db)
+        resp = client.post(
+            "/tracking/stats",
+            json={"scholar_id": "scholar_1", "textbook_id": "tb_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["summary"]["lesson_count"] == 2
+        assert "chapters" not in data
+        assert "units" not in data
+        assert "sentences" not in data
+        # lessons 仅含课级统计, 不含句子明细
+        assert [l["lesson_id"] for l in data["lessons"]] == ["l1", "l2"]
+        assert data["lessons"][0]["total_sentence_count"] == 2
+        assert "mastery_distribution" in data["lessons"][0]
+        assert all("sentence" not in l for l in data["lessons"])
 
     def test_legacy_alias_text_book_id(self, monkeypatch, fake_db):
         _seed_content(fake_db)

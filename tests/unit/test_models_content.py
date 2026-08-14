@@ -15,6 +15,7 @@ from services.models_content import (
     build_lesson_doc,
     build_sentence_v2_doc,
     build_textbook_v2_doc,
+    get_lessons_by_textbook,
     group_units_into_chapters,
     write_content_v2,
 )
@@ -180,3 +181,45 @@ class TestWriteContentV2:
         assert stats2["lesson_count"] == 1
         assert len(db.all("textbook_v2")) == 1  # 不重复创建
         assert len(db.all("lesson")) == 3
+
+    def test_chapterless_writes_no_chapters(self):
+        """无章教材: Book → Lesson → Sentence, 不创建 chapter。"""
+        db = FakeDB()
+        asyncio.run(write_content_v2(
+            db,
+            textbook_id="tb_noch",
+            textbook_title="NCE",
+            grade="1",
+            level="Book 1",
+            units=self._units(n=3),
+            now=1000,
+            chapterless=True,
+        ))
+        assert len(db.all("chapter")) == 0
+        lessons = db.all("lesson")
+        assert len(lessons) == 3
+        for l in lessons:
+            assert l["chapter_id"] == ""
+        for s in db.all("sentence_v2"):
+            assert s["chapter_id"] == ""
+        tbs = asyncio.run(db.query(collection="textbook_v2", where={"_id": "tb_noch"}))
+        tb = tbs["records"][0]
+        assert tb["chapter_count"] == 0
+        assert tb["lesson_count"] == 3
+
+    def test_get_lessons_by_textbook_returns_chapterless_lessons(self):
+        db = FakeDB()
+        asyncio.run(write_content_v2(
+            db,
+            textbook_id="tb_noch",
+            textbook_title="NCE",
+            grade="1",
+            level="Book 1",
+            units=self._units(n=3),
+            now=1000,
+            chapterless=True,
+        ))
+        lessons = asyncio.run(get_lessons_by_textbook(db, "tb_noch"))
+        assert [l["lesson_id"] for l in lessons] == ["unit_1", "unit_2", "unit_3"]
+        # 无章教材: 不按 chapter_id 过滤也能查到全部课
+        assert all(l["chapter_id"] == "" for l in lessons)

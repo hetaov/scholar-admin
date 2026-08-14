@@ -335,6 +335,96 @@ class TestAggregateProgress:
         )
         assert overview["summary"] == full["summary"]
 
+    def test_no_chapter_textbook_lessons_under_book(self):
+        """无章教材: 不传 chapters, lesson 直接挂在 book 下聚合。"""
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+            {"sentence_id": "s2", "skill_code": "translation",
+             "status": STATUS_LEARNING, "mastery_score": 40},
+        ]
+        stats = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_noch",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=[],
+        )
+        summary = stats["summary"]
+        # book 级聚合, 无 chapter
+        assert summary["chapter_count"] == 0
+        assert summary["lesson_count"] == 2
+        assert summary["total_sentence_count"] == 4
+        assert summary["learned_sentence_count"] == 1
+        assert summary["textbook_progress"] == round((0.8 + 0.4 + 0.0 + 0.0) / 4, 4)
+        # chapters 为空数组
+        assert stats["chapters"] == []
+        # full 模式下 lessons/units 平铺仍返回
+        assert [u["unit_id"] for u in stats["units"]] == ["l1", "l2"]
+
+    def test_no_chapter_overview(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+        ]
+        stats = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_noch",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=[],
+            detail="overview",
+        )
+        assert stats["chapters"] == []
+        assert stats["summary"]["lesson_count"] == 2
+        assert stats["summary"]["chapter_count"] == 0
+        # 无章教材在 overview 粒度下由顶层 lessons 承载课级进度
+        assert [l["lesson_id"] for l in stats["lessons"]] == ["l1", "l2"]
+        assert stats["lessons"][0]["total_sentence_count"] == 2
+        assert stats["lessons"][0]["learned_sentence_count"] == 1
+        assert "sentences" not in stats
+        assert "units" not in stats
+
+    def test_detail_lesson_returns_summary_and_lesson_list(self):
+        """detail="lesson"(tracking/stats 默认): 仅 summary + 课级统计, 无章节/句子明细。"""
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+            {"sentence_id": "s3", "skill_code": "translation",
+             "status": STATUS_MASTERED, "mastery_score": 95},
+        ]
+        stats = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS,
+            detail="lesson",
+        )
+        # 无章节/平铺字段
+        assert "chapters" not in stats
+        assert "units" not in stats
+        assert "sentences" not in stats
+        # 课级统计列表(不含句子明细)
+        lessons = stats["lessons"]
+        assert [l["lesson_id"] for l in lessons] == ["l1", "l2"]
+        assert lessons[0]["total_sentence_count"] == 2
+        assert lessons[0]["learned_sentence_count"] == 1
+        assert lessons[0]["progress"] == 0.4  # s1=0.8, s2 无状态=0, 均值
+        assert "mastery_distribution" in lessons[0]
+        # 有章教材下 lesson_count 与 summary 一致
+        assert stats["summary"]["lesson_count"] == 2
+
+    def test_no_chapter_chapter_detail_returns_lesson_list(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+        ]
+        stats = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_noch",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=[],
+            detail="chapter",
+        )
+        assert stats["chapters"] == []
+        assert [l["lesson_id"] for l in stats["lessons"]] == ["l1", "l2"]
+        assert "sentences" not in stats
+        assert "units" not in stats
+
     def test_no_states(self):
         stats = aggregate_progress(
             scholar_id="scholar_1", textbook_id="tb_1",

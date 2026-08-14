@@ -13,6 +13,7 @@ from services.models_learning import SKILL_STATE
 from services.models_content import (
     get_chapters,
     get_lessons,
+    get_lessons_by_textbook,
     get_sentences_by_lesson,
     get_textbook_v2,
 )
@@ -71,7 +72,7 @@ async def get_tracking_stats(data: dict):
       "scholar_id": "scholar_xxx",   // 必填
       "textbook_id": "tb_xxx",       // 教材（兼容别名 text_book_id）
       "skill_code": "translation",   // 可选, 按能力维度独立聚合
-      "detail": "overview"           // 可选: full(默认,全量) / chapter(章节树含课) / overview(章级,教材总览推荐) / summary(仅汇总)
+      "detail": "lesson"             // 可选: lesson(默认, summary+课级统计) / full(全量,兼容) / chapter(章节树含课) / overview(章级) / summary(仅汇总)
     }
 
     兼容入口（Phase 2/3，客户端上报，仍可用）：
@@ -83,7 +84,7 @@ async def get_tracking_stats(data: dict):
       ]
     }
 
-    返回 data 结构：
+    返回 data 结构（默认 detail="lesson"，仅汇总 + 课级统计，不含章节/句子明细）：
     {
       "scholar_id": "...",
       "text_book_id": "...",
@@ -94,15 +95,29 @@ async def get_tracking_stats(data: dict):
         "textbook_progress": 0.xx,
         "learned_sentence_count": n,
         "total_sentence_count": n,
-        "chapter_count": n,
+        "chapter_count": n,       // 无章教材恒为 0
         "lesson_count": n,
         "mastery_distribution": {...}
       },
-      "chapters": [{chapter_id, chapter_title, order, progress, lessons: [...]}],
-      "lessons":  [...],   // 兼容字段
-      "units":    [...],   // 兼容字段
-      "sentences": [...]
+      "lessons": [
+        {
+          "lesson_id": "...",
+          "lesson_title": "...",
+          "order": 1,
+          "progress": 0.xx,
+          "learned_sentence_count": n,
+          "total_sentence_count": n,
+          "mastery_distribution": {...}
+        }
+      ]
     }
+
+    detail 变化说明：
+    - "lesson"(默认): 仅 summary + lessons 课级统计列表（无 chapters / units / sentences）
+    - "full"(兼容): 追加 chapters / 平铺 units / sentences（含句子明细）
+    - "chapter"(兼容): chapters 含内嵌 lessons，省略平铺字段
+    - "overview"(兼容): 章级列表（剥离 lessons 明细）
+    - "summary": 仅 summary（教材列表场景）
     """
     scholar_id = str(data.get("scholar_id") or "").strip()
     record_list = data.get("record_list")
@@ -121,9 +136,9 @@ async def get_tracking_stats(data: dict):
     if not textbook_id:
         raise HTTPException(status_code=400, detail="缺少参数 text_book_id")
     skill_code = str(data.get("skill_code") or "").strip() or None
-    detail = str(data.get("detail") or "full").strip() or "full"
-    if detail not in ("full", "chapter", "overview", "summary"):
-        detail = "full"
+    detail = str(data.get("detail") or "lesson").strip() or "lesson"
+    if detail not in ("full", "chapter", "overview", "lesson", "summary"):
+        detail = "lesson"
 
     try:
         db = get_db()
@@ -159,8 +174,10 @@ async def _aggregate_progress_for_book(
     """服务端聚合一本教材的进度（Phase 4 逐级聚合，stats 与 books 列表复用）。
 
     数据源：skill_state（可选按 skill_code 过滤）+ 内容层级（chapter → lesson →
-    sentence_v2）+ study_attempt 时长，全部经 aggregate_progress 逐级加权。
-    detail 透传 aggregate_progress："full" / "chapter" / "overview" / "summary"。
+    sentence_v2；无章教材则 book → lesson）+ study_attempt 时长，全部经
+    aggregate_progress 逐级加权。
+    detail 透传 aggregate_progress："full" / "chapter" / "overview" / "summary"；
+    无章教材在 chapter/overview 粒度下 chapters 为空、由 lessons 返回课级进度。
     """
     where: dict = {"scholar_id": scholar_id}
     if skill_code:
@@ -182,17 +199,20 @@ async def _aggregate_progress_for_book(
     )
     states = state_page.get("records", [])
 
-    # 2. 拉该教材内容层级（chapter → lesson → sentence_v2）
+    # 2. 拉该教材内容层级（chapter → lesson → sentence_v2；无章教材则 book → lesson）
     chapters = await get_chapters(db, textbook_id)
     lessons: list[dict] = []
     sentences: list[dict] = []
-    for ch in chapters:
-        ch_lessons = await get_lessons(db, ch.get("chapter_id"))
-        lessons.extend(ch_lessons)
-        for le in ch_lessons:
-            sentences.extend(
-                await get_sentences_by_lesson(db, le.get("lesson_id"))
-            )
+    if chapters:
+        for ch in chapters:
+            ch_lessons = await get_lessons(db, ch.get("chapter_id"))
+            lessons.extend(ch_lessons)
+    else:
+        lessons = await get_lessons_by_textbook(db, textbook_id)
+    for le in lessons:
+        sentences.extend(
+            await get_sentences_by_lesson(db, le.get("lesson_id"))
+        )
 
     # 3. 学习时长：study_attempt.time_spent 聚合
     attempt_page = await db.query(

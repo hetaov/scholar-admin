@@ -50,6 +50,17 @@ async def get_lessons(db, chapter_id: str, limit: int = 1000) -> list[dict]:
     return result.get("records", [])
 
 
+async def get_lessons_by_textbook(db, textbook_id: str, limit: int = 5000) -> list[dict]:
+    """按教材查全部课（无章教材: lesson 直接挂 book 下, chapter_id 为空）, 按 order 升序。"""
+    result = await db.query(
+        collection=LESSON,
+        where={"textbook_id": textbook_id},
+        order=[{"field": "order", "direction": "asc"}],
+        limit=limit,
+    )
+    return result.get("records", [])
+
+
 async def get_sentences_by_lesson(db, lesson_id: str, limit: int = 1000) -> list[dict]:
     """按课查句子, 按 order 升序。"""
     result = await db.query(
@@ -210,6 +221,7 @@ async def write_content_v2(
     units: list[dict],
     now: int | None = None,
     units_per_chapter: int = DEFAULT_UNITS_PER_CHAPTER,
+    chapterless: bool = False,
 ) -> dict:
     """将构建的内容双写进新表(textbook_v2 + chapter + lesson + sentence_v2)。
 
@@ -217,56 +229,66 @@ async def write_content_v2(
         textbook_id: 教材 ID; 为空时不写 textbook_v2(视觉识别等无教材场景)。
         units: 每个单元含 unit_id / unit_title / sentences(旧 sentence doc 列表)。
                句子 doc 需含 sentence_id / index / text / translation 等字段。
+        units_per_chapter: 每章包含的课数; 仅 chapterless=False 时生效。
+        chapterless: True 时不创建 chapter, lesson 直接挂在 book 下(chapter_id 为空)。
 
     Returns:
         {"chapter_count": n, "lesson_count": n, "sentence_count": n}
     """
     now = now or int(time.time())
 
-    # 分批构建时 order 不与已有记录冲突: 以已有 chapter/lesson 数量为偏移
-    existing_chapters = await db.query(
-        collection=CHAPTER, where={"textbook_id": textbook_id}, select={"_id": 1},
-    )
+    # 分批构建时 order 不与已有记录冲突: 以已有 lesson 数量为偏移
     existing_lessons = await db.query(
         collection=LESSON, where={"textbook_id": textbook_id}, select={"_id": 1},
     )
-    chapter_offset = len(existing_chapters.get("records", []))
     lesson_offset = len(existing_lessons.get("records", []))
-
-    # 1. 分组 chapters
-    groups = group_units_into_chapters(units, units_per_chapter)
 
     # 2. 构建 chapter / lesson / sentence_v2 文档
     chapter_docs: list[dict] = []
     lesson_docs: list[dict] = []
     sentence_docs: list[dict] = []
 
-    for g in groups:
-        chapter_id = f"chapter_{uuid.uuid4().hex[:16]}"
-        chapter_docs.append(build_chapter_doc(
+    def _append_lesson(u: dict, chapter_id: str) -> None:
+        lesson_id = u["unit_id"]
+        unit_sentences = u.get("sentences", [])
+        lesson_docs.append(build_lesson_doc(
+            lesson_id,
             chapter_id,
             textbook_id,
-            chapter_offset + g["chapter_index"],
-            f"Chapter {chapter_offset + g['chapter_index']}",
-            len(g["units"]),
+            lesson_offset + len(lesson_docs) + 1,
+            u.get("unit_title", f"Lesson {len(lesson_docs) + 1}"),
+            len(unit_sentences),
             now,
         ))
-        for u in g["units"]:
-            lesson_id = u["unit_id"]
-            unit_sentences = u.get("sentences", [])
-            lesson_docs.append(build_lesson_doc(
-                lesson_id,
+        for s in unit_sentences:
+            sentence_docs.append(build_sentence_v2_doc(
+                s, chapter_id, lesson_id, textbook_id, now,
+            ))
+
+    if chapterless:
+        # 无章教材: Book → Lesson → Sentence
+        for u in units:
+            _append_lesson(u, "")
+    else:
+        # 有章教材: Book → Chapter → Lesson → Sentence
+        existing_chapters = await db.query(
+            collection=CHAPTER, where={"textbook_id": textbook_id}, select={"_id": 1},
+        )
+        chapter_offset = len(existing_chapters.get("records", []))
+
+        groups = group_units_into_chapters(units, units_per_chapter)
+        for g in groups:
+            chapter_id = f"chapter_{uuid.uuid4().hex[:16]}"
+            chapter_docs.append(build_chapter_doc(
                 chapter_id,
                 textbook_id,
-                lesson_offset + len(lesson_docs) + 1,
-                u.get("unit_title", f"Lesson {len(lesson_docs) + 1}"),
-                len(unit_sentences),
+                chapter_offset + g["chapter_index"],
+                f"Chapter {chapter_offset + g['chapter_index']}",
+                len(g["units"]),
                 now,
             ))
-            for s in unit_sentences:
-                sentence_docs.append(build_sentence_v2_doc(
-                    s, chapter_id, lesson_id, textbook_id, now,
-                ))
+            for u in g["units"]:
+                _append_lesson(u, chapter_id)
 
     # 3. 写 textbook_v2(幂等 upsert, 计数累加)
     tb_doc = build_textbook_v2_doc(

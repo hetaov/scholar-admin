@@ -186,6 +186,30 @@ def book_progress(chapter_items: list[dict]) -> dict:
     }
 
 
+def book_progress_from_lessons(lesson_items: list[dict]) -> dict:
+    """无章教材全书进度：lesson 直接挂在 book 下, 按课内句子数加权平均。"""
+    total_sentences = sum(l["total_sentence_count"] for l in lesson_items)
+    learned = sum(l["learned_sentence_count"] for l in lesson_items)
+    if total_sentences:
+        progress = round(
+            sum(l["progress"] * l["total_sentence_count"] for l in lesson_items)
+            / total_sentences,
+            4,
+        )
+    else:
+        progress = 0.0
+    return {
+        "progress": progress,
+        "learned_sentence_count": learned,
+        "total_sentence_count": total_sentences,
+        "chapter_count": 0,
+        "lesson_count": len(lesson_items),
+        "mastery_distribution": merge_distributions(
+            [l["mastery_distribution"] for l in lesson_items]
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 学习时长聚合
 # ---------------------------------------------------------------------------
@@ -226,8 +250,13 @@ def aggregate_progress(
     detail 控制返回粒度（默认 full，保持旧契约不变）：
     - "full":    summary + chapters + 平铺 lessons/units/sentences
     - "chapter": summary + chapters（含内嵌 lessons），省略平铺字段
-    - "overview": summary + 章级列表（不含课明细），教材总览推荐
+    - "overview": summary + 章级列表（不含课明细）
+    - "lesson":  summary + 课级统计列表（不含章节/句子明细），tracking/stats 默认形态
     - "summary": 仅 summary（教材列表场景，省去层级组装）
+
+    无章教材（chapters 为空，lesson 直挂 book）：chapter/overview 粒度下
+    chapters 恒为空数组，改由顶层 lessons 返回课级进度列表（不含句子明细），
+    保证总览页/章节页仍能拿到层级结构。
     """
     # 1. 句子级：把 skill_state 按 sentence_id 分组并 pick
     states_by_sentence: dict[str, list[dict]] = {}
@@ -252,19 +281,20 @@ def aggregate_progress(
         lesson = lesson_by_id.get(lid, {"lesson_id": lid, "title": "", "order": None})
         lesson_items_by_id[lid] = lesson_progress(lesson, items)
 
-    # 3. 章级：按 chapter 分组 lessons
+    # 3. 章级：按 chapter 分组 lessons；无章教材(无 chapter)则课直接挂 book 下
     chapter_items: list[dict] = []
-    for chapter in chapters:
-        cid = chapter.get("chapter_id")
-        own_lessons = [
-            lesson_items_by_id[l.get("lesson_id")]
-            for l in lessons
-            if l.get("chapter_id") == cid and l.get("lesson_id") in lesson_items_by_id
-        ]
-        chapter_items.append(chapter_progress(chapter, own_lessons))
-
-    # 4. 书级 summary
-    book = book_progress(chapter_items)
+    if chapters:
+        for chapter in chapters:
+            cid = chapter.get("chapter_id")
+            own_lessons = [
+                lesson_items_by_id[l.get("lesson_id")]
+                for l in lessons
+                if l.get("chapter_id") == cid and l.get("lesson_id") in lesson_items_by_id
+            ]
+            chapter_items.append(chapter_progress(chapter, own_lessons))
+        book = book_progress(chapter_items)
+    else:
+        book = book_progress_from_lessons(list(lesson_items_by_id.values()))
     total_time_spent = sum_time_spent(attempts or [])
 
     summary = {
@@ -288,13 +318,21 @@ def aggregate_progress(
         "summary": summary,
     }
 
-    # 5. 平铺兼容字段：units(≈lessons) / sentences(含 progress/learned)
-    if detail in ("full", "chapter"):
+    # 5. 层级列表：
+    #    - "lesson": 仅 summary + 课级统计列表（无章节/句子明细）
+    #    - "full"/"chapter": chapters（含内嵌 lessons）
+    #    - "overview": 章级列表（剥离 lessons）
+    #    - 无章教材（chapters 为空）在 chapter/overview 下由顶层 lessons 承载课级进度
+    if detail == "lesson":
+        result["lessons"] = list(lesson_items_by_id.values())
+    elif detail in ("full", "chapter"):
         result["chapters"] = chapter_items
     elif detail == "overview":
         result["chapters"] = [
             {k: v for k, v in c.items() if k != "lessons"} for c in chapter_items
         ]
+    if not chapters and detail in ("chapter", "overview"):
+        result["lessons"] = list(lesson_items_by_id.values())
     if detail == "full":
         flat_lessons = [
             {**l, "unit_id": l["lesson_id"], "unit_title": l["lesson_title"]}
