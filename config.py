@@ -47,3 +47,10 @@ VOLCANO_MAX_IMAGE_SIZE = int(os.environ.get("VOLCANO_MAX_IMAGE_SIZE", 10 * 1024 
 
 # 支持的图片格式
 VOLCANO_IMAGE_FORMATS = ["png", "jpg", "jpeg", "webp", "bmp"]
+
+# 火山方舟对话模型（文本推理接入点 ID，用于对话匹配等纯文本场景）
+# 获取地址：https://console.volcengine.com/ark/region:ark+cn-beijing/endpoint
+VOLCANO_CHAT_MODEL = os.environ.get(
+    "VOLCANO_CHAT_MODEL",
+    os.environ.get("VOLCANO_VISION_MODEL", ""),
+)

@@ -1,0 +1,324 @@
+"""单元测试:进度/掌握度聚合模块(Phase 4) — services/progress
+
+覆盖:
+- 句子级:sentence_progress / pick_state / mastery_distribution / merge_distributions
+- 课/章/书逐级聚合:lesson_progress / chapter_progress / book_progress
+- 顶层聚合:aggregate_progress(三级结构 + 兼容字段)
+- 学习时长:sum_time_spent
+- 核心原则:同一输入可复现;按 skill_code 过滤后只反映该能力
+"""
+
+from __future__ import annotations
+
+from services.progress import (
+    aggregate_progress,
+    book_progress,
+    chapter_progress,
+    lesson_progress,
+    mastery_distribution,
+    merge_distributions,
+    pick_state,
+    sentence_progress,
+    sum_time_spent,
+)
+
+STATUS_LEARNED = "learned"
+STATUS_MASTERED = "mastered"
+STATUS_LEARNING = "learning"
+STATUS_REVIEW_DUE = "review_due"
+
+
+# ===========================================================================
+# 句子级
+# ===========================================================================
+
+
+class TestSentenceProgress:
+    def test_score_based(self):
+        assert sentence_progress({"mastery_score": 90}) == 0.9
+        assert sentence_progress({"mastery_score": 0}) == 0.0
+        assert sentence_progress({"mastery_score": 150}) == 1.0  # 封顶
+
+    def test_status_based(self):
+        assert sentence_progress({"status": STATUS_MASTERED}) == 1.0
+        assert sentence_progress({"status": STATUS_LEARNED}) == 1.0
+        assert sentence_progress({"status": STATUS_LEARNING}) == 0.5
+        assert sentence_progress({"status": STATUS_REVIEW_DUE}) == 0.5
+        assert sentence_progress({"status": "not_started"}) == 0.0
+
+    def test_mastery_score_takes_priority(self):
+        assert sentence_progress({"status": STATUS_LEARNED, "mastery_score": 30}) == 0.3
+
+    def test_empty(self):
+        assert sentence_progress(None) == 0.0
+        assert sentence_progress({}) == 0.0
+
+
+class TestPickState:
+    def test_single(self):
+        st = {"sentence_id": "s1", "skill_code": "translation", "status": STATUS_LEARNED}
+        assert pick_state([st]) == st
+
+    def test_with_skill_code_filter(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation", "mastery_score": 40},
+            {"sentence_id": "s1", "skill_code": "listening", "mastery_score": 90},
+        ]
+        picked = pick_state(states, skill_code="translation")
+        assert picked["skill_code"] == "translation"
+        assert pick_state(states, skill_code="speaking") is None
+
+    def test_optimistic_without_filter(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation", "mastery_score": 40},
+            {"sentence_id": "s1", "skill_code": "listening", "mastery_score": 90},
+        ]
+        assert pick_state(states)["mastery_score"] == 90  # 取 progress 最高
+
+    def test_empty(self):
+        assert pick_state([]) is None
+        assert pick_state(None) is None
+
+
+class TestMasteryDistribution:
+    def test_counts(self):
+        states = [
+            {"status": STATUS_LEARNED},
+            {"status": STATUS_MASTERED},
+            {"status": STATUS_LEARNING},
+            {"status": STATUS_LEARNED},
+            {},  # 未知状态不统计
+        ]
+        dist = mastery_distribution(states)
+        assert dist["learned"] == 2
+        assert dist["mastered"] == 1
+        assert dist["learning"] == 1
+        assert dist["total"] == 4
+        assert dist["learned_count"] == 2
+        assert dist["mastered_count"] == 1
+        assert dist["learned_pct"] == 0.5
+        assert dist["mastered_pct"] == 0.25
+
+    def test_empty(self):
+        dist = mastery_distribution([])
+        assert dist["total"] == 0
+        assert dist["learned_pct"] == 0.0
+        assert dist["mastered_pct"] == 0.0
+
+    def test_merge(self):
+        merged = merge_distributions(
+            [mastery_distribution([{"status": STATUS_LEARNED}]),
+             mastery_distribution([{"status": STATUS_MASTERED}, {"status": STATUS_LEARNED}])]
+        )
+        assert merged["learned"] == 2
+        assert merged["mastered"] == 1
+        assert merged["total"] == 3
+        assert merged["learned_pct"] == round(2 / 3, 4)
+
+
+# ===========================================================================
+# 课 / 章 / 书 逐级聚合
+# ===========================================================================
+
+
+class TestLessonProgress:
+    LESSON = {"lesson_id": "lesson_1", "title": "Lesson 1", "order": 1}
+
+    def test_mixed_learned_and_unlearned(self):
+        items = [
+            {"sentence_id": "s1", "state": {"status": STATUS_LEARNED, "mastery_score": 80}},
+            {"sentence_id": "s2", "state": {"status": STATUS_LEARNING, "mastery_score": 40}},
+            {"sentence_id": "s3", "state": None},  # 未学
+        ]
+        item = lesson_progress(self.LESSON, items)
+        assert item["lesson_id"] == "lesson_1"
+        assert item["total_sentence_count"] == 3
+        assert item["learned_sentence_count"] == 1
+        assert item["progress"] == round((0.8 + 0.4 + 0.0) / 3, 4)
+        assert item["mastery_distribution"]["total"] == 2  # 未学不计分布
+
+    def test_empty_lesson(self):
+        item = lesson_progress(self.LESSON, [])
+        assert item["progress"] == 0.0
+        assert item["total_sentence_count"] == 0
+
+
+class TestChapterProgress:
+    def test_weighted_by_sentences(self):
+        lesson_items = [
+            {"lesson_id": "l1", "total_sentence_count": 3, "learned_sentence_count": 3,
+             "progress": 1.0, "mastery_distribution": mastery_distribution(
+                 [{"status": STATUS_LEARNED} for _ in range(3)])},
+            {"lesson_id": "l2", "total_sentence_count": 1, "learned_sentence_count": 0,
+             "progress": 0.0, "mastery_distribution": mastery_distribution([])},
+        ]
+        item = chapter_progress({"chapter_id": "c1", "title": "Ch1", "order": 1}, lesson_items)
+        assert item["progress"] == 0.75  # (3*1.0 + 1*0.0)/4
+        assert item["total_sentence_count"] == 4
+        assert item["learned_sentence_count"] == 3
+        assert item["lesson_count"] == 2
+        assert item["mastery_distribution"]["learned"] == 3
+
+    def test_empty(self):
+        item = chapter_progress({"chapter_id": "c1"}, [])
+        assert item["progress"] == 0.0
+        assert item["lesson_count"] == 0
+
+
+class TestBookProgress:
+    def test_weighted(self):
+        chapters = [
+            {"total_sentence_count": 4, "learned_sentence_count": 4, "progress": 1.0,
+             "lesson_count": 2, "mastery_distribution": mastery_distribution(
+                 [{"status": STATUS_LEARNED} for _ in range(4)])},
+            {"total_sentence_count": 4, "learned_sentence_count": 0, "progress": 0.0,
+             "lesson_count": 1, "mastery_distribution": mastery_distribution([])},
+        ]
+        book = book_progress(chapters)
+        assert book["progress"] == 0.5
+        assert book["total_sentence_count"] == 8
+        assert book["learned_sentence_count"] == 4
+        assert book["chapter_count"] == 2
+        assert book["lesson_count"] == 3
+
+
+# ===========================================================================
+# 学习时长
+# ===========================================================================
+
+
+class TestSumTimeSpent:
+    def test_valid(self):
+        assert sum_time_spent([
+            {"time_spent": 120},
+            {"time_spent": 30.5},
+            {"time_spent": None},
+        ]) == 150.5
+
+    def test_dirty(self):
+        assert sum_time_spent([
+            {"time_spent": "abc"},
+            {"time_spent": -5},
+            {},
+        ]) == 0.0
+
+    def test_empty(self):
+        assert sum_time_spent([]) == 0.0
+
+
+# ===========================================================================
+# 顶层聚合
+# ===========================================================================
+
+
+class TestAggregateProgress:
+    SENTENCES = [
+        {"sentence_id": "s1", "lesson_id": "l1", "chapter_id": "c1"},
+        {"sentence_id": "s2", "lesson_id": "l1", "chapter_id": "c1"},
+        {"sentence_id": "s3", "lesson_id": "l2", "chapter_id": "c1"},
+        {"sentence_id": "s4", "lesson_id": "l2", "chapter_id": "c1"},
+    ]
+    LESSONS = [
+        {"lesson_id": "l1", "chapter_id": "c1", "title": "L1", "order": 1},
+        {"lesson_id": "l2", "chapter_id": "c1", "title": "L2", "order": 2},
+    ]
+    CHAPTERS = [
+        {"chapter_id": "c1", "textbook_id": "tb_1", "title": "C1", "order": 1},
+    ]
+
+    def test_full_aggregation(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+            {"sentence_id": "s2", "skill_code": "translation",
+             "status": STATUS_LEARNING, "mastery_score": 40},
+            {"sentence_id": "s3", "skill_code": "translation",
+             "status": STATUS_MASTERED, "mastery_score": 95},
+        ]
+        attempts = [{"time_spent": 120}, {"time_spent": 30}]
+        stats = aggregate_progress(
+            scholar_id="scholar_1",
+            textbook_id="tb_1",
+            states=states,
+            sentences=self.SENTENCES,
+            lessons=self.LESSONS,
+            chapters=self.CHAPTERS,
+            attempts=attempts,
+        )
+        summary = stats["summary"]
+        assert summary["textbook_progress"] == round((0.8 + 0.4 + 0.95 + 0.0) / 4, 4)
+        assert summary["learned_sentence_count"] == 2  # s1, s3
+        assert summary["total_sentence_count"] == 4
+        assert summary["chapter_count"] == 1
+        assert summary["lesson_count"] == 2
+        assert summary["total_time_spent"] == 150.0
+        assert summary["total_time_spent_display"] == "2分30秒"
+        assert summary["mastery_distribution"]["learned"] == 1
+        assert summary["mastery_distribution"]["mastered"] == 1
+
+        # 章级
+        assert stats["chapters"][0]["chapter_id"] == "c1"
+        assert stats["chapters"][0]["lessons"][0]["lesson_id"] == "l1"
+        assert stats["chapters"][0]["lessons"][0]["progress"] == 0.6
+
+        # 兼容字段
+        assert stats["units"][0]["unit_id"] == "l1"
+        assert len(stats["sentences"]) == 4
+        assert stats["sentences"][0]["learned"] is True
+
+    def test_skill_filter_only_reflects_that_skill(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+            {"sentence_id": "s1", "skill_code": "listening",
+             "status": STATUS_LEARNING, "mastery_score": 30},
+            {"sentence_id": "s2", "skill_code": "listening",
+             "status": STATUS_LEARNED, "mastery_score": 90},
+        ]
+        # 只算 translation: 只有 s1 有一条 translation 状态
+        stats = aggregate_progress(
+            scholar_id="scholar_1",
+            textbook_id="tb_1",
+            states=states,
+            sentences=self.SENTENCES,
+            lessons=self.LESSONS,
+            chapters=self.CHAPTERS,
+            skill_code="translation",
+        )
+        summary = stats["summary"]
+        assert stats["skill_code"] == "translation"
+        assert summary["learned_sentence_count"] == 1  # s1
+        assert summary["textbook_progress"] == round(0.8 / 4, 4)
+
+    def test_reproducible(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+            {"sentence_id": "s4", "skill_code": "translation",
+             "status": STATUS_LEARNING, "mastery_score": 50},
+        ]
+        attempts = [{"time_spent": 100}, {"time_spent": 20}]
+        a = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS, attempts=attempts,
+        )
+        b = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS, attempts=attempts,
+        )
+        assert a == b  # 同一输入两次调用完全一致
+
+    def test_no_states(self):
+        stats = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=[], sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS,
+        )
+        assert stats["summary"]["textbook_progress"] == 0.0
+        assert stats["summary"]["learned_sentence_count"] == 0
+        assert stats["summary"]["total_sentence_count"] == 4
+        # 未学习时每课仍返回条目(进度 0)
+        assert len(stats["chapters"]) == 1
+        assert len(stats["chapters"][0]["lessons"]) == 2

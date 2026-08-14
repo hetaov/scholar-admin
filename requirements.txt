@@ -5,3 +5,8 @@ pydantic==2.9.2
 openai>=1.0.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
+langgraph>=0.2.0
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

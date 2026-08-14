@@ -192,10 +192,19 @@ class CloudBaseNoSQLClient:
         logger.info(f"[DB] _run_command → table={table_name}, type={command_type}")
         resp = await self._request("RunCommands", payload)
         data_list: list = resp.get("Data", [])
+        logger.debug(
+            f"[DB] _run_command resp Data len={len(data_list)}, "
+            f"first type={type(data_list[0]).__name__ if data_list else 'None'}"
+        )
         if not data_list:
+            logger.warning(f"[DB] _run_command empty Data for {table_name}.{command_type}")
             return "{}"
         # 兼容 data_list[0] 已经是 dict/list 的情况
         first = data_list[0]
+        logger.debug(
+            f"[DB] _run_command first(type={type(first).__name__}) "
+            f"preview={repr(str(first)[:200])}"
+        )
         if isinstance(first, str):
             return first
         return json.dumps(first)
@@ -257,14 +266,70 @@ class CloudBaseNoSQLClient:
             cmd["projection"] = select
 
         raw = await self._run_command(collection, "QUERY", cmd)
+
+        # ── 逐层解析 + 日志，方便定位非法数据 ──
+        logger.debug(f"[db.query] step0 raw(type={type(raw).__name__}): {repr(raw[:300])}")
+
         records = json.loads(raw)
+        logger.debug(f"[db.query] step1 json.loads → type={type(records).__name__} len={getattr(records, '__len__', lambda: 0)()}")
+        if isinstance(records, list) and len(records) <= 3:
+            logger.debug(f"[db.query] step1 sample={repr(records)}")
+
+        # 双重 JSON 编码兜底：若解析后仍是字符串，再解一层
+        if isinstance(records, str):
+            records = json.loads(records)
+            logger.debug(f"[db.query] step2 double-decode → type={type(records).__name__}")
+
+        # 整个结果可能是 dict（单条文档被包成了对象）
+        if isinstance(records, dict):
+            # 关键日志：dict 的 key 列表，方便确认是 {records} 包裹还是裸文档
+            keys = list(records.keys())
+            logger.info(
+                f"[db.query] step3 dict keys={keys[:10]} "
+                f"sample_v={repr({k: type(v).__name__ for k, v in list(records.items())[:3]})}"
+            )
+            records = [records]
+
         # CloudBase NoSQL find 命令返回的文档是 JSON 字符串，需要二次解析
         if isinstance(records, list):
-            records = [
-                json.loads(r) if isinstance(r, str) else r for r in records
-            ]
+            decoded: list = []
+            for i, r in enumerate(records):
+                t = type(r).__name__
+                logger.debug(f"[db.query] step4 elem[{i}] type={t}")
+                if isinstance(r, str):
+                    try:
+                        r = json.loads(r)
+                        logger.debug(f"[db.query] step4 elem[{i}] decoded → {type(r).__name__}")
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"[db.query] step4 elem[{i}] JSON decode fail, keeping raw str")
+                decoded.append(r)
+            records = decoded
+        else:
+            logger.warning(f"[db.query] step4 unexpected type after decode: {type(records).__name__}")
+
         # 转换 Extended JSON 类型为 Python 原生类型
+        before_normalize_type = type(records).__name__
         records = self._normalize_types(records)
+        after_normalize_type = type(records).__name__
+        logger.debug(
+            f"[db.query] step5 _normalize_types: "
+            f"{before_normalize_type} → {after_normalize_type}"
+            f" len={getattr(records, '__len__', lambda: 0)()}"
+        )
+        # 诊断：如果类型变了，输出转换后的前 3 个元素类型
+        if isinstance(records, list) and len(records) > 0 and len(records) <= 3:
+            logger.debug(
+                f"[db.query] step5 sample_types={[(type(e).__name__, repr(str(e)[:60])) for e in records]}"
+            )
+
+        # 兜底：_normalize_types 不应破坏列表结构，但防御一下
+        if not isinstance(records, list):
+            logger.warning(
+                f"[db.query] step6 _normalize_types returned {type(records).__name__} instead of list, wrapping"
+            )
+            records = [records] if records else []
+
+        logger.info(f"[db.query] done → records_count={len(records)}")
         return {
             "records": records,
             "total": len(records),
@@ -325,7 +390,39 @@ class CloudBaseNoSQLClient:
 
         cmd = {"update": collection, "updates": [update_entry]}
         raw = await self._run_command(collection, "UPDATE", cmd)
+        logger.debug(
+            f"[db.update] raw(type={type(raw).__name__}) "
+            f"preview={repr(raw[:300] if isinstance(raw, str) else str(raw)[:300])}"
+        )
         result = json.loads(raw)
+        logger.debug(
+            f"[db.update] after json.loads → type={type(result).__name__} "
+            f"value={repr(result)[:300]}"
+        )
+        # CloudBase 某些版本将 update 结果包在单元素列表中
+        if isinstance(result, list):
+            logger.debug(f"[db.update] result is list(len={len(result)}), unwrap")
+            result = result[0] if result else {}
+        # 兜底：CloudBase 可能直接返回纯字符串（如 "ok"）
+        if isinstance(result, str):
+            logger.warning(
+                f"[db.update] result is str '{result}', treating as success"
+            )
+            return {
+                "matched_count": 1,
+                "modified_count": 1,
+                "upserted_id": None,
+            }
+        if not isinstance(result, dict):
+            logger.error(
+                f"[db.update] unexpected type={type(result).__name__}, "
+                f"value={repr(result)[:300]}"
+            )
+            return {
+                "matched_count": 0,
+                "modified_count": 0,
+                "upserted_id": None,
+            }
         return {
             "matched_count": result.get("n", 0),
             "modified_count": result.get("nModified", 0),
@@ -347,7 +444,29 @@ class CloudBaseNoSQLClient:
         delete_limit = 0 if multi else 1  # MongoDB: 0 = 全部匹配, 1 = 仅一条
         cmd = {"delete": collection, "deletes": [{"q": where, "limit": delete_limit}]}
         raw = await self._run_command(collection, "DELETE", cmd)
+        logger.debug(
+            f"[db.delete] raw(type={type(raw).__name__}) "
+            f"preview={repr(raw[:300] if isinstance(raw, str) else str(raw)[:300])}"
+        )
         result = json.loads(raw)
+        logger.debug(
+            f"[db.delete] after json.loads → type={type(result).__name__} "
+            f"value={repr(result)[:300]}"
+        )
+        if isinstance(result, list):
+            logger.debug(f"[db.delete] result is list(len={len(result)}), unwrap")
+            result = result[0] if result else {}
+        if isinstance(result, str):
+            logger.warning(
+                f"[db.delete] result is str '{result}', treating as success"
+            )
+            return {"deleted_count": 1}
+        if not isinstance(result, dict):
+            logger.error(
+                f"[db.delete] unexpected type={type(result).__name__}, "
+                f"value={repr(result)[:300]}"
+            )
+            return {"deleted_count": 0}
         return {"deleted_count": result.get("n", 0)}
 
     # ==================== 文档统计 ====================
