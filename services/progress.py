@@ -219,8 +219,15 @@ def aggregate_progress(
     chapters: list[dict],
     skill_code: str | None = None,
     attempts: list[dict] | None = None,
+    detail: str = "full",
 ) -> dict:
-    """聚合全书进度：输出 book 级 summary + chapters（内嵌 lessons）+ 兼容 units/sentences。"""
+    """聚合全书进度。
+
+    detail 控制返回粒度（默认 full，保持旧契约不变）：
+    - "full":    summary + chapters + 平铺 lessons/units/sentences
+    - "chapter": summary + chapters（含内嵌 lessons），省略平铺字段（教材总览推荐）
+    - "summary": 仅 summary（教材列表场景，省去层级组装）
+    """
     # 1. 句子级：把 skill_state 按 sentence_id 分组并 pick
     states_by_sentence: dict[str, list[dict]] = {}
     for st in states:
@@ -259,23 +266,6 @@ def aggregate_progress(
     book = book_progress(chapter_items)
     total_time_spent = sum_time_spent(attempts or [])
 
-    # 5. 兼容字段：units(≈lessons) / sentences(含 progress/learned)
-    flat_lessons = [
-        {**l, "unit_id": l["lesson_id"], "unit_title": l["lesson_title"]}
-        for l in lesson_items_by_id.values()
-    ]
-    flat_sentences = [
-        {
-            "sentence_id": s.get("sentence_id"),
-            "lesson_id": s.get("lesson_id"),
-            "chapter_id": s.get("chapter_id"),
-            "learned": bool(sentence_state.get(s.get("sentence_id"))),
-            "progress": sentence_progress(sentence_state.get(s.get("sentence_id"))),
-            "skill_code": (sentence_state.get(s.get("sentence_id")) or {}).get("skill_code"),
-        }
-        for s in sentences
-    ]
-
     summary = {
         "total_time_spent": total_time_spent,
         "total_time_spent_display": format_duration(int(total_time_spent)),
@@ -290,13 +280,32 @@ def aggregate_progress(
         ),
     }
 
-    return {
+    result: dict = {
         "scholar_id": scholar_id,
         "text_book_id": textbook_id,
         "skill_code": skill_code,
         "summary": summary,
-        "chapters": chapter_items,
-        "lessons": flat_lessons,
-        "units": flat_lessons,
-        "sentences": flat_sentences,
     }
+
+    # 5. 平铺兼容字段：units(≈lessons) / sentences(含 progress/learned)
+    if detail in ("full", "chapter"):
+        result["chapters"] = chapter_items
+    if detail == "full":
+        flat_lessons = [
+            {**l, "unit_id": l["lesson_id"], "unit_title": l["lesson_title"]}
+            for l in lesson_items_by_id.values()
+        ]
+        result["lessons"] = flat_lessons
+        result["units"] = flat_lessons
+        result["sentences"] = [
+            {
+                "sentence_id": s.get("sentence_id"),
+                "lesson_id": s.get("lesson_id"),
+                "chapter_id": s.get("chapter_id"),
+                "learned": bool(sentence_state.get(s.get("sentence_id"))),
+                "progress": sentence_progress(sentence_state.get(s.get("sentence_id"))),
+                "skill_code": (sentence_state.get(s.get("sentence_id")) or {}).get("skill_code"),
+            }
+            for s in sentences
+        ]
+    return result

@@ -70,7 +70,8 @@ async def get_tracking_stats(data: dict):
     {
       "scholar_id": "scholar_xxx",   // 必填
       "textbook_id": "tb_xxx",       // 教材（兼容别名 text_book_id）
-      "skill_code": "translation"    // 可选, 按能力维度独立聚合
+      "skill_code": "translation",   // 可选, 按能力维度独立聚合
+      "detail": "chapter"            // 可选: full(默认,全量) / chapter(仅summary+章节树) / summary(仅汇总)
     }
 
     兼容入口（Phase 2/3，客户端上报，仍可用）：
@@ -120,6 +121,9 @@ async def get_tracking_stats(data: dict):
     if not textbook_id:
         raise HTTPException(status_code=400, detail="缺少参数 text_book_id")
     skill_code = str(data.get("skill_code") or "").strip() or None
+    detail = str(data.get("detail") or "full").strip() or "full"
+    if detail not in ("full", "chapter", "summary"):
+        detail = "full"
 
     try:
         db = get_db()
@@ -128,6 +132,7 @@ async def get_tracking_stats(data: dict):
             scholar_id=scholar_id,
             textbook_id=textbook_id,
             skill_code=skill_code,
+            detail=detail,
         )
         logger.info(
             f"[tracking/stats] scholar_id={scholar_id}, textbook_id={textbook_id}, "
@@ -149,11 +154,13 @@ async def _aggregate_progress_for_book(
     scholar_id: str,
     textbook_id: str,
     skill_code: str | None = None,
+    detail: str = "full",
 ) -> dict:
     """服务端聚合一本教材的进度（Phase 4 逐级聚合，stats 与 books 列表复用）。
 
     数据源：skill_state（可选按 skill_code 过滤）+ 内容层级（chapter → lesson →
     sentence_v2）+ study_attempt 时长，全部经 aggregate_progress 逐级加权。
+    detail 透传 aggregate_progress："full" / "chapter" / "summary"。
     """
     where: dict = {"scholar_id": scholar_id}
     if skill_code:
@@ -205,6 +212,7 @@ async def _aggregate_progress_for_book(
         chapters=chapters,
         skill_code=skill_code,
         attempts=attempts,
+        detail=detail,
     )
 
 
@@ -380,6 +388,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
                 scholar_id=scholar_id,
                 textbook_id=textbook_id,
                 skill_code=skill_code,
+                detail="summary",
             )
             enriched.append(
                 {
