@@ -225,7 +225,8 @@ def aggregate_progress(
 
     detail 控制返回粒度（默认 full，保持旧契约不变）：
     - "full":    summary + chapters + 平铺 lessons/units/sentences
-    - "chapter": summary + chapters（含内嵌 lessons），省略平铺字段（教材总览推荐）
+    - "chapter": summary + chapters（含内嵌 lessons），省略平铺字段
+    - "overview": summary + 章级列表（不含课明细），教材总览推荐
     - "summary": 仅 summary（教材列表场景，省去层级组装）
     """
     # 1. 句子级：把 skill_state 按 sentence_id 分组并 pick
@@ -290,6 +291,10 @@ def aggregate_progress(
     # 5. 平铺兼容字段：units(≈lessons) / sentences(含 progress/learned)
     if detail in ("full", "chapter"):
         result["chapters"] = chapter_items
+    elif detail == "overview":
+        result["chapters"] = [
+            {k: v for k, v in c.items() if k != "lessons"} for c in chapter_items
+        ]
     if detail == "full":
         flat_lessons = [
             {**l, "unit_id": l["lesson_id"], "unit_title": l["lesson_title"]}

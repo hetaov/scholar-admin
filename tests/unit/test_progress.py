@@ -310,6 +310,31 @@ class TestAggregateProgress:
         )
         assert a == b  # 同一输入两次调用完全一致
 
+    def test_detail_overview_strips_lessons(self):
+        states = [
+            {"sentence_id": "s1", "skill_code": "translation",
+             "status": STATUS_LEARNED, "mastery_score": 80},
+        ]
+        overview = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS,
+            detail="overview",
+        )
+        # 章级存在且不含 lessons，summary 与 full 一致
+        assert "chapters" in overview
+        assert "lessons" not in overview and "units" not in overview
+        assert "sentences" not in overview
+        assert "lessons" not in overview["chapters"][0]
+        assert overview["chapters"][0]["chapter_id"] == "c1"
+        assert overview["chapters"][0]["lesson_count"] == 2
+        full = aggregate_progress(
+            scholar_id="scholar_1", textbook_id="tb_1",
+            states=states, sentences=self.SENTENCES,
+            lessons=self.LESSONS, chapters=self.CHAPTERS,
+        )
+        assert overview["summary"] == full["summary"]
+
     def test_no_states(self):
         stats = aggregate_progress(
             scholar_id="scholar_1", textbook_id="tb_1",
