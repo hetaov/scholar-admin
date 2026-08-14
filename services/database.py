@@ -226,6 +226,26 @@ class CloudBaseNoSQLClient:
         collections = await self.list_collections()
         return any(c.get("TableName") == collection_name for c in collections)
 
+    async def create_collection(self, collection_name: str) -> dict:
+        """创建集合（表）
+
+        对应腾讯云 CloudBase 的 CreateTable 接口。
+        """
+        payload = {"EnvId": self.env_id, "TableName": collection_name}
+        resp = await self._request("CreateTable", payload)
+        logger.info(f"[DB] create_collection 完成 → {collection_name}")
+        return resp
+
+    async def delete_collection(self, collection_name: str) -> dict:
+        """删除集合（表），会删除其中的全部文档，请谨慎使用。
+
+        对应腾讯云 CloudBase 的 DeleteTable 接口。
+        """
+        payload = {"EnvId": self.env_id, "TableName": collection_name}
+        resp = await self._request("DeleteTable", payload)
+        logger.info(f"[DB] delete_collection 完成 → {collection_name}")
+        return resp
+
     # ==================== 文档查询 ====================
 
     async def query(

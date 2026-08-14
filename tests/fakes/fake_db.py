@@ -93,6 +93,26 @@ class FakeDB:
         else:
             self._data.clear()
 
+    # ---------------- 集合管理 ----------------
+
+    async def list_collections(self) -> list[dict]:
+        """列出所有集合，结构对齐真实客户端的 DescribeTables 返回。"""
+        return [{"TableName": name} for name in self._data]
+
+    async def check_collection(self, collection_name: str) -> bool:
+        """检查集合是否存在。"""
+        return collection_name in self._data
+
+    async def create_collection(self, collection_name: str) -> dict:
+        """创建集合（表）。"""
+        self._data.setdefault(collection_name, [])
+        return {"created": True}
+
+    async def delete_collection(self, collection_name: str) -> dict:
+        """删除集合（表），会清除其中全部文档。"""
+        self._data.pop(collection_name, None)
+        return {"deleted": True}
+
     # ---------------- 查询 ----------------
 
     async def query(

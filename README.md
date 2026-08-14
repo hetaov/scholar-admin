@@ -27,6 +27,10 @@ scholar-admin/
 **前置要求：Python 3.11+**
 
 ```bash
+# 创建并激活虚拟环境（强烈推荐，避免与系统 Python 混用）
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
 # 安装依赖
 pip install -r requirements.txt
 
@@ -40,6 +44,12 @@ python main.py
 # 或指定端口
 PORT=3000 python main.py
 ```
+
+> **注意：所有脚本（`main.py`、`pytest`、`services/migrate_all.py` 等）都必须在 `.venv` 环境下运行。**
+> 若未激活虚拟环境，`python` 可能解析到系统 Python（如 conda 的 Python 3.14），
+> 其依赖与项目不一致，会导致 `.env` 中的腾讯云密钥加载异常，请求被判定为无效凭证
+> （报 `AuthFailure.SignatureFailure` 等）。可用 `which python` 确认是否指向 `.venv/bin/python`；
+> 也可以不激活，直接使用 `.venv/bin/python -m services.migrate_all check`。
 
 启动后访问 http://localhost:8080/docs 查看 Swagger API 文档。
 

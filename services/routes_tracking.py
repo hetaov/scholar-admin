@@ -14,6 +14,7 @@ from services.models_content import (
     get_chapters,
     get_lessons,
     get_sentences_by_lesson,
+    get_textbook_v2,
 )
 from services.models_scholar_book import (
     list_scholar_books,
@@ -321,6 +322,22 @@ async def add_textbook(data: dict):
 # ==================== 学者 × 教材 关联（Phase 5） ====================
 
 
+async def _fetch_textbook_title(db, textbook_id: str) -> str | None:
+    """按 textbook_id 查书名：优先 textbook_v2，迁移过渡期回退旧表 textbook。"""
+    tb = await get_textbook_v2(db, textbook_id)
+    if tb and tb.get("title"):
+        return tb.get("title")
+    old = await db.query(
+        collection="textbook",
+        where={"_id": textbook_id},
+        limit=1,
+    )
+    old_records = old.get("records", [])
+    if old_records and old_records[0].get("title"):
+        return old_records[0].get("title")
+    return None
+
+
 @router.get("/scholar/{scholar_id}/books")
 async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
     """我的教材列表 — 该学者全部 scholar_book 关联（含教材级进度）。
@@ -337,6 +354,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
         "books": [
           {
             "textbook_id": "...",
+            "title": "教材名称",
             "current_chapter_id": "...",
             "current_lesson_id": "...",
             "last_studied_at": 123,
@@ -356,6 +374,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
             textbook_id = book.get("textbook_id")
             if not textbook_id:
                 continue
+            title = await _fetch_textbook_title(db, textbook_id)
             stats = await _aggregate_progress_for_book(
                 db,
                 scholar_id=scholar_id,
@@ -365,6 +384,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
             enriched.append(
                 {
                     "textbook_id": textbook_id,
+                    "title": title,
                     "current_chapter_id": book.get("current_chapter_id"),
                     "current_lesson_id": book.get("current_lesson_id"),
                     "last_studied_at": book.get("last_studied_at"),

@@ -195,9 +195,11 @@ async def _migrate_one_textbook(db, tb_id: str, stats: dict) -> None:
 
 
 async def _migrate_orphan_units(db, stats: dict) -> None:
-    """处理无教材归属的孤立 unit(text_book_id 为空), 归属到全局 orphan chapter。"""
+    """处理无教材归属的孤立 unit(text_book_id 为空), 归属到全局 orphan chapter。
+
+    幂等: 重跑时复用已存在的 orphan chapter(textbook_id 为空), 不新建空壳章。
+    """
     now = int(time.time())
-    orphan_chapter_id = None
 
     units_result = await db.query(
         collection=OLD_UNIT,
@@ -208,11 +210,18 @@ async def _migrate_orphan_units(db, stats: dict) -> None:
     if not orphan_units:
         return
 
-    orphan_chapter_id = f"chapter_orphan_{uuid.uuid4().hex[:8]}"
-    await db.insert(collection=CHAPTER, data=build_chapter_doc(
-        orphan_chapter_id, "", 1, "Orphan Chapter", len(orphan_units), now,
-    ))
-    stats["chapter_created"] += 1
+    # 复用已存在的 orphan chapter, 避免重跑产生重复空壳章
+    existing = await db.query(collection=CHAPTER, where={"textbook_id": ""}, limit=1)
+    records = existing.get("records", [])
+    if records:
+        orphan_chapter_id = records[0]["chapter_id"]
+        stats["chapter_skipped"] += 1
+    else:
+        orphan_chapter_id = f"chapter_orphan_{uuid.uuid4().hex[:8]}"
+        await db.insert(collection=CHAPTER, data=build_chapter_doc(
+            orphan_chapter_id, "", 1, "Orphan Chapter", len(orphan_units), now,
+        ))
+        stats["chapter_created"] += 1
 
     for u in orphan_units:
         lesson_id = u.get("unit_id", "")
