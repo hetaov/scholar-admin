@@ -769,28 +769,36 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
 
         # 2. 句子明细（含 text / translation）
         sentences = await get_sentences_by_lesson(db, lesson_id)
+        sentence_ids = [s.get("sentence_id") for s in sentences if s.get("sentence_id")]
 
-        # 3. 该学者全部 skill_state（含 next_review_at，分页拉取）
-        states = await query_all_pages(
-            db,
-            collection=SKILL_STATE,
-            where={"scholar_id": scholar_id},
-            select={
-                "scholar_id": 1,
-                "sentence_id": 1,
-                "skill_code": 1,
-                "status": 1,
-                "mastery_score": 1,
-                "attempt_count": 1,
-                "next_review_at": 1,
-            },
-        )
+        # 3. 该课句子的 skill_state：按 sentence_id $in 分批查询（每批 200），
+        #    仅拉取必要数据，替代原「该学者全部状态」全量分页拉取，
+        #    查询次数与本课句子数挂钩、与学者总学习量解耦
+        states: list[dict] = []
+        if sentence_ids:
+            for i in range(0, len(sentence_ids), 200):
+                states.extend(await query_all_pages(
+                    db,
+                    collection=SKILL_STATE,
+                    where={
+                        "scholar_id": scholar_id,
+                        "sentence_id": {"$in": sentence_ids[i:i + 200]},
+                    },
+                    select={
+                        "scholar_id": 1,
+                        "sentence_id": 1,
+                        "skill_code": 1,
+                        "status": 1,
+                        "mastery_score": 1,
+                        "attempt_count": 1,
+                        "next_review_at": 1,
+                    },
+                ))
         states_by_sentence: dict[str, list[dict]] = {}
         for st in states:
             states_by_sentence.setdefault(st.get("sentence_id"), []).append(st)
 
         # 4. 句子列表 + 已学计数（乐观聚合：无指定能力取 progress 最高者）
-        sentence_ids = [s.get("sentence_id") for s in sentences]
         picked_by_sentence = {
             sid: pick_state(states_by_sentence.get(sid, [])) for sid in sentence_ids
         }

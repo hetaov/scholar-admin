@@ -177,6 +177,54 @@ class TestGetLessonSentences:
         )
         assert resp.status_code == 404
 
+    def test_states_query_scoped_to_lesson(self, monkeypatch, fake_db):
+        """性能回归：states 按本课句子 $in 过滤，查询固定 4 次，与学者总状态量解耦。
+
+        防退化点：skill_state 必须按 sentence_id $in 查询（仅本课句子），
+        不允许全量分页拉取该学者全部状态（1100+ 条无关状态会触发 2 次分页）。
+        优化后章节明细查询恒为 4 次：chapter + lesson + sentence_v2 + skill_state。
+        """
+        _seed_content(fake_db)
+        _seed_states(fake_db)
+        # 大量无关状态（其它句子/教材），验证不会触发全量分页拉取
+        for i in range(1100):
+            fake_db.add("skill_state", {
+                "scholar_id": "scholar_1",
+                "sentence_id": f"other_{i}",
+                "skill_code": "reading",
+                "status": "learned",
+                "mastery_score": 50,
+                "attempt_count": 1,
+            })
+
+        calls: list[dict] = []
+        orig_query = fake_db.query
+
+        async def counting_query(*args, **kwargs):
+            calls.append({"collection": kwargs.get("collection"), "where": kwargs.get("where")})
+            return await orig_query(*args, **kwargs)
+
+        fake_db.query = counting_query
+        client = _client(monkeypatch, fake_db)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/sentences",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["lesson_id"] == "l1"
+        # 输出不受无关状态影响：仍只返回本课 2 句、s1 learned
+        assert [s["sentence_id"] for s in data["sentences"]] == ["s1", "s2"]
+        assert data["summary"]["total_sentence_count"] == 2
+        assert data["summary"]["learned_sentence_count"] == 1
+
+        state_calls = [c for c in calls if c["collection"] == "skill_state"]
+        assert len(state_calls) == 1  # 一课 2 句 → $in 一次查回
+        assert state_calls[0]["where"]["scholar_id"] == "scholar_1"
+        assert set(state_calls[0]["where"]["sentence_id"]["$in"]) == {"s1", "s2"}
+        # 总查询固定：chapter + lesson + sentence_v2 + skill_state = 4
+        assert len(calls) == 4
+
 
 class TestQueryCountOptimization:
     """性能回归：接口 2 查询次数固定（内容 3 次 + states 1 次 + attempts 1 次 = 5 次）。
