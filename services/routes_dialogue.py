@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
 from services.dependencies import get_db
-from services.dialogue import match_dialogue
+from services.dialogue import load_learned_sentences, match_dialogue
+from services.dialogue_task import (
+    cleanup_expired,
+    create_task,
+    get_task,
+    recover_stale_tasks,
+    run_dialogue_task,
+)
 
 logger = logging.getLogger("scholar-admin.routes.dialogue")
 router = APIRouter(tags=["对话匹配"])
@@ -46,45 +55,14 @@ async def match_dialogue_endpoint(data: dict):
     try:
         db = get_db()
 
-        # 1. 从 learning_mastery_tracking 获取该学者的所有 sentence_id
-        tracking_result = await db.query(
-            collection="learning_mastery_tracking",
-            where={"scholar_id": scholar_id},
-        )
-        records = tracking_result.get("records", [])
-        if not records:
+        # 1. 加载该学者全部已学语句
+        learned_sentences = await load_learned_sentences(db, scholar_id)
+        if not learned_sentences:
             return {"success": False, "error": "该学者暂无已学语句", "data": None}
 
-        sentence_ids = list(
-            {r.get("sentence_id") for r in records if r.get("sentence_id")}
-        )
-        if not sentence_ids:
-            return {"success": False, "error": "未找到已学语句 ID", "data": None}
+        logger.info(f'[match] scholar={scholar_id}, 输入="{input_sentence}"')
 
-        # 2. 从 sentence 集合获取语句文本（分批查询，$in 上限 100 条）
-        learned_sentences: list[dict] = []
-        for i in range(0, len(sentence_ids), 100):
-            batch = sentence_ids[i : i + 100]
-            sentence_result = await db.query(
-                collection="sentence",
-                where={"sentence_id": {"$in": batch}},
-                limit=100,
-            )
-            for rec in sentence_result.get("records", []):
-                learned_sentences.append(
-                    {
-                        "text": rec.get("text", ""),
-                        "translation": rec.get("translation", ""),
-                    }
-                )
-
-        logger.info(
-            f"[match] scholar={scholar_id}, "
-            f"已学={len(sentence_ids)} 句, "
-            f'输入="{input_sentence}"'
-        )
-
-        # 3. 执行 LangGraph 工作流
+        # 2. 执行 LangGraph 工作流
         result = await match_dialogue(
             input_sentence=input_sentence,
             scholar_id=scholar_id,
@@ -98,3 +76,105 @@ async def match_dialogue_endpoint(data: dict):
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail=f"对话匹配失败: {str(e)}")
+
+
+@router.post("/match/dialogue/task")
+async def create_match_dialogue_task(data: dict):
+    """提交异步对话匹配任务 — 毫秒级返回 taskId，匹配在后台执行
+
+    请求体（与同步接口一致）：
+    {
+      "scholarId": "6d758f346a6daee000859c332ed11089",
+      "sentence": "I go to school by bus every day."
+    }
+
+    返回：
+    {
+      "success": true,
+      "data": { "taskId": "dt_xxx", "status": "pending" }
+    }
+    """
+    scholar_id = data.get("scholarId", "")
+    input_sentence = data.get("sentence", "")
+
+    if not scholar_id:
+        raise HTTPException(status_code=400, detail="缺少参数 scholarId")
+    if not input_sentence:
+        raise HTTPException(status_code=400, detail="缺少参数 sentence")
+
+    try:
+        db = get_db()
+        task = await create_task(
+            db, scholar_id=scholar_id, sentence=input_sentence
+        )
+        # 后台执行，不阻塞当前请求（毫秒级返回）
+        asyncio.create_task(
+            run_dialogue_task(task["task_id"], scholar_id, input_sentence)
+        )
+        logger.info(
+            f"[match] 异步任务已提交 → task_id={task['task_id']}, scholar={scholar_id}"
+        )
+        return {
+            "success": True,
+            "data": {
+                "taskId": task["task_id"],
+                "status": task["status"],
+            },
+        }
+    except Exception as e:
+        logger.error(
+            f"[match] 任务提交异常: scholar_id={scholar_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"任务提交失败: {str(e)}")
+
+
+@router.get("/match/dialogue/task/{task_id}")
+async def get_match_dialogue_task(task_id: str):
+    """查询异步对话匹配任务状态 — pending/processing/success/failed
+
+    返回：
+    {
+      "success": true,
+      "data": {
+        "taskId": "dt_xxx",
+        "status": "success",
+        "result": { "type": "qa", "statement": "...", "question": "...", "source": "matched|generated" },
+        "is_question": false,
+        "error": null
+      }
+    }
+
+    任务不存在或已过期返回 404。
+    """
+    try:
+        db = get_db()
+        # 惰性巡检（Phase 4）：顺带恢复超时卡死任务 + 清理过期任务。
+        # 均为单条 DB 命令，无命中时 0 成本；不引入定时器/独立 worker。
+        await recover_stale_tasks(db)
+        await cleanup_expired(db)
+        task = await get_task(db, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        # TTL 过滤：expires_at 已过期的按不存在处理
+        now_ms = int(time.time() * 1000)
+        if task.get("expires_at", 0) <= now_ms:
+            raise HTTPException(status_code=404, detail="任务已过期")
+        return {
+            "success": True,
+            "data": {
+                "taskId": task["task_id"],
+                "status": task["status"],
+                "result": task.get("result"),
+                "is_question": task.get("is_question"),
+                "error": task.get("error"),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"[match] 任务查询异常: task_id={task_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"任务查询失败: {str(e)}")

@@ -312,6 +312,50 @@ def build_graph() -> StateGraph:
 # ---------------------------------------------------------------------------
 
 
+async def load_learned_sentences(db, scholar_id: str) -> list[dict]:
+    """加载该学者全部已学语句（文本 + 翻译）
+
+    从 `learning_mastery_tracking` 取 sentence_id（去重），再到 `sentence`
+    集合分批查询（$in 上限 100 条/批）。
+
+    Returns:
+        [{"text": str, "translation": str}, ...]；无已学语句时返回 []
+        （旧接口的"该学者暂无已学语句"由调用方依据空列表判断）
+    """
+    tracking_result = await db.query(
+        collection="learning_mastery_tracking",
+        where={"scholar_id": scholar_id},
+    )
+    records = tracking_result.get("records", [])
+    if not records:
+        return []
+
+    sentence_ids = list(
+        {r.get("sentence_id") for r in records if r.get("sentence_id")}
+    )
+    if not sentence_ids:
+        return []
+
+    learned_sentences: list[dict] = []
+    for i in range(0, len(sentence_ids), 100):
+        batch = sentence_ids[i : i + 100]
+        sentence_result = await db.query(
+            collection="sentence",
+            where={"sentence_id": {"$in": batch}},
+            limit=100,
+        )
+        for rec in sentence_result.get("records", []):
+            learned_sentences.append(
+                {
+                    "text": rec.get("text", ""),
+                    "translation": rec.get("translation", ""),
+                }
+            )
+
+    logger.info(f"[match] scholar={scholar_id}, 已学={len(sentence_ids)} 句")
+    return learned_sentences
+
+
 async def match_dialogue(
     input_sentence: str,
     scholar_id: str,
