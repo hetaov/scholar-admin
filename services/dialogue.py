@@ -1,10 +1,8 @@
 """对话匹配服务 — 基于 LangGraph + 火山方舟模型的问答匹配工作流
 
 工作流：
-1. classify_input — 判断输入句是陈述句还是疑问句
-2. match_from_learned — 从已学语句中寻找匹配的问答对
-3. check_natural_qa — 判断问答对是否符合日常用语习惯
-4. generate — 不符合时，针对输入生成合适的问句/答句
+1. classify_and_match — 单次调用完成：判断输入句类型 + 从已学语句匹配问答对 + 判断是否符合日常用语习惯
+2. generate — 无匹配或不符合习惯时，针对输入生成合适的问句/答句
 """
 from __future__ import annotations
 
@@ -31,10 +29,14 @@ _client: OpenAI | None = None
 
 
 def _get_client() -> OpenAI:
-    """获取火山方舟 OpenAI 兼容客户端"""
+    """获取火山方舟 OpenAI 兼容客户端（单次调用最长 60 秒，避免无限挂起）"""
     global _client
     if _client is None:
-        _client = OpenAI(api_key=VOLCANO_API_KEY, base_url=VOLCANO_BASE_URL)
+        _client = OpenAI(
+            api_key=VOLCANO_API_KEY,
+            base_url=VOLCANO_BASE_URL,
+            timeout=60.0,
+        )
     return _client
 
 
@@ -102,120 +104,107 @@ def _parse_json_response(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def node_classify_input(state: DialogueState) -> dict:
-    """节点 1：判断输入句是陈述句还是疑问句"""
+def _recall_candidates(
+    input_sentence: str,
+    learned: list[dict],
+    top_n: int = 10,
+) -> list[dict]:
+    """轻量相似度召回：从已学语句中选出最相似的 top_n 句，压缩 LLM 输入规模。
+
+    已学语句可能上百句，全部塞进提示词会导致模型推理极慢（实测单次 30s+）。
+    先用字符相似度召回候选，再交给模型选择，可显著降低单次调用耗时。
+    """
+    from difflib import SequenceMatcher
+
+    def _score(text: str) -> float:
+        a, b = input_sentence.strip().lower(), text.strip().lower()
+        if not a or not b:
+            return 0.0
+        return SequenceMatcher(None, a, b).ratio()
+
+    ranked = sorted(
+        (s for s in learned if s.get("text")),
+        key=lambda s: _score(s["text"]),
+        reverse=True,
+    )
+    return ranked[:top_n]
+
+
+async def node_classify_and_match(state: DialogueState) -> dict:
+    """节点 1：合并 分类 + 匹配 + 自然度判断 为单次 LLM 调用
+
+    原工作流需要 3 次串行调用（classify → match → check_natural），实测耗时
+    30~60 秒，超过小程序 callContainer 的 15 秒超时上限。合并后匹配成功场景
+    仅需 1 次调用，配合相似度召回压缩输入，可把整条链路控制在 15 秒内。
+    """
     input_sentence = state["input_sentence"]
 
-    prompt = f"""请判断以下英文句子是"陈述句(statement)"还是"疑问句(question)"。
+    if not state.get("learned_sentences"):
+        logger.warning("[match] 已学语句列表为空，跳过匹配")
+        return {
+            "is_question": input_sentence.strip().endswith("?"),
+            "matched_text": None,
+            "is_natural": False,
+        }
 
-句子："{input_sentence}"
+    # 1. 相似度召回 top 10 候选，压缩 LLM 输入规模
+    candidates = _recall_candidates(input_sentence, state["learned_sentences"], top_n=10)
+    sentence_texts = [s.get("text", "") for s in candidates if s.get("text")]
+    sentences_joined = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(sentence_texts))
 
-请只返回一个 JSON 对象，不要有任何其他文字：
-{{"type": "statement"}} 或 {{"type": "question"}}"""
+    if not sentences_joined:
+        return {
+            "is_question": input_sentence.strip().endswith("?"),
+            "matched_text": None,
+            "is_natural": False,
+        }
+
+    prompt = f"""请完成以下三项任务，只返回一个 JSON 对象（不要有任何其他文字）：
+
+1. 判断输入英文句是"陈述句(statement)"还是"疑问句(question)"。
+2. 从下方已学语句中选出最合适的一句作为配对句：若输入是疑问句，找一句合适的陈述句作为回答；若输入是陈述句，找一句合适的问句（以 what/where/when/who/how/why/is/are/do/does/did/can 等开头）作为对该陈述句的提问。
+3. 判断该配对是否符合日常英语交流习惯（自然、合理）。
+
+输入句子："{input_sentence}"
+
+已学语句（候选）：
+{sentences_joined}
+
+返回格式：
+{{"type": "question"|"statement", "matched_index": <数字，找不到则填 null>, "natural": true|false, "reason": "简短理由"}}"""
 
     try:
         reply = call_volcano(prompt)
         result = _parse_json_response(reply)
         is_question = result.get("type") == "question"
-        logger.info(f"[classify] 输入句类型: {'疑问句' if is_question else '陈述句'}")
-        return {"is_question": is_question}
-    except Exception as e:
-        logger.error(f"[classify] 分类失败: {e}")
-        # 兜底：按末尾问号判断
-        stripped = input_sentence.strip()
-        is_question = stripped.endswith("?")
-        return {"is_question": is_question}
-
-
-async def node_match_from_learned(state: DialogueState) -> dict:
-    """节点 2：从已学语句中匹配最合适的问答对"""
-    input_sentence = state["input_sentence"]
-    is_question = state["is_question"]
-    learned = state["learned_sentences"]
-
-    if not learned:
-        logger.warning("[match] 已学语句列表为空，跳过匹配")
-        return {"matched_text": None}
-
-    # 构建已学语句列表（仅保留 text，最多 50 条）
-    sentence_texts = [s.get("text", "") for s in learned[:50]]
-    sentences_joined = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(sentence_texts) if t)
-
-    if not sentences_joined:
-        return {"matched_text": None}
-
-    if is_question:
-        instruction = (
-            "输入是一个英文疑问句，请从以下已学语句中找到**最合适的一句陈述句作为回答**。"
-        )
-    else:
-        instruction = (
-            "输入是一个英文陈述句，请从以下已学语句中找到**最合适的一句可以作为该陈述句的提问**"
-            "（应是一个以 what、where、when、who、how、why、is、are、do、does、did、can 等开头的特殊疑问句或一般疑问句）。"
-        )
-
-    prompt = f"""{instruction}
-
-输入句子："{input_sentence}"
-
-已学语句列表：
-{sentences_joined}
-
-请只返回一个 JSON 对象，不要有任何其他文字。如果找不到合适的匹配，返回 null：
-{{"matched_index": <数字>}}  或  {{"matched_index": null}}"""
-
-    try:
-        reply = call_volcano(prompt)
-        result = _parse_json_response(reply)
         idx = result.get("matched_index")
+        matched_text = None
         if idx and 1 <= idx <= len(sentence_texts):
-            matched = sentence_texts[idx - 1]
-            logger.info(f"[match] 匹配到第 {idx} 句: {matched[:50]}...")
-            return {"matched_text": matched}
-        logger.info("[match] 未找到合适匹配")
-        return {"matched_text": None}
-    except Exception as e:
-        logger.error(f"[match] 匹配失败: {e}")
-        return {"matched_text": None}
-
-
-async def node_check_natural_qa(state: DialogueState) -> dict:
-    """节点 3：判断问答对是否符合日常用语问答习惯"""
-    input_sentence = state["input_sentence"]
-    matched_text = state["matched_text"]
-    is_question = state["is_question"]
-
-    if not matched_text:
-        logger.info("[natural] 无匹配句，跳过自然度检查")
-        return {"is_natural": False}
-
-    if is_question:
-        question, answer = input_sentence, matched_text
-    else:
-        answer, question = input_sentence, matched_text
-
-    prompt = f"""请判断以下英文问答对是否符合日常英语对话习惯（自然、合理、匹配）。
-
-问句："{question}"
-答句："{answer}"
-
-请只返回一个 JSON 对象，不要有任何其他文字：
-{{"natural": true, "reason": "简短理由"}} 或 {{"natural": false, "reason": "简短理由"}}"""
-
-    try:
-        reply = call_volcano(prompt)
-        result = _parse_json_response(reply)
-        is_natural = result.get("natural", False)
+            matched_text = sentence_texts[idx - 1]
+            logger.info(f"[match] 匹配到第 {idx} 句: {matched_text[:50]}...")
+        else:
+            logger.info("[match] 未找到合适匹配")
+        is_natural = bool(result.get("natural", False)) if matched_text else False
+        logger.info(f"[classify] 输入句类型: {'疑问句' if is_question else '陈述句'}")
         logger.info(f"[natural] 结果={is_natural}, 理由={result.get('reason', '')}")
-        return {"is_natural": is_natural}
+        return {
+            "is_question": is_question,
+            "matched_text": matched_text,
+            "is_natural": is_natural,
+        }
     except Exception as e:
-        logger.error(f"[natural] 判断失败: {e}")
-        # 兜底：有匹配就认为自然
-        return {"is_natural": True}
+        logger.error(f"[classify/match] 分类、匹配或自然度判断失败: {e}")
+        # 兜底：按末尾问号判断类型，走生成
+        stripped = input_sentence.strip()
+        return {
+            "is_question": stripped.endswith("?"),
+            "matched_text": None,
+            "is_natural": False,
+        }
 
 
 async def node_generate(state: DialogueState) -> dict:
-    """节点 4：针对输入句生成合适的问句或答句"""
+    """节点 2：针对输入句生成合适的问句或答句"""
     input_sentence = state["input_sentence"]
     is_question = state["is_question"]
 
@@ -246,7 +235,7 @@ async def node_generate(state: DialogueState) -> dict:
 
 
 async def node_format_output(state: DialogueState) -> dict:
-    """节点 5：格式化最终输出"""
+    """节点 3：格式化最终输出"""
     is_question = state["is_question"]
     input_sentence = state["input_sentence"]
     is_natural = state["is_natural"]
@@ -276,15 +265,8 @@ async def node_format_output(state: DialogueState) -> dict:
 
 
 def router_after_match(state: DialogueState) -> str:
-    """匹配后：有匹配句 → 检查自然度，无匹配 → 直接生成"""
-    if state.get("matched_text"):
-        return "check_natural_qa"
-    return "generate"
-
-
-def router_after_check(state: DialogueState) -> str:
-    """自然度检查后：自然 → 输出，不自然 → 生成"""
-    if state.get("is_natural"):
+    """分类匹配后：有匹配句且自然 → 直接输出；否则 → 生成"""
+    if state.get("matched_text") and state.get("is_natural"):
         return "format_output"
     return "generate"
 
@@ -299,32 +281,17 @@ def build_graph() -> StateGraph:
     workflow = StateGraph(DialogueState)
 
     # 注册节点
-    workflow.add_node("classify_input", node_classify_input)
-    workflow.add_node("match_from_learned", node_match_from_learned)
-    workflow.add_node("check_natural_qa", node_check_natural_qa)
+    workflow.add_node("classify_and_match", node_classify_and_match)
     workflow.add_node("generate", node_generate)
     workflow.add_node("format_output", node_format_output)
 
     # 入口
-    workflow.set_entry_point("classify_input")
+    workflow.set_entry_point("classify_and_match")
 
-    # 分类 → 匹配
-    workflow.add_edge("classify_input", "match_from_learned")
-
-    # 匹配 → 自然度检查 / 直接生成
+    # 分类匹配 → 直接输出 / 生成
     workflow.add_conditional_edges(
-        "match_from_learned",
+        "classify_and_match",
         router_after_match,
-        {
-            "check_natural_qa": "check_natural_qa",
-            "generate": "generate",
-        },
-    )
-
-    # 自然度检查 → 输出 / 生成
-    workflow.add_conditional_edges(
-        "check_natural_qa",
-        router_after_check,
         {
             "format_output": "format_output",
             "generate": "generate",
