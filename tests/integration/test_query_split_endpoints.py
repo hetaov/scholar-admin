@@ -89,6 +89,22 @@ class TestGetTextbookLessons:
         # listening: l1 共 2 句, 仅 s1 有记录(learning) → 1/(3*2)
         assert prog["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
 
+    def test_lesson_skills_include_conversation(self, monkeypatch, fake_db):
+        """每课 progress.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
+        _seed_content(fake_db)
+        _seed_states(fake_db)
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s1",
+            "skill_code": "conversation", "status": "learned",
+            "mastery_score": 70, "attempt_count": 1,
+        })
+        client = _client(monkeypatch, fake_db)
+        resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
+        assert resp.status_code == 200
+        l1 = resp.json()["data"]["lessons"][0]
+        # l1 共 2 句，仅 s1 有 conversation(learned) → 2/(3*2)
+        assert l1["progress"]["skills"]["conversation"] == pytest.approx(0.3333, abs=1e-4)
+
     def test_no_states(self, monkeypatch, fake_db):
         _seed_content(fake_db)
         client = _client(monkeypatch, fake_db)
@@ -147,6 +163,31 @@ class TestGetLessonSentences:
         assert summary["skills"]["translation"] == pytest.approx(0.5)  # s1=learned, s2=learning
         # listening: 该课 2 句仅 s1 有记录(learning) → 1/(3*2)
         assert summary["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
+
+    def test_summary_skills_include_conversation(self, monkeypatch, fake_db):
+        """概览 summary.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
+        _seed_content(fake_db)
+        _seed_states(fake_db)
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s1",
+            "skill_code": "conversation", "status": "learned",
+            "mastery_score": 70, "attempt_count": 1,
+        })
+        client = _client(monkeypatch, fake_db)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/sentences",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        # 句子级 skills：conversation 全量输出（learned → 2）
+        s1 = data["sentences"][0]
+        assert s1["skills"]["conversation"] == 2
+        # 概览 summary.skills：对话能力纳入聚合（s1 learned → 2/(3*2)）
+        assert data["summary"]["skills"]["conversation"] == pytest.approx(0.3333, abs=1e-4)
+        # s1 仍为 learned，其余统计不受影响
+        assert s1["status"] == 2
+        assert data["summary"]["learned_sentence_count"] == 1
 
     def test_no_states(self, monkeypatch, fake_db):
         _seed_content(fake_db)

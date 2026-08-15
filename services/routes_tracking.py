@@ -538,7 +538,10 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
 # ==================== 查询接口拆分（tracking/stats → 按页拆分，Phase 6） ====================
 
 
-_SKILL_CODES = ("translation", "listening", "reading", "speaking")
+# 能力全集：含对话能力（前端 SKILL_ORDER 四能力 = translation/conversation/listening/speaking，
+# 另有内部 reading）。接口 2 每课 skills 与接口 3 summary.skills 均按此聚合，保证概览与
+# 句子级 skills（全量 skill_state）口径一致，避免「列表项有对话、概览缺对话」。
+_SKILL_CODES = ("translation", "conversation", "listening", "reading", "speaking")
 
 
 def _to_iso(timestamp) -> str | None:
