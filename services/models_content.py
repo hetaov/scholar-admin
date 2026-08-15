@@ -39,17 +39,6 @@ async def get_chapters(db, textbook_id: str, limit: int = 1000) -> list[dict]:
     return result.get("records", [])
 
 
-async def get_lessons(db, chapter_id: str, limit: int = 1000) -> list[dict]:
-    """按章节查课, 按 order 升序。"""
-    result = await db.query(
-        collection=LESSON,
-        where={"chapter_id": chapter_id},
-        order=[{"field": "order", "direction": "asc"}],
-        limit=limit,
-    )
-    return result.get("records", [])
-
-
 async def get_lessons_by_textbook(db, textbook_id: str, limit: int = 5000) -> list[dict]:
     """按教材查全部课（无章教材: lesson 直接挂 book 下, chapter_id 为空）, 按 order 升序。"""
     result = await db.query(
@@ -70,6 +59,84 @@ async def get_sentences_by_lesson(db, lesson_id: str, limit: int = 1000) -> list
         limit=limit,
     )
     return result.get("records", [])
+
+
+async def query_all_pages(
+    db,
+    *,
+    collection: str,
+    where: dict | None = None,
+    order: list[dict] | None = None,
+    select: dict | None = None,
+    page_size: int = 1000,
+) -> list[dict]:
+    """分页拉取集合全部匹配文档（规避单次 limit 上限）。
+
+    供批量 $in 查询与全量学习数据拉取复用，避免 N+1 逐条查询。
+    """
+    records: list[dict] = []
+    offset = 0
+    while True:
+        page = await db.query(
+            collection=collection,
+            where=where,
+            order=order,
+            select=select,
+            offset=offset,
+            limit=page_size,
+        )
+        recs = page.get("records", [])
+        records.extend(recs)
+        if len(recs) < page_size:
+            break
+        offset += page_size
+    return records
+
+
+async def get_lessons_by_chapter_ids(
+    db,
+    chapter_ids: list[str],
+    page_size: int = 1000,
+) -> list[dict]:
+    """按多个章节批量查课（$in，每批 200 防 $in 数组过大），按 order 升序。
+
+    替代逐章 get_lessons 的 N+1 查询。
+    """
+    if not chapter_ids:
+        return []
+    records: list[dict] = []
+    for i in range(0, len(chapter_ids), 200):
+        records.extend(await query_all_pages(
+            db,
+            collection=LESSON,
+            where={"chapter_id": {"$in": chapter_ids[i:i + 200]}},
+            order=[{"field": "order", "direction": "asc"}],
+            page_size=page_size,
+        ))
+    return records
+
+
+async def get_sentences_by_lesson_ids(
+    db,
+    lesson_ids: list[str],
+    page_size: int = 1000,
+) -> list[dict]:
+    """按多个课批量查句子（$in，每批 200 防 $in 数组过大），按 order 升序。
+
+    替代逐课 get_sentences_by_lesson 的 N+1 查询。
+    """
+    if not lesson_ids:
+        return []
+    records: list[dict] = []
+    for i in range(0, len(lesson_ids), 200):
+        records.extend(await query_all_pages(
+            db,
+            collection=SENTENCE_V2,
+            where={"lesson_id": {"$in": lesson_ids[i:i + 200]}},
+            order=[{"field": "order", "direction": "asc"}],
+            page_size=page_size,
+        ))
+    return records
 
 
 async def get_textbook_v2(db, textbook_id: str) -> dict | None:

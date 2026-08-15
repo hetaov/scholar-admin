@@ -166,6 +166,66 @@ class TestGetBooks:
         assert by_id == {"tb_1": "l1", "tb_2": "l2"}
 
 
+class TestBooksQueryCount:
+    """性能回归：教材列表接口学习数据只拉一次、内容按书批量加载。
+
+    防退化点：
+    - skill_state / study_attempt 是学者级数据，必须全量仅查询一次后在内存内
+      按教材句子集合过滤，不允许每本书重复拉取（原实现每本走一次
+      _aggregate_progress_for_book，各查 1 次 states + 1 次 attempts）；
+    - 书名必须批量 $in（新表 + 旧表回退各 1 次），不允许逐本查询。
+    查询次数公式：1(books) + 3×N(内容) + 2(书名) + 1(states) + 1(attempts)。
+    优化前本场景（2 本教材）需 1 + 2×(2 书名 + 5 聚合) = 15 次，优化后为 11 次。
+    """
+
+    def test_learning_data_fetched_once(self, monkeypatch, fake_db):
+        # 两本教材内容：tb_1 复用 _seed_content；tb_2 手动预置
+        _seed_content(fake_db)
+        fake_db.add("chapter", {"chapter_id": "c2", "textbook_id": "tb_2", "title": "Ch2", "order": 1})
+        fake_db.add("lesson", {"lesson_id": "l2", "chapter_id": "c2", "title": "L2", "order": 1})
+        for i, sid in enumerate(("s3", "s4"), 1):
+            fake_db.add(
+                "sentence_v2",
+                {"sentence_id": sid, "lesson_id": "l2", "chapter_id": "c2",
+                 "textbook_id": "tb_2", "order": i},
+            )
+        # 仅 tb_1 有学习记录
+        fake_db.add(
+            "skill_state",
+            {"scholar_id": "s1", "sentence_id": "s1", "skill_code": "translation",
+             "status": "learned", "mastery_score": 80, "attempt_count": 2},
+        )
+
+        client = _tracking_client(monkeypatch, fake_db)
+        client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
+        client.put("/scholar/s1/books/tb_2/position", json={"current_lesson_id": "l2"})
+
+        calls: list[str] = []
+        orig_query = fake_db.query
+
+        async def counting_query(*args, **kwargs):
+            calls.append(kwargs.get("collection", args[0] if args else "?"))
+            return await orig_query(*args, **kwargs)
+
+        fake_db.query = counting_query
+        resp = client.get("/scholar/s1/books")
+        assert resp.status_code == 200
+        books = resp.json()["data"]["books"]
+        assert {b["textbook_id"] for b in books} == {"tb_1", "tb_2"}
+
+        # 学者级学习数据只查一次
+        assert calls.count("skill_state") == 1
+        assert calls.count("study_attempt") == 1
+        # 总查询 = 1(books) + 3×2(内容) + 2(书名: 新表+旧表回退) + 1 + 1 = 11
+        assert len(calls) == 11
+        # 每本教材的 summary 独立：只有 tb_1 有 1 句 learned
+        by_id = {b["textbook_id"]: b["summary"] for b in books}
+        assert by_id["tb_1"]["total_sentence_count"] == 2
+        assert by_id["tb_1"]["learned_sentence_count"] == 1
+        assert by_id["tb_2"]["total_sentence_count"] == 2
+        assert by_id["tb_2"]["learned_sentence_count"] == 0
+
+
 class TestSessionSettlementWriteback:
     @pytest.mark.asyncio
     async def test_end_session_writeback_time_and_stamp(self, monkeypatch, fake_db):

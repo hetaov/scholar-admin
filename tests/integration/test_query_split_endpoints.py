@@ -176,3 +176,65 @@ class TestGetLessonSentences:
             params={"scholar_id": "scholar_1"},
         )
         assert resp.status_code == 404
+
+
+class TestQueryCountOptimization:
+    """性能回归：接口 2 查询次数固定（内容 3 次 + states 1 次 + attempts 1 次 = 5 次）。
+
+    防退化点：
+    - 内容层级必须批量 $in（chapters / lessons / sentences 各 1 次），
+      不允许逐章 get_lessons / 逐课 get_sentences_by_lesson 的 N+1；
+    - base + 4 能力聚合必须内存内过滤复用同一份数据，不允许重复触库。
+    优化前本场景（1 章 2 课）需 5×(1+1+1+2+1) = 30 次，优化后恒为 5 次。
+    """
+
+    def test_query_count_is_constant(self, monkeypatch, fake_db):
+        _seed_content(fake_db)
+        _seed_states(fake_db)
+
+        calls = {"n": 0}
+        orig_query = fake_db.query
+
+        async def counting_query(*args, **kwargs):
+            calls["n"] += 1
+            return await orig_query(*args, **kwargs)
+
+        fake_db.query = counting_query
+        client = _client(monkeypatch, fake_db)
+
+        resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
+        assert resp.status_code == 200
+        assert calls["n"] == 5  # chapters + lessons + sentences + states + attempts
+
+    def test_query_count_scales_with_lessons_only_via_batch(self, monkeypatch, fake_db):
+        """扩大教材规模（3 章 6 课 12 句）查询次数仍为 5，验证批量 $in 生效。"""
+        for i in range(1, 4):
+            fake_db.add("chapter", {
+                "chapter_id": f"c{i}", "textbook_id": "tb_1", "title": f"Ch{i}", "order": i,
+            })
+        for i in range(1, 7):
+            ch = f"c{(i - 1) // 2 + 1}"
+            fake_db.add("lesson", {
+                "lesson_id": f"l{i}", "chapter_id": ch, "title": f"L{i}", "order": i,
+            })
+        for i in range(1, 13):
+            fake_db.add("sentence_v2", {
+                "sentence_id": f"s{i}", "lesson_id": f"l{(i - 1) // 2 + 1}",
+                "chapter_id": f"c{(i - 1) // 4 + 1}", "textbook_id": "tb_1",
+                "text": f"Text s{i}", "translation": f"译s{i}", "order": i,
+            })
+
+        calls = {"n": 0}
+        orig_query = fake_db.query
+
+        async def counting_query(*args, **kwargs):
+            calls["n"] += 1
+            return await orig_query(*args, **kwargs)
+
+        fake_db.query = counting_query
+        client = _client(monkeypatch, fake_db)
+
+        resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
+        assert resp.status_code == 200
+        assert len(resp.json()["data"]["lessons"]) == 6
+        assert calls["n"] == 5

@@ -16,11 +16,13 @@ from services.models_learning import (
     STATUS_MASTERED,
 )
 from services.models_content import (
+    TEXTBOOK_V2,
     get_chapters,
-    get_lessons,
+    get_lessons_by_chapter_ids,
     get_lessons_by_textbook,
     get_sentences_by_lesson,
-    get_textbook_v2,
+    get_sentences_by_lesson_ids,
+    query_all_pages,
 )
 from services.models_scholar_book import (
     list_scholar_books,
@@ -175,6 +177,32 @@ async def get_tracking_stats(data: dict):
         raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
 
 
+async def _load_book_content(
+    db,
+    textbook_id: str,
+    *,
+    with_sentences: bool = True,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """一次拉取教材内容层级（chapters / lessons / sentences），批量 $in 避免 N+1。
+
+    有章教材：chapter → lesson → sentence_v2；无章教材：book → lesson → sentence_v2。
+    返回 (chapters, lessons, sentences)。
+    """
+    chapters = await get_chapters(db, textbook_id)
+    if chapters:
+        lessons = await get_lessons_by_chapter_ids(
+            db, [c.get("chapter_id") for c in chapters]
+        )
+    else:
+        lessons = await get_lessons_by_textbook(db, textbook_id)
+    sentences: list[dict] = []
+    if with_sentences:
+        sentences = await get_sentences_by_lesson_ids(
+            db, [le.get("lesson_id") for le in lessons]
+        )
+    return chapters, lessons, sentences
+
+
 async def _aggregate_progress_for_book(
     db,
     *,
@@ -182,6 +210,7 @@ async def _aggregate_progress_for_book(
     textbook_id: str,
     skill_code: str | None = None,
     detail: str = "full",
+    content: tuple[list[dict], list[dict], list[dict]] | None = None,
 ) -> dict:
     """服务端聚合一本教材的进度（Phase 4 逐级聚合，stats 与 books 列表复用）。
 
@@ -190,16 +219,18 @@ async def _aggregate_progress_for_book(
     aggregate_progress 逐级加权。
     detail 透传 aggregate_progress："full" / "chapter" / "overview" / "summary"；
     无章教材在 chapter/overview 粒度下 chapters 为空、由 lessons 返回课级进度。
+    content 可传入已加载的 (chapters, lessons, sentences)，供多次聚合复用，
+    避免内容层级被重复查询。
     """
     where: dict = {"scholar_id": scholar_id}
     if skill_code:
         where["skill_code"] = skill_code
 
-    # 1. 拉学者 skill_state
-    state_page = await db.query(
+    # 1. 拉学者 skill_state（分页，规避单次 limit 上限）
+    states = await query_all_pages(
+        db,
         collection=SKILL_STATE,
         where=where,
-        limit=10000,
         select={
             "scholar_id": 1,
             "sentence_id": 1,
@@ -209,31 +240,20 @@ async def _aggregate_progress_for_book(
             "attempt_count": 1,
         },
     )
-    states = state_page.get("records", [])
 
-    # 2. 拉该教材内容层级（chapter → lesson → sentence_v2；无章教材则 book → lesson）
-    chapters = await get_chapters(db, textbook_id)
-    lessons: list[dict] = []
-    sentences: list[dict] = []
-    if chapters:
-        for ch in chapters:
-            ch_lessons = await get_lessons(db, ch.get("chapter_id"))
-            lessons.extend(ch_lessons)
+    # 2. 内容层级：优先复用已加载数据，否则批量加载
+    if content is not None:
+        chapters, lessons, sentences = content
     else:
-        lessons = await get_lessons_by_textbook(db, textbook_id)
-    for le in lessons:
-        sentences.extend(
-            await get_sentences_by_lesson(db, le.get("lesson_id"))
-        )
+        chapters, lessons, sentences = await _load_book_content(db, textbook_id)
 
-    # 3. 学习时长：study_attempt.time_spent 聚合
-    attempt_page = await db.query(
+    # 3. 学习时长：study_attempt.time_spent 聚合（分页）
+    attempts = await query_all_pages(
+        db,
         collection=STUDY_ATTEMPT,
         where=where,
-        limit=10000,
         select={"sentence_id": 1, "skill_code": 1, "time_spent": 1},
     )
-    attempts = attempt_page.get("records", [])
 
     return aggregate_progress(
         scholar_id=scholar_id,
@@ -362,29 +382,45 @@ async def add_textbook(data: dict):
 # ==================== 学者 × 教材 关联（Phase 5） ====================
 
 
-async def _fetch_textbook_title(db, textbook_id: str) -> str | None:
-    """按 textbook_id 查书名：优先 textbook_v2，迁移过渡期回退旧表 textbook。"""
-    tb = await get_textbook_v2(db, textbook_id)
-    if tb and tb.get("title"):
-        return tb.get("title")
-    old = await db.query(
-        collection="textbook",
-        where={"_id": textbook_id},
-        limit=1,
+async def _fetch_textbook_titles(db, textbook_ids: list[str]) -> dict[str, str]:
+    """批量查书名：textbook_v2 一次 $in 取回，迁移过渡期对缺失项一次回退旧表。
+
+    替代逐本 _fetch_textbook_title 的 N+1 查询。返回 {textbook_id: title}。
+    """
+    ids = [t for t in textbook_ids if t]
+    titles: dict[str, str] = {}
+    if not ids:
+        return titles
+    recs = await query_all_pages(
+        db,
+        collection=TEXTBOOK_V2,
+        where={"_id": {"$in": ids}},
+        select={"_id": 1, "title": 1},
     )
-    old_records = old.get("records", [])
-    if old_records and old_records[0].get("title"):
-        return old_records[0].get("title")
-    return None
+    for r in recs:
+        if r.get("title"):
+            titles[r.get("_id")] = r.get("title")
+    missing = [tid for tid in ids if tid not in titles]
+    if missing:
+        old = await db.query(
+            collection="textbook",
+            where={"_id": {"$in": missing}},
+            select={"_id": 1, "title": 1},
+        )
+        for r in old.get("records", []):
+            if r.get("title"):
+                titles[r.get("_id")] = r.get("title")
+    return titles
 
 
 @router.get("/scholar/{scholar_id}/books")
 async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
     """我的教材列表 — 该学者全部 scholar_book 关联（含教材级进度）。
 
-    对每本教材复用服务端聚合（skill_state + 内容层级 + study_attempt），
-    返回每本书的断点（current_chapter_id / current_lesson_id）、
-    累计时长（total_time_spent）与进度摘要（summary）。
+    内容层级按书批量 $in 加载一次，学习数据（skill_state / study_attempt）全量
+    仅查询一次后按各教材句子集合在内存内过滤聚合，书名一次 $in 批量取回；
+    查询次数 = 1(books) + 2(states/attempts) + 3×N(内容) + 2(书名)，与学者级
+    数据规模无关，避免每本书重复拉取 states/attempts 导致的 N+1 慢查询。
 
     返回：
     {
@@ -409,23 +445,76 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
     try:
         db = get_db()
         books = await list_scholar_books(db, scholar_id=scholar_id)
+        textbook_ids = [b.get("textbook_id") for b in books if b.get("textbook_id")]
+
+        # 1. 内容层级：每本书批量加载一次（chapters + lessons + sentences），
+        #    并记录各教材的句子集合用于内存过滤学习数据
+        content_by_book: dict[str, tuple[list[dict], list[dict], list[dict]]] = {}
+        sentence_ids_by_book: dict[str, set[str]] = {}
+        for tid in textbook_ids:
+            chapters, lessons, sentences = await _load_book_content(db, tid)
+            content_by_book[tid] = (chapters, lessons, sentences)
+            sentence_ids_by_book[tid] = {
+                s.get("sentence_id") for s in sentences if s.get("sentence_id")
+            }
+
+        # 2. 书名批量 $in（一次新表 + 一次旧表回退）
+        titles = await _fetch_textbook_titles(db, textbook_ids)
+
+        # 3. 学习数据仅拉一次，按各教材句子集合在内存内过滤聚合，
+        #    不再每本书重复查询学者级 states/attempts
+        states = await query_all_pages(
+            db,
+            collection=SKILL_STATE,
+            where={"scholar_id": scholar_id},
+            select={
+                "scholar_id": 1,
+                "sentence_id": 1,
+                "skill_code": 1,
+                "status": 1,
+                "mastery_score": 1,
+                "attempt_count": 1,
+            },
+        )
+        attempts = await query_all_pages(
+            db,
+            collection=STUDY_ATTEMPT,
+            where={"scholar_id": scholar_id},
+            select={"sentence_id": 1, "skill_code": 1, "time_spent": 1},
+        )
+
         enriched = []
         for book in books:
             textbook_id = book.get("textbook_id")
             if not textbook_id:
                 continue
-            title = await _fetch_textbook_title(db, textbook_id)
-            stats = await _aggregate_progress_for_book(
-                db,
+            sids = sentence_ids_by_book.get(textbook_id, set())
+            book_states = [
+                st for st in states
+                if st.get("sentence_id") in sids
+                and (skill_code is None or st.get("skill_code") == skill_code)
+            ]
+            book_attempts = [
+                a for a in attempts
+                if a.get("sentence_id") in sids
+                and (skill_code is None or a.get("skill_code") == skill_code)
+            ]
+            chapters, lessons, sentences = content_by_book[textbook_id]
+            stats = aggregate_progress(
                 scholar_id=scholar_id,
                 textbook_id=textbook_id,
+                states=book_states,
+                sentences=sentences,
+                lessons=lessons,
+                chapters=chapters,
                 skill_code=skill_code,
+                attempts=book_attempts,
                 detail="summary",
             )
             enriched.append(
                 {
                     "textbook_id": textbook_id,
-                    "title": title,
+                    "title": titles.get(textbook_id),
                     "current_chapter_id": book.get("current_chapter_id"),
                     "current_lesson_id": book.get("current_lesson_id"),
                     "last_studied_at": book.get("last_studied_at"),
@@ -466,14 +555,8 @@ def _to_iso(timestamp) -> str | None:
 
 
 async def _find_lesson_by_id(db, textbook_id: str, lesson_id: str) -> dict | None:
-    """按教材 + lesson_id 找内容层级 lesson（有章教材经 chapters → lessons；无章直接按教材）。"""
-    chapters = await get_chapters(db, textbook_id)
-    lessons: list[dict] = []
-    if chapters:
-        for ch in chapters:
-            lessons.extend(await get_lessons(db, ch.get("chapter_id")))
-    else:
-        lessons = await get_lessons_by_textbook(db, textbook_id)
+    """按教材 + lesson_id 找内容层级 lesson（批量加载，有章经 chapters → lessons；无章直接按教材）。"""
+    _, lessons, _ = await _load_book_content(db, textbook_id, with_sentences=False)
     for le in lessons:
         if le.get("lesson_id") == lesson_id:
             return le
@@ -484,8 +567,9 @@ async def _find_lesson_by_id(db, textbook_id: str, lesson_id: str) -> dict | Non
 async def get_textbook_lessons(scholar_id: str, textbook_id: str, skill_code: str | None = None):
     """教材详情（lesson 列表 + 顶部三概念）— 查询接口拆分后（接口 2）。
 
-    对教材复用服务端聚合（_aggregate_progress_for_book, detail="lesson"），
-    并按能力独立聚合构造每课 skills（口径与 summary.mastery 一致）。
+    内容层级与学习数据仅查询一次（批量 $in + 分页），按能力在内存内独立
+    聚合构造每课 skills（口径与 summary.mastery 一致），避免 N+1 逐章/逐课
+    查询与 5 次重复聚合触库导致的慢查询。
 
     返回：
     {
@@ -514,24 +598,75 @@ async def get_textbook_lessons(scholar_id: str, textbook_id: str, skill_code: st
     """
     try:
         db = get_db()
-        base = await _aggregate_progress_for_book(
+        # 一次拉取内容层级 + 全量学习数据，内存内按能力过滤聚合，
+        # 将原 5 次重复聚合查询（含逐章/逐课 N+1）压缩为固定 5 次查询，
+        # 查询次数与教材规模无关。
+        chapters, lessons, sentences = await _load_book_content(db, textbook_id)
+        states = await query_all_pages(
             db,
-            scholar_id=scholar_id,
-            textbook_id=textbook_id,
-            skill_code=skill_code,
-            detail="lesson",
+            collection=SKILL_STATE,
+            where={"scholar_id": scholar_id},
+            select={
+                "scholar_id": 1,
+                "sentence_id": 1,
+                "skill_code": 1,
+                "status": 1,
+                "mastery_score": 1,
+                "attempt_count": 1,
+            },
         )
-        summary_raw = base.get("summary", {})
+        attempts = await query_all_pages(
+            db,
+            collection=STUDY_ATTEMPT,
+            where={"scholar_id": scholar_id},
+            select={"sentence_id": 1, "skill_code": 1, "time_spent": 1},
+        )
 
-        # 各能力独立聚合（复用同一聚合路径），构造每课 skills
-        skill_views: dict[str, dict[str, dict]] = {}
-        for code in _SKILL_CODES:
-            view = await _aggregate_progress_for_book(
-                db,
+        def _aggregate(
+            states_subset: list[dict],
+            code: str | None,
+            attempts_subset: list[dict],
+        ) -> dict:
+            return aggregate_progress(
                 scholar_id=scholar_id,
                 textbook_id=textbook_id,
+                states=states_subset,
+                sentences=sentences,
+                lessons=lessons,
+                chapters=chapters,
                 skill_code=code,
+                attempts=attempts_subset,
                 detail="lesson",
+            )
+
+        # base：按请求 skill_code 过滤（None 时使用全部学习数据）
+        base_states = [
+            st for st in states
+            if skill_code is None or st.get("skill_code") == skill_code
+        ]
+        base_attempts = [
+            a for a in attempts
+            if skill_code is None or a.get("skill_code") == skill_code
+        ]
+        base = _aggregate(base_states, skill_code, base_attempts)
+        summary_raw = base.get("summary", {})
+
+        # 各能力独立聚合：仅内存内按 skill_code 过滤，不再重复触库
+        states_by_skill: dict[str, list[dict]] = {c: [] for c in _SKILL_CODES}
+        for st in states:
+            c = st.get("skill_code")
+            if c in states_by_skill:
+                states_by_skill[c].append(st)
+        attempts_by_skill: dict[str, list[dict]] = {c: [] for c in _SKILL_CODES}
+        for a in attempts:
+            c = a.get("skill_code")
+            if c in attempts_by_skill:
+                attempts_by_skill[c].append(a)
+
+        skill_views: dict[str, dict[str, dict]] = {}
+        for code in _SKILL_CODES:
+            view = _aggregate(
+                states_by_skill[code], code, attempts_by_skill[code]
             )
             skill_views[code] = {
                 l.get("lesson_id"): l for l in view.get("lessons", [])
@@ -635,11 +770,11 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
         # 2. 句子明细（含 text / translation）
         sentences = await get_sentences_by_lesson(db, lesson_id)
 
-        # 3. 该学者全部 skill_state（含 next_review_at）
-        state_page = await db.query(
+        # 3. 该学者全部 skill_state（含 next_review_at，分页拉取）
+        states = await query_all_pages(
+            db,
             collection=SKILL_STATE,
             where={"scholar_id": scholar_id},
-            limit=10000,
             select={
                 "scholar_id": 1,
                 "sentence_id": 1,
@@ -650,7 +785,6 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
                 "next_review_at": 1,
             },
         )
-        states = state_page.get("records", [])
         states_by_sentence: dict[str, list[dict]] = {}
         for st in states:
             states_by_sentence.setdefault(st.get("sentence_id"), []).append(st)
