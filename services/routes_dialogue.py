@@ -93,5 +93,8 @@ async def match_dialogue_endpoint(data: dict):
         return result
 
     except Exception as e:
-        logger.error(f"[match] 对话匹配异常: {e}")
+        logger.error(
+            f"[match] 对话匹配异常: scholar_id={scholar_id}, input={input_sentence!r}: {e}",
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=f"对话匹配失败: {str(e)}")

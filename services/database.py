@@ -143,35 +143,42 @@ class CloudBaseNoSQLClient:
     async def _request(self, action: str, payload: dict) -> dict:
         """发起腾讯云 API 请求"""
         headers = self._sign_tc3(action, payload)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                self.endpoint,
-                json=payload,
-                headers=headers,
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                )
+                raw_result = resp.json()
+                logger.debug(f"[DB] {action} 原始响应类型={type(raw_result).__name__}, "
+                             f"内容={json.dumps(raw_result, ensure_ascii=False)[:500]}")
+        except httpx.TimeoutException as e:
+            logger.error(f"[DB] {action} 请求超时(30s): {e}", exc_info=True)
+            raise
+        except Exception as e:
+            logger.error(f"[DB] {action} 请求异常: {type(e).__name__}: {e}", exc_info=True)
+            raise
+
+        # 兼容 list 类型的响应（某些 CloudBase API 返回包装数组，甚至嵌套数组）
+        result = raw_result
+        while isinstance(result, list):
+            if not result:
+                raise Exception(f"API 返回空列表 (action={action})")
+            result = result[0]
+        if not isinstance(result, dict):
+            raise Exception(
+                f"API 返回非预期类型 {type(result).__name__} (action={action})"
             )
-            raw_result = resp.json()
-            logger.debug(f"[DB] {action} 原始响应类型={type(raw_result).__name__}, "
-                         f"内容={json.dumps(raw_result, ensure_ascii=False)[:500]}")
 
-            # 兼容 list 类型的响应（某些 CloudBase API 返回包装数组，甚至嵌套数组）
-            result = raw_result
-            while isinstance(result, list):
-                if not result:
-                    raise Exception(f"API 返回空列表 (action={action})")
-                result = result[0]
-            if not isinstance(result, dict):
-                raise Exception(
-                    f"API 返回非预期类型 {type(result).__name__} (action={action})"
-                )
-
-            if "Response" in result and "Error" in result["Response"]:
-                error_code = result["Response"]["Error"]["Code"]
-                error_msg = result["Response"]["Error"]["Message"]
-                logger.error(f"[DB] API 错误 [{error_code}]: {error_msg}")
-                raise Exception(
-                    f"API Error [{error_code}]: {error_msg}"
-                )
-            return result.get("Response", result)
+        if "Response" in result and "Error" in result["Response"]:
+            error_code = result["Response"]["Error"]["Code"]
+            error_msg = result["Response"]["Error"]["Message"]
+            logger.error(f"[DB] API 错误 [{error_code}]: {error_msg}")
+            raise Exception(
+                f"API Error [{error_code}]: {error_msg}"
+            )
+        return result.get("Response", result)
 
     # ==================== 通用命令执行 ====================
 
