@@ -26,7 +26,7 @@ logger = logging.getLogger("scholar-admin.dialogue_task")
 
 COLLECTION = "dialogue_task"
 
-# 任务默认保留时长：24h，保证客户端轮询窗口(30s)+容错重试绰绰有余
+# 任务默认保留时长：24h，保证客户端轮询窗口(60s)+容错重试绰绰有余
 TASK_TTL_MS = 24 * 60 * 60 * 1000
 
 STATUS_PENDING = "pending"
