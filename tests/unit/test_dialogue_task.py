@@ -24,6 +24,7 @@ from services.dialogue_task import (
     finish_task,
     get_task,
     recover_stale_tasks,
+    recover_task_if_stale,
 )
 from tests.fakes.fake_db import FakeDB
 
@@ -228,3 +229,38 @@ def test_recover_stale_tasks_only_touches_stale_processing():
     assert by_id["dt_fresh"]["status"] == STATUS_PROCESSING
     assert by_id["dt_fresh"]["error"] is None
     assert by_id["dt_pending"]["status"] == STATUS_PENDING
+
+
+# ---------------------------------------------------------------------------
+# recover_task_if_stale（查询热路径定点自愈）
+# ---------------------------------------------------------------------------
+
+
+def test_recover_task_if_stale_revives_stale_processing_only():
+    db = FakeDB()
+    now = int(time.time() * 1000)
+    stale = _seed(db, "dt_stale", STATUS_PROCESSING, now - 130_000)
+    fresh = _seed(db, "dt_fresh", STATUS_PROCESSING, now - 1_000)
+
+    # 卡死任务被恢复为 failed
+    assert _run(recover_task_if_stale(db, stale)) is True
+    by_id = {d["task_id"]: d for d in db.all("dialogue_task")}
+    assert by_id["dt_stale"]["status"] == STATUS_FAILED
+    assert by_id["dt_stale"]["error"] == "执行超时"
+    # 未超时的 processing 即使传入文档也不被误伤
+    assert _run(recover_task_if_stale(db, fresh)) is False
+    assert by_id["dt_fresh"]["status"] == STATUS_PROCESSING
+    assert by_id["dt_fresh"]["error"] is None
+
+
+def test_recover_task_if_stale_skips_non_processing():
+    db = FakeDB()
+    now = int(time.time() * 1000)
+    pending = _seed(db, "dt_pending", STATUS_PENDING, now - 130_000)
+    success = _seed(db, "dt_done", STATUS_SUCCESS, now - 130_000)
+
+    assert _run(recover_task_if_stale(db, pending)) is False
+    assert _run(recover_task_if_stale(db, success)) is False
+    by_id = {d["task_id"]: d for d in db.all("dialogue_task")}
+    assert by_id["dt_pending"]["status"] == STATUS_PENDING
+    assert by_id["dt_done"]["status"] == STATUS_SUCCESS

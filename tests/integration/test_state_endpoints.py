@@ -3,7 +3,7 @@
 被测链路:FastAPI TestClient + FakeDB,覆盖:
 - POST /tracking/state        上报单句单能力状态(创建 / 累加 / 参数校验)
 - POST /tracking/state        同时写一条 study_attempt 事件(append-only)
-- GET  /tracking/{scholar_id} 优先查 skill_state, 无记录回退旧表
+- GET  /tracking/{scholar_id} 只查 skill_state, 无记录打日志不回退旧表
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ class TestGetTrackingByScholarV2:
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "status": "learned"},
         )
-        # 旧表也放一条, 验证优先查询 skill_state
+        # 旧表也放一条, 验证查询只走 skill_state（旧表数据不被返回）
         fake_db.add(
             "learning_mastery_tracking",
             {"scholar_id": "s1", "sentence_id": "sent_old", "status": "learned"},
@@ -145,7 +145,8 @@ class TestGetTrackingByScholarV2:
         assert body["records"][0]["sentence_id"] == "sent_1"
         assert body["records"][0]["attempt_count"] == 1
 
-    def test_fallback_to_legacy_when_no_skill_state(self, monkeypatch, fake_db):
+    def test_no_skill_state_returns_empty_no_fallback(self, monkeypatch, fake_db):
+        """skill_state 无记录时不回退旧表: 返回空 + 打日志"""
         client = _client(monkeypatch, fake_db)
         fake_db.add(
             "learning_mastery_tracking",
@@ -154,5 +155,6 @@ class TestGetTrackingByScholarV2:
         resp = client.get("/tracking/legacy_user")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["total"] == 1
-        assert body["records"][0]["sentence_id"] == "sent_old"
+        # 旧表数据不再被返回（不回退）
+        assert body["total"] == 0
+        assert body["records"] == []

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json as json_lib
 import logging
 from typing import TypedDict
@@ -18,6 +19,8 @@ from config import (
     VOLCANO_BASE_URL,
     VOLCANO_CHAT_MODEL,
 )
+from services.models_content import query_all_pages
+from services.models_learning import SKILL_STATE, STATUS_NOT_STARTED
 
 logger = logging.getLogger("scholar-admin.dialogue")
 
@@ -174,7 +177,8 @@ async def node_classify_and_match(state: DialogueState) -> dict:
 {{"type": "question"|"statement", "matched_index": <数字，找不到则填 null>, "natural": true|false, "reason": "简短理由"}}"""
 
     try:
-        reply = call_volcano(prompt)
+        # 同步 LLM 调用放进线程池，避免阻塞事件循环（后台异步任务与查询接口共用同循环）
+        reply = await asyncio.to_thread(call_volcano, prompt)
         result = _parse_json_response(reply)
         is_question = result.get("type") == "question"
         idx = result.get("matched_index")
@@ -224,7 +228,7 @@ async def node_generate(state: DialogueState) -> dict:
 {{"text": "生成的疑问句"}}"""
 
     try:
-        reply = call_volcano(prompt)
+        reply = await asyncio.to_thread(call_volcano, prompt)
         result = _parse_json_response(reply)
         generated = result.get("text", "")
         logger.info(f"[generate] 生成: {generated[:80]}...")
@@ -315,23 +319,27 @@ def build_graph() -> StateGraph:
 async def load_learned_sentences(db, scholar_id: str) -> list[dict]:
     """加载该学者全部已学语句（文本 + 翻译）
 
-    从 `learning_mastery_tracking` 取 sentence_id（去重），再到 `sentence`
-    集合分批查询（$in 上限 100 条/批）。
+    从 `skill_state`（Phase 2 能力模型）取 sentence_id（去重、排除未开始），
+    再到 `sentence` 集合分批查询（$in 上限 100 条/批）。
 
     Returns:
         [{"text": str, "translation": str}, ...]；无已学语句时返回 []
         （旧接口的"该学者暂无已学语句"由调用方依据空列表判断）
     """
-    tracking_result = await db.query(
-        collection="learning_mastery_tracking",
-        where={"scholar_id": scholar_id},
+    state_records = await query_all_pages(
+        db,
+        collection=SKILL_STATE,
+        where={
+            "scholar_id": scholar_id,
+            "status": {"$ne": STATUS_NOT_STARTED},
+        },
+        select={"sentence_id": 1},
     )
-    records = tracking_result.get("records", [])
-    if not records:
+    if not state_records:
         return []
 
     sentence_ids = list(
-        {r.get("sentence_id") for r in records if r.get("sentence_id")}
+        {r.get("sentence_id") for r in state_records if r.get("sentence_id")}
     )
     if not sentence_ids:
         return []

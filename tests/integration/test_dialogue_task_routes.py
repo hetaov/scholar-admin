@@ -154,16 +154,38 @@ class TestGetDialogueTask:
         assert resp.status_code == 404
         assert "任务不存在" in resp.json()["detail"]
 
-    def test_expired_treated_as_not_found(self, monkeypatch, fake_db):
-        """过期任务在惰性清理时被删除 → 查询按不存在处理（404）"""
+    def test_expired_returns_404_doc_kept(self, monkeypatch, fake_db):
+        """过期任务查询按不存在处理（404）；物理清理已移出查询热路径，文档保留"""
         client = _client(monkeypatch, fake_db)
         _seed_task(fake_db, expires_at=int(time.time() * 1000) - 1000)
         resp = client.get("/match/dialogue/task/dt_test")
         assert resp.status_code == 404
-        assert fake_db.all("dialogue_task") == []
+        assert "已过期" in resp.json()["detail"]
+        # TTL 清理由提交接口概率巡检执行，查询不再全集合 delete
+        assert len(fake_db.all("dialogue_task")) == 1
 
-    def test_query_triggers_lazy_recovery_and_cleanup(self, monkeypatch, fake_db):
-        """GET 惰性巡检：卡死 processing 置 failed，过期任务被清理"""
+    def test_query_revives_stale_processing_task(self, monkeypatch, fake_db):
+        """GET 定点自愈：被查询的卡死 processing 任务 → failed"""
+        client = _client(monkeypatch, fake_db)
+        now = int(time.time() * 1000)
+        _seed_task(
+            fake_db,
+            task_id="dt_stale",
+            status="processing",
+            updated_at=now - 130_000,
+            expires_at=now + TASK_TTL_MS,
+        )
+        resp = client.get("/match/dialogue/task/dt_stale")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["status"] == "failed"
+        assert data["error"] == "执行超时"
+        stored = fake_db.all("dialogue_task")[0]
+        assert stored["status"] == "failed"
+        assert stored["error"] == "执行超时"
+
+    def test_query_fresh_processing_unaffected(self, monkeypatch, fake_db):
+        """查询热路径只做定点恢复：其他卡死任务不被误伤，正常任务不受影响"""
         client = _client(monkeypatch, fake_db)
         now = int(time.time() * 1000)
         _seed_task(fake_db, task_id="dt_ok")
@@ -174,20 +196,12 @@ class TestGetDialogueTask:
             updated_at=now - 130_000,
             expires_at=now + TASK_TTL_MS,
         )
-        _seed_task(
-            fake_db,
-            task_id="dt_expired",
-            status="success",
-            expires_at=now - 1000,
-        )
-
         resp = client.get("/match/dialogue/task/dt_ok")
         assert resp.status_code == 200
+        assert resp.json()["data"]["status"] == "pending"
 
         by_id = {d["task_id"]: d for d in fake_db.all("dialogue_task")}
-        assert by_id["dt_stale"]["status"] == "failed"
-        assert by_id["dt_stale"]["error"] == "执行超时"
-        assert "dt_expired" not in by_id
+        assert by_id["dt_stale"]["status"] == "processing"
         assert by_id["dt_ok"]["status"] == "pending"
 
 

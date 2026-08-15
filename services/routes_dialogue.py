@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -11,15 +12,22 @@ from fastapi import APIRouter, HTTPException
 from services.dependencies import get_db
 from services.dialogue import load_learned_sentences, match_dialogue
 from services.dialogue_task import (
+    STATUS_FAILED,
     cleanup_expired,
     create_task,
     get_task,
     recover_stale_tasks,
+    recover_task_if_stale,
     run_dialogue_task,
 )
 
 logger = logging.getLogger("scholar-admin.routes.dialogue")
 router = APIRouter(tags=["对话匹配"])
+
+# 后台任务强引用集合：防止 create_task 的协程被 GC 回收导致任务中途取消
+_background_tasks: set[asyncio.Task] = set()
+# 全集合 TTL 巡检概率（每次提交触发一次 1/50），避免查询热路径全表扫描
+_CLEANUP_PROB = 0.02
 
 
 @router.post("/match/dialogue")
@@ -107,10 +115,20 @@ async def create_match_dialogue_task(data: dict):
         task = await create_task(
             db, scholar_id=scholar_id, sentence=input_sentence
         )
-        # 后台执行，不阻塞当前请求（毫秒级返回）
-        asyncio.create_task(
+        # 后台执行，不阻塞当前请求（毫秒级返回）。
+        # 必须持有 task 引用并注册 done_callback，否则协程可能被 GC 回收而取消。
+        bg = asyncio.create_task(
             run_dialogue_task(task["task_id"], scholar_id, input_sentence)
         )
+        _background_tasks.add(bg)
+        bg.add_done_callback(_background_tasks.discard)
+
+        # 概率性全集合 TTL 巡检（1/50）：恢复卡死任务 + 清理过期任务。
+        # 刻意移出查询热路径——无索引时条件 update/delete 全表扫描会拖慢轮询。
+        if random.random() < _CLEANUP_PROB:
+            await recover_stale_tasks(db)
+            await cleanup_expired(db)
+
         logger.info(
             f"[match] 异步任务已提交 → task_id={task['task_id']}, scholar={scholar_id}"
         )
@@ -149,14 +167,14 @@ async def get_match_dialogue_task(task_id: str):
     """
     try:
         db = get_db()
-        # 惰性巡检（Phase 4）：顺带恢复超时卡死任务 + 清理过期任务。
-        # 均为单条 DB 命令，无命中时 0 成本；不引入定时器/独立 worker。
-        await recover_stale_tasks(db)
-        await cleanup_expired(db)
         task = await get_task(db, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="任务不存在")
-        # TTL 过滤：expires_at 已过期的按不存在处理
+        # 定点自愈：被查询任务若卡死（processing 且超时）→ 置 failed。
+        # 只做单点更新，不做全集合巡检，保证轮询热路径毫秒级返回。
+        if await recover_task_if_stale(db, task):
+            task = {**task, "status": STATUS_FAILED, "error": "执行超时"}
+        # TTL 过滤：expires_at 已过期的按不存在处理（物理清理由提交接口概率巡检执行）
         now_ms = int(time.time() * 1000)
         if task.get("expires_at", 0) <= now_ms:
             raise HTTPException(status_code=404, detail="任务已过期")

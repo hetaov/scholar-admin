@@ -48,10 +48,10 @@ router = APIRouter(tags=["追踪 & 教材"])
 
 @router.get("/tracking/{scholar_id}")
 async def get_tracking_by_scholar(scholar_id: str):
-    """根据 scholar_id 查询学习追踪记录
+    """根据 scholar_id 查询学习追踪记录（skill_state 能力模型，不再回退旧表）
 
-    优先查询 skill_state 集合（Phase 2 能力模型）；若尚无迁移数据，回退查询
-    learning_mastery_tracking 旧表（过渡兼容，旧表只读，Phase 6 前不清理）。
+    只查询 skill_state（Phase 2 能力模型）；无记录时直接打印日志提示，
+    不再回退 learning_mastery_tracking 旧表（旧表为只读迁移源）。
     """
     try:
         db = get_db()
@@ -60,13 +60,10 @@ async def get_tracking_by_scholar(scholar_id: str):
             where={"scholar_id": scholar_id},
         )
         if not result.get("records"):
-            result = await db.query(
-                collection="learning_mastery_tracking",
-                where={"scholar_id": scholar_id},
-            )
-            logger.info(
-                f"[查询] skill_state 无记录, 回退 learning_mastery_tracking, "
-                f"scholar_id={scholar_id}, 结果={result}"
+            # 不回退旧表：无记录直接打日志（可能未迁移或该学者确无学习数据）
+            logger.warning(
+                f"[查询] skill_state 无记录, 不回退旧表, scholar_id={scholar_id} "
+                f"(请检查迁移或该学者是否确无学习数据)"
             )
         else:
             logger.info(

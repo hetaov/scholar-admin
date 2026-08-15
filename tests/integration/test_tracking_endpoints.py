@@ -20,8 +20,13 @@ class TestGetTrackingByScholar:
 
     def test_found(self, client, fake_db):
         fake_db.add(
-            "learning_mastery_tracking",
-            {"scholar_id": "scholar_1", "sentence_id": "sent_1", "status": "learned"},
+            "skill_state",
+            {
+                "scholar_id": "scholar_1",
+                "sentence_id": "sent_1",
+                "skill_code": "translation",
+                "status": "learned",
+            },
         )
         resp = client.get("/tracking/scholar_1")
         assert resp.status_code == 200

@@ -168,6 +168,43 @@ async def recover_stale_tasks(db, timeout_s: int = 120) -> int:
     return count
 
 
+async def recover_task_if_stale(db, task: dict, timeout_s: int = 120) -> bool:
+    """定点恢复：单条卡死 processing 任务（updated_at 超时）→ 置 failed。
+
+    与 `recover_stale_tasks` 的区别：只针对传入任务的 task_id 做单点更新，
+    避免查询热路径触发全集合条件更新（无索引时全表扫描会拖慢轮询）。
+
+    Args:
+        task: get_task 返回的任务文档
+
+    Returns:
+        是否恢复成功（该任务被置为 failed）
+    """
+    if task.get("status") != STATUS_PROCESSING:
+        return False
+    now = _now_ms()
+    if task.get("updated_at", 0) > now - timeout_s * 1000:
+        return False
+    res = await db.update(
+        COLLECTION,
+        where={"task_id": task["task_id"], "status": STATUS_PROCESSING},
+        data={
+            "$set": {
+                "status": STATUS_FAILED,
+                "error": "执行超时",
+                "updated_at": now,
+            }
+        },
+        multi=False,
+    )
+    if res.get("modified_count", 0):
+        logger.info(
+            f"[task] recover → task_id={task['task_id']} 卡死任务标记 failed"
+        )
+        return True
+    return False
+
+
 async def run_dialogue_task(task_id: str, scholar_id: str, sentence: str) -> None:
     """后台执行对话匹配任务并写回结果。
 
