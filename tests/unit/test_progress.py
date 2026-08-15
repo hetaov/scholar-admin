@@ -10,15 +10,20 @@
 
 from __future__ import annotations
 
+import pytest
+
 from services.progress import (
     aggregate_progress,
     book_progress,
     chapter_progress,
     lesson_progress,
     mastery_distribution,
+    mastery_ratio,
     merge_distributions,
     pick_state,
     sentence_progress,
+    status_distribution_array,
+    status_to_int,
     sum_time_spent,
 )
 
@@ -437,3 +442,53 @@ class TestAggregateProgress:
         # 未学习时每课仍返回条目(进度 0)
         assert len(stats["chapters"]) == 1
         assert len(stats["chapters"][0]["lessons"]) == 2
+
+
+# ===========================================================================
+# 查询接口 2/3 输出辅助(Phase 6)
+# ===========================================================================
+
+
+class TestQueryOutputHelpers:
+    """接口 2/3 输出转换: 状态→数字 / 综合掌握度 / 6 级分布数组。"""
+
+    def test_status_to_int(self):
+        assert status_to_int("not_started") == 0
+        assert status_to_int("learning") == 1
+        assert status_to_int("learned") == 2
+        assert status_to_int("mastered") == 3
+        assert status_to_int("review_due") == 4
+        assert status_to_int(None) == 0
+        assert status_to_int("unknown") == 0
+
+    def test_mastery_ratio_weighted_4_levels(self):
+        # 全未学 → 0
+        assert mastery_ratio({"total": 4, "not_started": 4}) == 0.0
+        # 全掌握 → 1.0
+        assert mastery_ratio({"total": 4, "mastered": 4}) == 1.0
+        # learned 折半权重: learned=1 → 2/3 ≈ 0.6667(4 位小数)
+        assert mastery_ratio({"total": 3, "learned": 3}) == pytest.approx(0.6667, abs=1e-4)
+        # 文档示例 [40,0,20,40,0,0] → (2*20 + 3*40)/(3*100) ≈ 0.5333
+        assert mastery_ratio(
+            {"total": 100, "not_started": 40, "learned": 20, "mastered": 40}
+        ) == pytest.approx(0.5333, abs=1e-4)
+        # review_due 并入 mastered 档
+        assert mastery_ratio({"total": 2, "review_due": 2}) == 1.0
+        # 空分布 → 0
+        assert mastery_ratio({}) == 0.0
+
+    def test_mastery_ratio_content_total_includes_unlearned(self):
+        # 3 句有记录(learning/learned/mastered), 内容共 4 句 → 未学 1 句按 0 档计入分母
+        d = {"total": 3, "learning": 1, "learned": 1, "mastered": 1}
+        assert mastery_ratio(d, 4) == pytest.approx(0.5)  # (1+2+3)/(3*4)
+        # 不传 content_total 时仅按有记录句数 → 会虚高(0.6667)
+        assert mastery_ratio(d) == pytest.approx(0.6667, abs=1e-4)
+        # content_total 小于记录数时以记录数为准
+        assert mastery_ratio(d, 2) == pytest.approx(0.6667, abs=1e-4)
+
+    def test_status_distribution_array_6_slots(self):
+        d = {"not_started": 4, "learning": 0, "learned": 2, "mastered": 4, "review_due": 0}
+        assert status_distribution_array(d) == [4, 0, 2, 4, 0, 0]
+        assert status_distribution_array({}) == [0, 0, 0, 0, 0, 0]
+        # 5 级计数透传, 第 6 位恒 0
+        assert status_distribution_array({"learned": 1, "review_due": 3}) == [0, 0, 1, 0, 3, 0]

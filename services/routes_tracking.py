@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json as json_lib
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
 from services.dependencies import get_db
 from services.events import STUDY_ATTEMPT
-from services.models_learning import SKILL_STATE
+from services.models_learning import (
+    SKILL_STATE,
+    STATUS_LEARNED,
+    STATUS_MASTERED,
+)
 from services.models_content import (
     get_chapters,
     get_lessons,
@@ -22,7 +27,14 @@ from services.models_scholar_book import (
     touch_scholar_book,
     upsert_scholar_book,
 )
-from services.progress import aggregate_progress
+from services.progress import (
+    aggregate_progress,
+    mastery_distribution,
+    mastery_ratio,
+    pick_state,
+    status_distribution_array,
+    status_to_int,
+)
 from services.tracking_stats import compute_tracking_stats
 
 logger = logging.getLogger("scholar-admin.routes.tracking")
@@ -435,6 +447,277 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
     except Exception as e:
         logger.error(f"[scholar/{scholar_id}/books] 教材列表失败: {e}")
         raise HTTPException(status_code=500, detail=f"教材列表失败: {str(e)}")
+
+
+# ==================== 查询接口拆分（tracking/stats → 按页拆分，Phase 6） ====================
+
+
+_SKILL_CODES = ("translation", "listening", "reading", "speaking")
+
+
+def _to_iso(timestamp) -> str | None:
+    """int 秒级时间戳 → ISO 8601 UTC 字符串；空 / 非法返回 None。"""
+    if not timestamp:
+        return None
+    try:
+        return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+async def _find_lesson_by_id(db, textbook_id: str, lesson_id: str) -> dict | None:
+    """按教材 + lesson_id 找内容层级 lesson（有章教材经 chapters → lessons；无章直接按教材）。"""
+    chapters = await get_chapters(db, textbook_id)
+    lessons: list[dict] = []
+    if chapters:
+        for ch in chapters:
+            lessons.extend(await get_lessons(db, ch.get("chapter_id")))
+    else:
+        lessons = await get_lessons_by_textbook(db, textbook_id)
+    for le in lessons:
+        if le.get("lesson_id") == lesson_id:
+            return le
+    return None
+
+
+@router.get("/scholar/{scholar_id}/textbooks/{textbook_id}/lessons")
+async def get_textbook_lessons(scholar_id: str, textbook_id: str, skill_code: str | None = None):
+    """教材详情（lesson 列表 + 顶部三概念）— 查询接口拆分后（接口 2）。
+
+    对教材复用服务端聚合（_aggregate_progress_for_book, detail="lesson"），
+    并按能力独立聚合构造每课 skills（口径与 summary.mastery 一致）。
+
+    返回：
+    {
+      "success": true,
+      "data": {
+        "summary": {
+          "textbook_progress": 0.6,            // 0-1
+          "learned_sentence_count": 60,
+          "total_sentence_count": 100,
+          "mastery": 0.5                       // 0-1（4 级档位加权，见 progress.mastery_ratio）
+        },
+        "lessons": [
+          {
+            "lesson_id": "...",
+            "lesson_title": "...",
+            "progress": {
+              "overall_percent": 60,           // 0-100
+              "mastery": 0.5,                  // 0-1
+              "skills": {"translation": 0.5, ...},   // 各能力 0-1
+              "status_distribution": [4, 0, 2, 4, 0, 0]  // 6 级计数（not_started…review_due, 0）
+            }
+          }
+        ]
+      }
+    }
+    """
+    try:
+        db = get_db()
+        base = await _aggregate_progress_for_book(
+            db,
+            scholar_id=scholar_id,
+            textbook_id=textbook_id,
+            skill_code=skill_code,
+            detail="lesson",
+        )
+        summary_raw = base.get("summary", {})
+
+        # 各能力独立聚合（复用同一聚合路径），构造每课 skills
+        skill_views: dict[str, dict[str, dict]] = {}
+        for code in _SKILL_CODES:
+            view = await _aggregate_progress_for_book(
+                db,
+                scholar_id=scholar_id,
+                textbook_id=textbook_id,
+                skill_code=code,
+                detail="lesson",
+            )
+            skill_views[code] = {
+                l.get("lesson_id"): l for l in view.get("lessons", [])
+            }
+
+        lessons_out = []
+        for lesson in base.get("lessons", []):
+            lid = lesson.get("lesson_id")
+            skills = {}
+            for code, by_lid in skill_views.items():
+                target = by_lid.get(lid)
+                # 仅该能力有学习记录(total>0)时输出, 避免全 0 能力刷屏
+                if target and (target.get("mastery_distribution") or {}).get("total"):
+                    skills[code] = mastery_ratio(
+                        target.get("mastery_distribution", {}),
+                        lesson.get("total_sentence_count", 0),
+                    )
+            lessons_out.append({
+                "lesson_id": lid,
+                "lesson_title": lesson.get("lesson_title", ""),
+                "progress": {
+                    "overall_percent": round(lesson.get("progress", 0) * 100),
+                    "mastery": mastery_ratio(
+                        lesson.get("mastery_distribution", {}),
+                        lesson.get("total_sentence_count", 0),
+                    ),
+                    "skills": skills,
+                    "status_distribution": status_distribution_array(
+                        lesson.get("mastery_distribution", {})
+                    ),
+                },
+            })
+
+        data = {
+            "summary": {
+                "textbook_progress": summary_raw.get("textbook_progress", 0.0),
+                "learned_sentence_count": summary_raw.get("learned_sentence_count", 0),
+                "total_sentence_count": summary_raw.get("total_sentence_count", 0),
+                "mastery": mastery_ratio(
+                    summary_raw.get("mastery_distribution", {}),
+                    summary_raw.get("total_sentence_count", 0),
+                ),
+            },
+            "lessons": lessons_out,
+        }
+        logger.info(
+            f"[scholar/{scholar_id}/textbooks/{textbook_id}/lessons] "
+            f"scholar_id={scholar_id}, textbook_id={textbook_id}, "
+            f"skill_code={skill_code}, lessons={len(lessons_out)}"
+        )
+        return {"success": True, "data": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[scholar/.../textbooks/.../lessons] 教材详情失败: {e}")
+        raise HTTPException(status_code=500, detail=f"教材详情失败: {str(e)}")
+
+
+@router.get("/tracking/textbooks/{textbook_id}/lessons/{lesson_id}/sentences")
+async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str):
+    """章节句子明细 + 顶部概览 — 查询接口拆分后（接口 3）。
+
+    硬约束：请求粒度=返回粒度（lesson 级），仅返回该 lesson 的句子；
+    每句输出 status / skills / weakest_skill / review_count / next_review_at。
+    summary 为该 lesson 内（乐观聚合后）的掌握度分布与各能力掌握度。
+
+    返回：
+    {
+      "success": true,
+      "data": {
+        "lesson_id": "...",
+        "lesson_title": "...",
+        "summary": {
+          "mastery": 0.5,                     // 0-1
+          "skills": {"translation": 0.5, ...},     // 各能力 0-1
+          "learned_sentence_count": 6,
+          "total_sentence_count": 10
+        },
+        "sentences": [
+          {
+            "sentence_id": "...",
+            "content": "What's he like?",
+            "translation": "他是什么样的人？",
+            "status": 3,                       // 0-5：not_started=0 … review_due=4
+            "skills": {"translation": 3, "listening": 4, ...},  // {code: 0-5}
+            "weakest_skill": "reading",
+            "review_count": 2,
+            "next_review_at": "2026-08-16T10:00:00Z"
+          }
+        ]
+      }
+    }
+    """
+    try:
+        db = get_db()
+        # 1. 校验 lesson 存在并取标题
+        lesson = await _find_lesson_by_id(db, textbook_id, lesson_id)
+        if lesson is None:
+            raise HTTPException(status_code=404, detail=f"lesson 不存在: {lesson_id}")
+
+        # 2. 句子明细（含 text / translation）
+        sentences = await get_sentences_by_lesson(db, lesson_id)
+
+        # 3. 该学者全部 skill_state（含 next_review_at）
+        state_page = await db.query(
+            collection=SKILL_STATE,
+            where={"scholar_id": scholar_id},
+            limit=10000,
+            select={
+                "scholar_id": 1,
+                "sentence_id": 1,
+                "skill_code": 1,
+                "status": 1,
+                "mastery_score": 1,
+                "attempt_count": 1,
+                "next_review_at": 1,
+            },
+        )
+        states = state_page.get("records", [])
+        states_by_sentence: dict[str, list[dict]] = {}
+        for st in states:
+            states_by_sentence.setdefault(st.get("sentence_id"), []).append(st)
+
+        # 4. 句子列表 + 已学计数（乐观聚合：无指定能力取 progress 最高者）
+        sentence_ids = [s.get("sentence_id") for s in sentences]
+        picked_by_sentence = {
+            sid: pick_state(states_by_sentence.get(sid, [])) for sid in sentence_ids
+        }
+        learned = 0
+        sentence_list = []
+        for s in sentences:
+            sid = s.get("sentence_id")
+            picked = picked_by_sentence.get(sid)
+            s_states = states_by_sentence.get(sid, [])
+            skills = {
+                st.get("skill_code"): status_to_int(st.get("status"))
+                for st in s_states
+                if st.get("skill_code")
+            }
+            if picked and picked.get("status") in (STATUS_LEARNED, STATUS_MASTERED):
+                learned += 1
+            sentence_list.append({
+                "sentence_id": sid,
+                "content": s.get("text", ""),
+                "translation": s.get("translation", ""),
+                "status": status_to_int(picked.get("status")) if picked else 0,
+                "skills": skills,
+                "weakest_skill": min(skills, key=skills.get) if skills else None,
+                "review_count": int(picked.get("attempt_count") or 0) if picked else 0,
+                "next_review_at": _to_iso(picked.get("next_review_at")) if picked else None,
+            })
+
+        # 5. summary：乐观聚合后的分布 + 各能力掌握度
+        total_sentences = len(sentences)
+        picked_states = [p for p in picked_by_sentence.values() if p]
+        dist = mastery_distribution(picked_states)
+        skill_dist = {}
+        for code in _SKILL_CODES:
+            code_states = [
+                s for s in states
+                if s.get("skill_code") == code and s.get("sentence_id") in sentence_ids
+            ]
+            if code_states:
+                skill_dist[code] = mastery_ratio(mastery_distribution(code_states), total_sentences)
+
+        data = {
+            "lesson_id": lesson_id,
+            "lesson_title": lesson.get("title", lesson.get("lesson_title", "")),
+            "summary": {
+                "mastery": mastery_ratio(dist, total_sentences),
+                "skills": skill_dist,
+                "learned_sentence_count": learned,
+                "total_sentence_count": total_sentences,
+            },
+            "sentences": sentence_list,
+        }
+        logger.info(
+            f"[tracking/textbooks/{textbook_id}/lessons/{lesson_id}/sentences] "
+            f"scholar_id={scholar_id}, sentences={len(sentence_list)}, learned={learned}"
+        )
+        return {"success": True, "data": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[tracking/.../lessons/.../sentences] 章节句子明细失败: {e}")
+        raise HTTPException(status_code=500, detail=f"章节句子明细失败: {str(e)}")
 
 
 @router.put("/scholar/{scholar_id}/books/{textbook_id}/position")

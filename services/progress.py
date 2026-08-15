@@ -110,6 +110,63 @@ def merge_distributions(distributions: list[dict]) -> dict:
     }
 
 
+# 状态枚举 → 数字（查询接口 2/3 输出用）；第 6 级保留位恒为 0
+_STATUS_TO_INT = {
+    STATUS_NOT_STARTED: 0,
+    STATUS_LEARNING: 1,
+    STATUS_LEARNED: 2,
+    STATUS_MASTERED: 3,
+    STATUS_REVIEW_DUE: 4,
+}
+
+
+def status_to_int(status: str | None) -> int:
+    """状态枚举 → 数字：not_started=0 … review_due=4；未知/空 → 0。
+
+    前端按数字语义展示：statusToMastery(status>=3 → 3 档掌握)。
+    """
+    return _STATUS_TO_INT.get(status, 0)
+
+
+def mastery_ratio(distribution: dict, content_total: int | None = None) -> float:
+    """综合掌握度 0-1：按 4 级档位加权（not_started=0, learning=1, learned=2,
+    mastered/review_due=3）÷3 归一。
+
+    content_total：内容句子总数（含未学）。未学句子按 not_started(0 档) 计入分母，
+    否则刚学一句即 100%、掌握度失真。不传则仅按有记录句子数。
+    与前端 mock 的 masteredPercent（4 级加权 /3）口径一致；
+    空分布 → 0.0；已学(learned)=2/3≈0.67，掌握(mastered)=1.0。
+    """
+    record_total = int(distribution.get("total") or 0)
+    total = max(int(content_total or 0), record_total)
+    if not total:
+        return 0.0
+    weighted = (
+        1 * int(distribution.get(STATUS_LEARNING) or 0)
+        + 2 * int(distribution.get(STATUS_LEARNED) or 0)
+        + 3 * (
+            int(distribution.get(STATUS_MASTERED) or 0)
+            + int(distribution.get(STATUS_REVIEW_DUE) or 0)
+        )
+    )
+    return round(weighted / (3 * total), 4)
+
+
+def status_distribution_array(distribution: dict) -> list[int]:
+    """掌握度分布 → 6 级数字数组 [not_started, learning, learned, mastered, review_due, 0]。
+
+    前端 mergeStatusTo4 将后三档并入 mastered 组（s3+s4+s5），第 6 位恒为 0 占位。
+    """
+    return [
+        int(distribution.get(STATUS_NOT_STARTED) or 0),
+        int(distribution.get(STATUS_LEARNING) or 0),
+        int(distribution.get(STATUS_LEARNED) or 0),
+        int(distribution.get(STATUS_MASTERED) or 0),
+        int(distribution.get(STATUS_REVIEW_DUE) or 0),
+        0,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 纯函数：课 / 章 / 书 逐级聚合
 # ---------------------------------------------------------------------------
