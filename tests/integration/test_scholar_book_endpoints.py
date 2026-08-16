@@ -137,6 +137,49 @@ class TestGetBooks:
         assert summary["total_sentence_count"] == 2
         assert summary["learned_sentence_count"] == 1
         assert summary["textbook_progress"] == pytest.approx(0.4)  # (0.8 + 0.0) / 2
+        # 综合掌握度：mastery_ratio 口径（s1 learned → 2/(3×2)，分母含未学 s2）
+        assert summary["mastery"] == pytest.approx(0.3333)
+        # 分能力掌握度：仅该能力有记录时输出
+        assert summary["skills"]["translation"] == pytest.approx(0.3333)
+        assert "conversation" not in summary["skills"]
+        assert "listening" not in summary["skills"]
+        assert "speaking" not in summary["skills"]
+        assert "reading" not in summary["skills"]
+
+    def test_summary_mastery_and_skills_weighted(self, monkeypatch, fake_db):
+        """多状态加权：综合掌握度含未学分母；分能力只统计该能力状态。"""
+        _seed_content(fake_db)
+        fake_db.add(
+            "skill_state",
+            {"scholar_id": "s1", "sentence_id": "s1", "skill_code": "translation",
+             "status": "learned", "mastery_score": 80, "attempt_count": 2},
+        )
+        fake_db.add(
+            "skill_state",
+            {"scholar_id": "s1", "sentence_id": "s1", "skill_code": "conversation",
+             "status": "mastered", "mastery_score": 90, "attempt_count": 3},
+        )
+        fake_db.add(
+            "skill_state",
+            {"scholar_id": "s1", "sentence_id": "s2", "skill_code": "translation",
+             "status": "learning", "mastery_score": 40, "attempt_count": 1},
+        )
+        client = _tracking_client(monkeypatch, fake_db)
+        client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
+        )
+        resp = client.get("/scholar/s1/books")
+        assert resp.status_code == 200
+        summary = resp.json()["data"]["books"][0]["summary"]
+        # 加权 = 1×learning + 2×learned + 3×mastered = 1+2+3 = 6；
+        # 分母取 max(2 句, 3 记录) = 3 → 6/(3×3) ≈ 0.6667
+        assert summary["mastery"] == pytest.approx(0.6667)
+        # translation：learned + learning → 2+1 = 3，分母 max(2, 2) = 2 → 3/(3×2) = 0.5
+        assert summary["skills"]["translation"] == pytest.approx(0.5)
+        # conversation：mastered → 3，分母 max(2, 1) = 2 → 3/(3×2) = 0.5
+        assert summary["skills"]["conversation"] == pytest.approx(0.5)
+        assert "listening" not in summary["skills"]
 
     def test_breakpoint_retrieved_after_update(self, monkeypatch, fake_db):
         """验收标准: 断点更新后重新获取列表能取回 current_lesson_id。"""

@@ -238,10 +238,13 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
             if not textbook_id:
                 continue
             sids = sentence_ids_by_book.get(textbook_id, set())
+            # 全量书内学习数据（供分能力聚合，不受 skill_code 查询参数影响，与接口 2/3 一致）
+            all_book_states = [
+                st for st in states if st.get("sentence_id") in sids
+            ]
             book_states = [
-                st for st in states
-                if st.get("sentence_id") in sids
-                and (skill_code is None or st.get("skill_code") == skill_code)
+                st for st in all_book_states
+                if skill_code is None or st.get("skill_code") == skill_code
             ]
             book_attempts = [
                 a for a in attempts
@@ -260,6 +263,25 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
                 attempts=book_attempts,
                 detail="summary",
             )
+            summary = dict(stats.get("summary", {}))
+            # 综合掌握度：与接口 2/3 同口径（mastery_ratio 4 级档位加权 ÷3）
+            summary["mastery"] = mastery_ratio(
+                summary.get("mastery_distribution", {}),
+                summary.get("total_sentence_count", 0),
+            )
+            # 分能力掌握度：内存内过滤（不触库），仅该能力有记录时输出该键
+            skills: dict[str, float] = {}
+            for code in _SKILL_CODES:
+                code_states = [
+                    st for st in all_book_states
+                    if st.get("skill_code") == code
+                ]
+                if code_states:
+                    skills[code] = mastery_ratio(
+                        mastery_distribution(code_states),
+                        summary.get("total_sentence_count", 0),
+                    )
+            summary["skills"] = skills
             enriched.append(
                 {
                     "textbook_id": textbook_id,
@@ -269,7 +291,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
                     "last_studied_at": book.get("last_studied_at"),
                     "total_time_spent": book.get("total_time_spent"),
                     "status": book.get("status"),
-                    "summary": stats.get("summary", {}),
+                    "summary": summary,
                 }
             )
         logger.info(
