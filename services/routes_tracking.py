@@ -75,90 +75,6 @@ async def get_tracking_by_scholar(scholar_id: str):
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
-@router.post("/tracking/stats")
-async def get_tracking_stats(data: dict):
-    """统计学习进度 — Phase 4 起服务端聚合（skill_state + 内容层级逐级聚合）
-
-    请求体：
-    {
-      "scholar_id": "scholar_xxx",   // 必填
-      "textbook_id": "tb_xxx",       // 教材（必填）
-      "skill_code": "translation",   // 可选, 按能力维度独立聚合
-      "detail": "lesson"             // 可选: lesson(默认, summary+课级统计) / full(全量,兼容) / chapter(章节树含课) / overview(章级) / summary(仅汇总)
-    }
-
-    返回 data 结构（默认 detail="lesson"，仅汇总 + 课级统计，不含章节/句子明细）：
-    {
-      "scholar_id": "...",
-      "textbook_id": "...",
-      "skill_code": "...",
-      "summary": {
-        "total_time_spent": 秒,
-        "total_time_spent_display": "1小时2分5秒",
-        "textbook_progress": 0.xx,
-        "learned_sentence_count": n,
-        "total_sentence_count": n,
-        "chapter_count": n,       // 无章教材恒为 0
-        "lesson_count": n,
-        "mastery_distribution": {...}
-      },
-      "lessons": [
-        {
-          "lesson_id": "...",
-          "lesson_title": "...",
-          "order": 1,
-          "progress": 0.xx,
-          "learned_sentence_count": n,
-          "total_sentence_count": n,
-          "mastery_distribution": {...}
-        }
-      ]
-    }
-
-    detail 变化说明：
-    - "lesson"(默认): 仅 summary + lessons 课级统计列表（无 chapters / units / sentences）
-    - "full"(兼容): 追加 chapters / 平铺 units / sentences（含句子明细）
-    - "chapter"(兼容): chapters 含内嵌 lessons，省略平铺字段
-    - "overview"(兼容): 章级列表（剥离 lessons 明细）
-    - "summary": 仅 summary（教材列表场景）
-    """
-    scholar_id = str(data.get("scholar_id") or "").strip()
-
-    if not scholar_id:
-        raise HTTPException(status_code=400, detail="缺少参数 scholar_id")
-
-    # ── 服务端聚合（不依赖客户端上报）──
-    textbook_id = str(data.get("textbook_id") or "").strip()
-    if not textbook_id:
-        raise HTTPException(status_code=400, detail="缺少参数 textbook_id")
-    skill_code = str(data.get("skill_code") or "").strip() or None
-    detail = str(data.get("detail") or "lesson").strip() or "lesson"
-    if detail not in ("full", "chapter", "overview", "lesson", "summary"):
-        detail = "lesson"
-
-    try:
-        db = get_db()
-        stats = await _aggregate_progress_for_book(
-            db,
-            scholar_id=scholar_id,
-            textbook_id=textbook_id,
-            skill_code=skill_code,
-            detail=detail,
-        )
-        logger.info(
-            f"[tracking/stats] scholar_id={scholar_id}, textbook_id={textbook_id}, "
-            f"skill_code={skill_code}, "
-            f"progress={stats['summary']['textbook_progress']}"
-        )
-        return {"success": True, "data": stats}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[tracking/stats] 统计异常: {e}")
-        raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
-
-
 async def _load_book_content(
     db,
     textbook_id: str,
@@ -183,71 +99,6 @@ async def _load_book_content(
             db, [le.get("lesson_id") for le in lessons]
         )
     return chapters, lessons, sentences
-
-
-async def _aggregate_progress_for_book(
-    db,
-    *,
-    scholar_id: str,
-    textbook_id: str,
-    skill_code: str | None = None,
-    detail: str = "full",
-    content: tuple[list[dict], list[dict], list[dict]] | None = None,
-) -> dict:
-    """服务端聚合一本教材的进度（Phase 4 逐级聚合，stats 与 books 列表复用）。
-
-    数据源：skill_state（可选按 skill_code 过滤）+ 内容层级（chapter → lesson →
-    sentence_v2；无章教材则 book → lesson）+ study_attempt 时长，全部经
-    aggregate_progress 逐级加权。
-    detail 透传 aggregate_progress："full" / "chapter" / "overview" / "summary"；
-    无章教材在 chapter/overview 粒度下 chapters 为空、由 lessons 返回课级进度。
-    content 可传入已加载的 (chapters, lessons, sentences)，供多次聚合复用，
-    避免内容层级被重复查询。
-    """
-    where: dict = {"scholar_id": scholar_id}
-    if skill_code:
-        where["skill_code"] = skill_code
-
-    # 1. 拉学者 skill_state（分页，规避单次 limit 上限）
-    states = await query_all_pages(
-        db,
-        collection=SKILL_STATE,
-        where=where,
-        select={
-            "scholar_id": 1,
-            "sentence_id": 1,
-            "skill_code": 1,
-            "status": 1,
-            "mastery_score": 1,
-            "attempt_count": 1,
-        },
-    )
-
-    # 2. 内容层级：优先复用已加载数据，否则批量加载
-    if content is not None:
-        chapters, lessons, sentences = content
-    else:
-        chapters, lessons, sentences = await _load_book_content(db, textbook_id)
-
-    # 3. 学习时长：study_attempt.time_spent 聚合（分页）
-    attempts = await query_all_pages(
-        db,
-        collection=STUDY_ATTEMPT,
-        where=where,
-        select={"sentence_id": 1, "skill_code": 1, "time_spent": 1},
-    )
-
-    return aggregate_progress(
-        scholar_id=scholar_id,
-        textbook_id=textbook_id,
-        states=states,
-        sentences=sentences,
-        lessons=lessons,
-        chapters=chapters,
-        skill_code=skill_code,
-        attempts=attempts,
-        detail=detail,
-    )
 
 
 # ==================== 教材管理 ====================
@@ -436,7 +287,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
         raise HTTPException(status_code=500, detail=f"教材列表失败: {str(e)}")
 
 
-# ==================== 查询接口拆分（tracking/stats → 按页拆分，Phase 6） ====================
+# ==================== 查询接口拆分（原 POST /tracking/stats 已移除，Phase 6 按页拆分） ====================
 
 
 # 能力全集：含对话能力（前端 SKILL_ORDER 四能力 = translation/conversation/listening/speaking，

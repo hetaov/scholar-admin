@@ -14,7 +14,6 @@ EXPECTED_ROUTES = {
     ("POST", "/eval/translate"),          # 4.6.5b 翻译评估（routes_eval）
     ("POST", "/match/dialogue"),          # 对话匹配（routes_dialogue）
     ("POST", "/tracking/state"),          # 单句状态上报 / Skill Attempt（routes_state）
-    ("POST", "/tracking/stats"),          # 掌握度统计（routes_tracking）
     ("GET", "/tracking/{scholar_id}"),    # 单学员掌握度查询（routes_tracking）
 }
 

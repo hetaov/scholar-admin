@@ -387,7 +387,7 @@ class TestAggregateProgress:
         assert "units" not in stats
 
     def test_detail_lesson_returns_summary_and_lesson_list(self):
-        """detail="lesson"(tracking/stats 默认): 仅 summary + 课级统计, 无章节/句子明细。"""
+        """detail="lesson"(默认): 仅 summary + 课级统计, 无章节/句子明细。"""
         states = [
             {"sentence_id": "s1", "skill_code": "translation",
              "status": STATUS_LEARNED, "mastery_score": 80},

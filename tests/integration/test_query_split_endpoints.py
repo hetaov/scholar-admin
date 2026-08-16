@@ -40,7 +40,7 @@ def _seed_content(fake_db):
 
 
 def _seed_states(fake_db, scholar_id="scholar_1"):
-    """与 POST /tracking/stats 聚合测试一致的状态 + next_review_at。"""
+    """与聚合测试一致的状态 + next_review_at。"""
     states = [
         {"scholar_id": scholar_id, "sentence_id": "s1", "skill_code": "translation",
          "status": "learned", "mastery_score": 80, "attempt_count": 2,

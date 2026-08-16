@@ -318,7 +318,7 @@ def aggregate_progress(
     - "full":    summary + chapters + 平铺 lessons/units/sentences
     - "chapter": summary + chapters（含内嵌 lessons），省略平铺字段
     - "overview": summary + 章级列表（不含课明细）
-    - "lesson":  summary + 课级统计列表（不含章节/句子明细），tracking/stats 默认形态
+    - "lesson":  summary + 课级统计列表（不含章节/句子明细），查询接口默认形态
     - "summary": 仅 summary（教材列表场景，省去层级组装）
 
     无章教材（chapters 为空，lesson 直挂 book）：chapter/overview 粒度下

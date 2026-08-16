@@ -172,7 +172,7 @@ class TestBooksQueryCount:
     防退化点：
     - skill_state / study_attempt 是学者级数据，必须全量仅查询一次后在内存内
       按教材句子集合过滤，不允许每本书重复拉取（原实现每本走一次
-      _aggregate_progress_for_book，各查 1 次 states + 1 次 attempts）；
+      独立聚合，各查 1 次 states + 1 次 attempts）；
     - 书名必须批量 $in（textbook_v2 一次取回，Phase 6 已移除旧表回退），
       不允许逐本查询。
     查询次数公式：1(books) + 3×N(内容) + 1(书名) + 1(states) + 1(attempts)。
