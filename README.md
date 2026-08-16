@@ -45,11 +45,10 @@ python main.py
 PORT=3000 python main.py
 ```
 
-> **注意：所有脚本（`main.py`、`pytest`、`services/migrate_all.py` 等）都必须在 `.venv` 环境下运行。**
+> **注意：所有脚本（`main.py`、`pytest` 等）都必须在 `.venv` 环境下运行。**
 > 若未激活虚拟环境，`python` 可能解析到系统 Python（如 conda 的 Python 3.14），
 > 其依赖与项目不一致，会导致 `.env` 中的腾讯云密钥加载异常，请求被判定为无效凭证
-> （报 `AuthFailure.SignatureFailure` 等）。可用 `which python` 确认是否指向 `.venv/bin/python`；
-> 也可以不激活，直接使用 `.venv/bin/python -m services.migrate_all check`。
+> （报 `AuthFailure.SignatureFailure` 等）。可用 `which python` 确认是否指向 `.venv/bin/python`。
 
 启动后访问 http://localhost:8080/docs 查看 Swagger API 文档。
 
@@ -218,35 +217,35 @@ curl -X POST http://localhost:8080/vision/recognize-base64 \
   "summary": "一张关于交通工具今昔对比的英语教材图片。",
   "_storage": {
     "stored": true,
-    "unit_id": "f3a2b1c4-...",
-    "paragraph_id": "d7e8f9a0-...",
+    "lesson_id": "lesson_9f3a2b1c...",
     "sentence_count": 2
   }
 }
 ```
 
-> 识别结果会**自动存储**到 CloudBase 文档型数据库的 `unit`、`paragraph`、`sentence` 三个集合中。非英文材料会跳过存储，`_storage.stored` 为 `false`。
+> 识别结果会**自动存储**到 CloudBase 文档型数据库的 `chapter`、`lesson`、`sentence_v2` 集合中（带 `textbook_id` 时同步写入/复用 `textbook_v2`）。非英文材料会跳过存储，`_storage.stored` 为 `false`。
 
 ### 存储数据模型
 
 | 集合 | 说明 | 关键字段 |
 |------|------|----------|
-| `unit` | 教材单元 | `unit_id`, `title`, `material_type`, `summary`, `total_sentences` |
-| `paragraph` | 段落 | `paragraph_id`, `unit_id`, `sentence_ids` |
-| `sentence` | 单句 | `sentence_id`, `unit_id`, `paragraph_id`, `text`, `translation`, `level`, `keywords` |
+| `textbook_v2` | 教材 | `textbook_id`, `title`, `version` |
+| `chapter` | 章 | `chapter_id`, `textbook_id`, `title` |
+| `lesson` | 课（原 unit 语义） | `lesson_id`, `chapter_id`, `textbook_id`, `title` |
+| `sentence_v2` | 单句 | `sentence_id`, `lesson_id`, `chapter_id`, `textbook_id`, `text`, `translation`, `level`, `keywords`, `index` |
 
 可通过已有的 CRUD 接口查询存储内容：
 
 ```bash
-# 查询所有 unit
-curl -X POST http://localhost:8080/collections/unit/query \
+# 查询所有教材
+curl -X POST http://localhost:8080/collections/textbook_v2/query \
   -H "Content-Type: application/json" \
   -d '{}'
 
-# 查询某个 unit 下的所有句子
-curl -X POST http://localhost:8080/collections/sentence/query \
+# 查询某个 lesson 下的所有句子
+curl -X POST http://localhost:8080/collections/sentence_v2/query \
   -H "Content-Type: application/json" \
-  -d '{"where": {"unit_id": "f3a2b1c4-..."}}'
+  -d '{"where": {"lesson_id": "lesson_9f3a2b1c..."}}'
 ```
 
 ## 技术栈

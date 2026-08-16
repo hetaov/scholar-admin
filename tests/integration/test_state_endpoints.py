@@ -133,11 +133,6 @@ class TestGetTrackingByScholarV2:
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "status": "learned"},
         )
-        # 旧表也放一条, 验证查询只走 skill_state（旧表数据不被返回）
-        fake_db.add(
-            "learning_mastery_tracking",
-            {"scholar_id": "s1", "sentence_id": "sent_old", "status": "learned"},
-        )
         resp = client.get("/tracking/s1")
         assert resp.status_code == 200
         body = resp.json()
@@ -145,16 +140,11 @@ class TestGetTrackingByScholarV2:
         assert body["records"][0]["sentence_id"] == "sent_1"
         assert body["records"][0]["attempt_count"] == 1
 
-    def test_no_skill_state_returns_empty_no_fallback(self, monkeypatch, fake_db):
-        """skill_state 无记录时不回退旧表: 返回空 + 打日志"""
+    def test_no_skill_state_returns_empty(self, monkeypatch, fake_db):
+        """skill_state 无记录时返回空(旧表已下线, 无回退)。"""
         client = _client(monkeypatch, fake_db)
-        fake_db.add(
-            "learning_mastery_tracking",
-            {"scholar_id": "legacy_user", "sentence_id": "sent_old", "status": "learned"},
-        )
         resp = client.get("/tracking/legacy_user")
         assert resp.status_code == 200
         body = resp.json()
-        # 旧表数据不再被返回（不回退）
         assert body["total"] == 0
         assert body["records"] == []

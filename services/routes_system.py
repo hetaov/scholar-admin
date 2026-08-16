@@ -26,7 +26,7 @@ async def root():
 async def health():
     try:
         db = get_db()
-        await db.query(collection="sentence", where={}, limit=1)
+        await db.query(collection="sentence_v2", where={}, limit=1)
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -37,26 +37,6 @@ async def list_collections():
     """列出所有集合及其配置信息"""
     return [
         {
-            "name": "sentence",
-            "description": "语句表 — 每一条英文原句",
-            "indexes": ["sentence_id", "unit_id", "paragraph_id", "text_book_id"],
-        },
-        {
-            "name": "unit",
-            "description": "单元/课文表 — 每篇学习单元",
-            "indexes": ["unit_id"],
-        },
-        {
-            "name": "paragraph",
-            "description": "段落表 — 单元内的段落",
-            "indexes": ["paragraph_id", "unit_id"],
-        },
-        {
-            "name": "learning_mastery_tracking",
-            "description": "学习追踪表 — 旧表, Phase 3 起停写(只读迁移数据)",
-            "indexes": ["scholar_id", "sentence_id", "competency_id"],
-        },
-        {
             "name": "study_attempt",
             "description": "学习事件表 — append-only, 每次学习行为写一条(替代旧 tracking 写入)",
             "indexes": ["scholar_id", "sentence_id", "skill_code", "session_id"],
@@ -65,11 +45,6 @@ async def list_collections():
             "name": "study_session",
             "description": "学习会话表 — start 创建 / end 结算, 回填 duration_sec 与 attempt_count",
             "indexes": ["scholar_id", "textbook_id", "status"],
-        },
-        {
-            "name": "textbook",
-            "description": "教材表 — 教材元信息(旧表, Phase 6 下线)",
-            "indexes": [],
         },
         {
             "name": "textbook_v2",
@@ -83,7 +58,7 @@ async def list_collections():
         },
         {
             "name": "lesson",
-            "description": "课表 — 章 → 课(lesson_id 过渡期沿用旧 unit_id 值)",
+            "description": "课表 — 章 → 课",
             "indexes": ["lesson_id", "chapter_id", "textbook_id", "order"],
         },
         {

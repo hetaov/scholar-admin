@@ -36,14 +36,14 @@ def check_schema():
 
 def test_literal_collection(check_schema):
     found: set[str] = set()
-    check_schema._scan_py_file('await db.query(collection="sentence", where={})', found)
-    assert found == {"sentence"}
+    check_schema._scan_py_file('await db.query(collection="foo", where={})', found)
+    assert found == {"foo"}
 
 
 def test_colon_literal_collection(check_schema):
     found: set[str] = set()
-    check_schema._scan_py_file('db.query(collection: "textbook")', found)
-    assert found == {"textbook"}
+    check_schema._scan_py_file('db.query(collection: "bar")', found)
+    assert found == {"bar"}
 
 
 def test_const_reference_collection(check_schema):
@@ -78,12 +78,12 @@ def test_imported_const_not_collected(check_schema):
 
 def test_scan_collections_tmp(tmp_path, check_schema):
     (tmp_path / "a.py").write_text(
-        'x = db.query(collection="textbook")', encoding="utf-8"
+        'x = db.query(collection="bar")', encoding="utf-8"
     )
     (tmp_path / "b.py").write_text(
         'CHAPTER = "chapter"\ny = db.query(collection=CHAPTER)', encoding="utf-8"
     )
-    assert check_schema.scan_collections(tmp_path) == {"textbook", "chapter"}
+    assert check_schema.scan_collections(tmp_path) == {"bar", "chapter"}
 
 
 def test_scan_collections_skips_skill_dir(tmp_path, check_schema):
@@ -109,9 +109,9 @@ def test_scan_collections_skips_hidden_dirs(tmp_path, check_schema):
 # ---------------------------------------------------------------------------
 
 
-def test_project_root_matches_phase1(check_schema):
-    """Phase 1 完成后: 4 个新表已使用, 5 个旧表仍在用。"""
+def test_project_root_matches_phase6(check_schema):
+    """Phase 6 完成后: 4 个新表已使用, 5 个旧表已全部清理(无引用)。"""
     root = check_schema.find_project_root()
     found = check_schema.scan_collections(root)
     assert {"textbook_v2", "chapter", "lesson", "sentence_v2"} <= found
-    assert {"textbook", "unit", "paragraph", "sentence", "learning_mastery_tracking"} <= found
+    assert {"textbook", "unit", "paragraph", "sentence", "learning_mastery_tracking"}.isdisjoint(found)

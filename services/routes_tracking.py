@@ -6,6 +6,8 @@ import json as json_lib
 import logging
 from datetime import datetime, timezone
 
+import uuid
+
 from fastapi import APIRouter, HTTPException
 
 from services.dependencies import get_db
@@ -17,6 +19,7 @@ from services.models_learning import (
 )
 from services.models_content import (
     TEXTBOOK_V2,
+    build_textbook_v2_doc,
     get_chapters,
     get_lessons_by_chapter_ids,
     get_lessons_by_textbook,
@@ -37,7 +40,6 @@ from services.progress import (
     status_distribution_array,
     status_to_int,
 )
-from services.tracking_stats import compute_tracking_stats
 
 logger = logging.getLogger("scholar-admin.routes.tracking")
 router = APIRouter(tags=["追踪 & 教材"])
@@ -50,8 +52,7 @@ router = APIRouter(tags=["追踪 & 教材"])
 async def get_tracking_by_scholar(scholar_id: str):
     """根据 scholar_id 查询学习追踪记录（skill_state 能力模型，不再回退旧表）
 
-    只查询 skill_state（Phase 2 能力模型）；无记录时直接打印日志提示，
-    不再回退 learning_mastery_tracking 旧表（旧表为只读迁移源）。
+    只查询 skill_state（Phase 2 能力模型）；无记录时直接打印日志提示。
     """
     try:
         db = get_db()
@@ -78,27 +79,18 @@ async def get_tracking_by_scholar(scholar_id: str):
 async def get_tracking_stats(data: dict):
     """统计学习进度 — Phase 4 起服务端聚合（skill_state + 内容层级逐级聚合）
 
-    请求体（Phase 4 推荐）：
+    请求体：
     {
       "scholar_id": "scholar_xxx",   // 必填
-      "textbook_id": "tb_xxx",       // 教材（兼容别名 text_book_id）
+      "textbook_id": "tb_xxx",       // 教材（必填）
       "skill_code": "translation",   // 可选, 按能力维度独立聚合
       "detail": "lesson"             // 可选: lesson(默认, summary+课级统计) / full(全量,兼容) / chapter(章节树含课) / overview(章级) / summary(仅汇总)
-    }
-
-    兼容入口（Phase 2/3，客户端上报，仍可用）：
-    {
-      "scholar_id": "scholar_xxx",
-      "text_book_id": "tb_xxx",      // 兼容入口下必填
-      "record_list": [               // 客户端学习记录
-        {"sentence_id": "sent_xxx", "time_spent": 120, "status": "learned", "score": 90}
-      ]
     }
 
     返回 data 结构（默认 detail="lesson"，仅汇总 + 课级统计，不含章节/句子明细）：
     {
       "scholar_id": "...",
-      "text_book_id": "...",
+      "textbook_id": "...",
       "skill_code": "...",
       "summary": {
         "total_time_spent": 秒,
@@ -131,21 +123,14 @@ async def get_tracking_stats(data: dict):
     - "summary": 仅 summary（教材列表场景）
     """
     scholar_id = str(data.get("scholar_id") or "").strip()
-    record_list = data.get("record_list")
 
     if not scholar_id:
         raise HTTPException(status_code=400, detail="缺少参数 scholar_id")
 
-    # ── 兼容入口：客户端上报 record_list（Phase 2/3）──
-    if record_list is not None:
-        return await _stats_from_record_list(data, scholar_id, record_list)
-
-    # ── Phase 4：服务端聚合（不依赖客户端上报）──
-    textbook_id = str(
-        data.get("textbook_id") or data.get("text_book_id") or ""
-    ).strip()
+    # ── 服务端聚合（不依赖客户端上报）──
+    textbook_id = str(data.get("textbook_id") or "").strip()
     if not textbook_id:
-        raise HTTPException(status_code=400, detail="缺少参数 text_book_id")
+        raise HTTPException(status_code=400, detail="缺少参数 textbook_id")
     skill_code = str(data.get("skill_code") or "").strip() or None
     detail = str(data.get("detail") or "lesson").strip() or "lesson"
     if detail not in ("full", "chapter", "overview", "lesson", "summary"):
@@ -265,98 +250,16 @@ async def _aggregate_progress_for_book(
     )
 
 
-async def _stats_from_record_list(
-    data: dict, scholar_id: str, record_list: object
-) -> dict:
-    """兼容入口（Phase 2/3）：由客户端 record_list 计算统计，接口契约不变。"""
-    text_book_id = str(data.get("text_book_id") or "").strip()
-    if not text_book_id:
-        raise HTTPException(status_code=400, detail="缺少参数 text_book_id")
-    if not isinstance(record_list, list):
-        raise HTTPException(status_code=400, detail="record_list 必须为数组")
-
-    try:
-        db = get_db()
-        page_size = 100
-
-        # 1. 分页拉取该教材下的全部 sentence（按 unit + index 排序）
-        sentences: list[dict] = []
-        offset = 0
-        while True:
-            page = await db.query(
-                collection="sentence",
-                where={"text_book_id": text_book_id},
-                order=[{"field": "unit_id", "direction": "asc"}, {"field": "index", "direction": "asc"}],
-                offset=offset,
-                limit=page_size,
-                select={
-                    "sentence_id": 1,
-                    "unit_id": 1,
-                    "index": 1,
-                    "text": 1,
-                    "text_book_id": 1,
-                },
-            )
-            records = page.get("records", [])
-            sentences.extend(records)
-            if len(records) < page_size:
-                break
-            offset += page_size
-
-        # 2. 分页拉取该教材下的全部 unit
-        units: list[dict] = []
-        offset = 0
-        while True:
-            page = await db.query(
-                collection="unit",
-                where={"text_book_id": text_book_id},
-                offset=offset,
-                limit=page_size,
-                select={
-                    "unit_id": 1,
-                    "title": 1,
-                    "text_book_id": 1,
-                    "total_sentences": 1,
-                },
-            )
-            records = page.get("records", [])
-            units.extend(records)
-            if len(records) < page_size:
-                break
-            offset += page_size
-
-        stats = compute_tracking_stats(
-            scholar_id=scholar_id,
-            text_book_id=text_book_id,
-            record_list=record_list,
-            sentences=sentences,
-            units=units,
-        )
-        logger.info(
-            f"[tracking/stats] scholar_id={scholar_id}, text_book_id={text_book_id}, "
-            f"records={len(record_list)}, "
-            f"total_time={stats['summary']['total_time_spent']}s, "
-            f"progress={stats['summary']['textbook_progress']}"
-        )
-        return {"success": True, "data": stats}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[tracking/stats] 统计异常: {e}")
-        raise HTTPException(status_code=500, detail=f"统计失败: {str(e)}")
-
-
 # ==================== 教材管理 ====================
 
 
 @router.get("/textbook")
 async def get_textbook_all():
-    """查询所有教材列表 — textbook 集合全部数据"""
+    """查询所有教材列表 — textbook_v2 集合全部数据"""
     try:
         db = get_db()
-        result = await db.query(collection="textbook", where={})
-        logger.info(f"[查询] 查询 textbook 集合全部数据，结果={result}")
+        result = await db.query(collection=TEXTBOOK_V2, where={})
+        logger.info(f"[查询] 查询 textbook_v2 集合全部数据，结果={result}")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
@@ -364,12 +267,20 @@ async def get_textbook_all():
 
 @router.post("/textbook")
 async def add_textbook(data: dict):
-    """添加教材 — 请求体 {"title": "新概念2"}"""
+    """添加教材 — 请求体 {"title": "新概念2"}（写入 textbook_v2）"""
     try:
         db = get_db()
-        result = await db.insert(collection="textbook", data=data)
+        textbook_id = str(data.get("textbook_id") or data.get("_id") or "").strip() \
+            or f"tb_{uuid.uuid4().hex[:8]}"
+        doc = build_textbook_v2_doc(
+            textbook_id=textbook_id,
+            title=str(data.get("title") or "").strip(),
+            grade=str(data.get("grade") or "").strip(),
+            level=str(data.get("level") or "").strip(),
+        )
+        result = await db.insert(collection=TEXTBOOK_V2, data=doc)
         logger.info(
-            f"[插入] textbook 添加成功: {json_lib.dumps(data, ensure_ascii=False)}"
+            f"[插入] textbook_v2 添加成功: {json_lib.dumps(doc, ensure_ascii=False)}"
         )
         return result
     except Exception as e:
@@ -380,7 +291,7 @@ async def add_textbook(data: dict):
 
 
 async def _fetch_textbook_titles(db, textbook_ids: list[str]) -> dict[str, str]:
-    """批量查书名：textbook_v2 一次 $in 取回，迁移过渡期对缺失项一次回退旧表。
+    """批量查书名：textbook_v2 一次 $in 取回。
 
     替代逐本 _fetch_textbook_title 的 N+1 查询。返回 {textbook_id: title}。
     """
@@ -397,16 +308,6 @@ async def _fetch_textbook_titles(db, textbook_ids: list[str]) -> dict[str, str]:
     for r in recs:
         if r.get("title"):
             titles[r.get("_id")] = r.get("title")
-    missing = [tid for tid in ids if tid not in titles]
-    if missing:
-        old = await db.query(
-            collection="textbook",
-            where={"_id": {"$in": missing}},
-            select={"_id": 1, "title": 1},
-        )
-        for r in old.get("records", []):
-            if r.get("title"):
-                titles[r.get("_id")] = r.get("title")
     return titles
 
 
@@ -455,7 +356,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
                 s.get("sentence_id") for s in sentences if s.get("sentence_id")
             }
 
-        # 2. 书名批量 $in（一次新表 + 一次旧表回退）
+        # 2. 书名批量 $in（textbook_v2 一次取回）
         titles = await _fetch_textbook_titles(db, textbook_ids)
 
         # 3. 学习数据仅拉一次，按各教材句子集合在内存内过滤聚合，

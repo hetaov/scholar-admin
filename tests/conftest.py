@@ -29,23 +29,11 @@ if str(ROOT) not in sys.path:
 from services.routes_tracking import router as tracking_router  # noqa: E402
 from tests.fakes.fake_db import FakeDB  # noqa: E402
 
-# 常用种子数据(与既有 tests/test_tracking_stats.py 保持一致)
-SENTENCE_SEED = [
-    {"sentence_id": "sent_1", "unit_id": "unit_a", "index": 1, "text": "Hello", "text_book_id": "tb_1"},
-    {"sentence_id": "sent_2", "unit_id": "unit_a", "index": 2, "text": "World", "text_book_id": "tb_1"},
-    {"sentence_id": "sent_3", "unit_id": "unit_b", "index": 1, "text": "Goodbye", "text_book_id": "tb_1"},
-    {"sentence_id": "sent_4", "unit_id": "unit_b", "index": 2, "text": "Friend", "text_book_id": "tb_1"},
-]
-UNIT_SEED = [
-    {"unit_id": "unit_a", "title": "Unit A", "text_book_id": "tb_1"},
-    {"unit_id": "unit_b", "title": "Unit B", "text_book_id": "tb_1"},
-]
-
 
 @pytest.fixture()
 def fake_db() -> FakeDB:
-    """内存假数据库,预置 sentence/unit 种子数据。"""
-    return FakeDB(seed={"sentence": SENTENCE_SEED, "unit": UNIT_SEED})
+    """内存假数据库,默认空。测试按需用 fake_db.add 预置新表数据。"""
+    return FakeDB()
 
 
 @pytest.fixture()

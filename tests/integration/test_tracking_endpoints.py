@@ -1,7 +1,7 @@
 """集成测试示例:tests/integration/ 模板
 
 被测链路:FastAPI TestClient + FakeDB,覆盖:
-- GET  /tracking/{scholar_id}  按学者查询 learning_mastery_tracking
+- GET  /tracking/{scholar_id}  按学者查询 skill_state 聚合状态
 - POST /tracking/stats         学习进度统计(成功 + 参数校验)
 
 模板要点:
@@ -41,26 +41,26 @@ class TestGetTrackingByScholar:
 
 
 class TestPostTrackingStats:
-    """POST /tracking/stats"""
+    """POST /tracking/stats — 服务端聚合路径"""
 
-    def test_success(self, client):
+    def test_success(self, client, fake_db):
+        fake_db.add("chapter", {"chapter_id": "c1", "textbook_id": "tb_1", "title": "Ch1", "order": 1})
+        fake_db.add("lesson", {"lesson_id": "l1", "chapter_id": "c1", "title": "L1", "order": 1})
+        fake_db.add("sentence_v2", {"sentence_id": "s1", "lesson_id": "l1", "chapter_id": "c1", "textbook_id": "tb_1", "order": 1})
+        fake_db.add("sentence_v2", {"sentence_id": "s2", "lesson_id": "l1", "chapter_id": "c1", "textbook_id": "tb_1", "order": 2})
+        fake_db.add("skill_state", {"scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation", "status": "learned", "mastery_score": 80})
+        fake_db.add("study_attempt", {"scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation", "time_spent": 120})
         resp = client.post(
             "/tracking/stats",
-            json={
-                "scholar_id": "scholar_1",
-                "text_book_id": "tb_1",
-                "record_list": [
-                    {"sentence_id": "sent_1", "time_spent": 120, "status": "learned"},
-                ],
-            },
+            json={"scholar_id": "scholar_1", "textbook_id": "tb_1"},
         )
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["summary"]["total_time_spent"] == 120.0
         assert data["summary"]["learned_sentence_count"] == 1
-        assert data["summary"]["textbook_progress"] == pytest.approx(0.25)
+        assert data["summary"]["textbook_progress"] == pytest.approx(0.4)  # s1=0.8, s2=0.0
 
     def test_missing_scholar_id(self, client):
-        resp = client.post("/tracking/stats", json={"text_book_id": "tb_1", "record_list": []})
+        resp = client.post("/tracking/stats", json={"textbook_id": "tb_1"})
         assert resp.status_code == 400
         assert "scholar_id" in resp.json()["detail"]

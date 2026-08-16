@@ -1,9 +1,8 @@
 """Phase 1 内容模型分层集成测试
 
 覆盖:
-- _write_to_db(构建流程)双写: 旧表(unit/paragraph/sentence)照旧 + 新表(textbook_v2/chapter/lesson/sentence_v2)
-- _store_recognition_result(视觉识别)双写: 旧表照旧 + 新表层级完整
-- 旧接口行为不变(由既有 test_tracking_endpoints 兜底)
+- _write_to_db(构建流程): 只写新表(textbook_v2/chapter/lesson/sentence_v2), 旧表已下线(Phase 6)
+- _store_recognition_result(视觉识别): 只写新表, 层级完整
 """
 
 from __future__ import annotations
@@ -45,36 +44,28 @@ BUILD_CONTENT = {
 }
 
 
-class TestBuildDoubleWrite:
-    def test_build_writes_old_and_new_tables(self, monkeypatch):
+class TestBuildNewTables:
+    def test_build_writes_new_tables(self, monkeypatch):
         db = FakeDB()
         monkeypatch.setattr("services.routes_build.get_db", lambda: db)
         result = asyncio.run(_write_to_db(BUILD_CONTENT, "Test English"))
 
-        # 旧表照旧
-        assert len(db.all("textbook")) == 1
-        assert len(db.all("unit")) == 2
-        assert len(db.all("paragraph")) == 2
-        assert len(db.all("sentence")) == 3
-
-        # 新表双写
+        # 只写新表(旧表 Phase 6 已下线, 不再写入)
+        assert len(db.all("textbook")) == 0
+        assert len(db.all("unit")) == 0
+        assert len(db.all("paragraph")) == 0
+        assert len(db.all("sentence")) == 0
         assert len(db.all("textbook_v2")) == 1
         assert len(db.all("chapter")) >= 1
         assert len(db.all("lesson")) == 2
         assert len(db.all("sentence_v2")) == 3
 
-        # 返回兼容旧接口结构
+        # 返回结构
         assert result["unit_count"] == 2
         assert result["total_sentences"] == 3
         assert result["v2"]["sentence_count"] == 3
-
-    def test_lesson_id_reuses_unit_id(self, monkeypatch):
-        db = FakeDB()
-        monkeypatch.setattr("services.routes_build.get_db", lambda: db)
-        asyncio.run(_write_to_db(BUILD_CONTENT, "Test English"))
-        unit_ids = {u["unit_id"] for u in db.all("unit")}
-        lesson_ids = {l["lesson_id"] for l in db.all("lesson")}
-        assert lesson_ids == unit_ids
+        assert all("lesson_id" in u for u in result["units"])
+        assert all("unit_id" not in u for u in result["units"])
 
     def test_sentence_v2_hierarchy_consistent(self, monkeypatch):
         db = FakeDB()
@@ -84,18 +75,12 @@ class TestBuildDoubleWrite:
             assert s["chapter_id"]
             lesson = next(l for l in db.all("lesson") if l["lesson_id"] == s["lesson_id"])
             assert lesson["chapter_id"] == s["chapter_id"]
-
-    def test_old_tables_behavior_unchanged(self, monkeypatch):
-        """旧表写入内容与 Phase 1 之前完全一致(不新增/删除旧表字段逻辑)。"""
-        db = FakeDB()
-        monkeypatch.setattr("services.routes_build.get_db", lambda: db)
-        asyncio.run(_write_to_db(BUILD_CONTENT, "Test English"))
-        sent = db.all("sentence")[0]
-        assert set(sent) >= {"sentence_id", "unit_id", "paragraph_id", "index", "text", "text_book_id"}
+            assert "unit_id" not in s
+            assert "text_book_id" not in s
 
 
-class TestVisionDoubleWrite:
-    def test_vision_writes_old_and_new_tables(self):
+class TestVisionNewTables:
+    def test_vision_writes_new_tables(self):
         db = FakeDB()
         result = {
             "title": "Photo Lesson",
@@ -107,11 +92,12 @@ class TestVisionDoubleWrite:
         info = asyncio.run(_store_recognition_result(db, result, "upload", "tb_1"))
 
         assert info["sentence_count"] == 2
-        # 旧表照旧
-        assert len(db.all("unit")) == 1
-        assert len(db.all("paragraph")) == 1
-        assert len(db.all("sentence")) == 2
-        # 新表双写
+        assert "lesson_id" in info
+        assert "unit_id" not in info
+        # 只写新表(旧表 Phase 6 已下线)
+        assert len(db.all("unit")) == 0
+        assert len(db.all("paragraph")) == 0
+        assert len(db.all("sentence")) == 0
         assert len(db.all("textbook_v2")) == 1
         assert len(db.all("chapter")) == 1
         assert len(db.all("lesson")) == 1

@@ -4,7 +4,7 @@
 - `skill`      ：能力定义（种子数据：translation / listening / speaking / reading）
 - `skill_state`：学者 × 句子 × 能力 的当前状态，主键 `{scholar_id}_{sentence_id}_{skill_code}`
 
-字段映射（旧 learning_mastery_tracking → skill_state）：
+字段映射（旧能力状态模型 → skill_state）：
 - `time_spent`  → 归入事件聚合与 scholar_book.total_time_spent（Phase 3/5 落点）
 - `status/score/mastery` → `status` / `mastery_score` / `progress`
 - `study_count` → `attempt_count`

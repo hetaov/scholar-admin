@@ -72,7 +72,7 @@ class TestServerSideAggregation:
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["scholar_id"] == "scholar_1"
-        assert data["text_book_id"] == "tb_1"
+        assert data["textbook_id"] == "tb_1"
 
         summary = data["summary"]
         # 4 句: s1=0.8, s2=0.4, s3=0.95, s4=0.0 → 0.5375
@@ -162,47 +162,14 @@ class TestServerSideAggregation:
         assert "mastery_distribution" in data["lessons"][0]
         assert all("sentence" not in l for l in data["lessons"])
 
-    def test_legacy_alias_text_book_id(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        _seed_states(fake_db)
-        client = _client(monkeypatch, fake_db)
-        resp = client.post(
-            "/tracking/stats",
-            json={"scholar_id": "scholar_1", "text_book_id": "tb_1"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["data"]["text_book_id"] == "tb_1"
-
     def test_missing_textbook_id(self, monkeypatch, fake_db):
         client = _client(monkeypatch, fake_db)
         resp = client.post("/tracking/stats", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 400
-        assert "text_book_id" in resp.json()["detail"]
+        assert "textbook_id" in resp.json()["detail"]
 
     def test_missing_scholar_id(self, monkeypatch, fake_db):
         client = _client(monkeypatch, fake_db)
         resp = client.post("/tracking/stats", json={"textbook_id": "tb_1"})
         assert resp.status_code == 400
         assert "scholar_id" in resp.json()["detail"]
-
-    def test_legacy_record_list_still_works(self, monkeypatch, fake_db):
-        """兼容入口:带 record_list 仍走旧统计路径,契约不变。"""
-        # 用 tb_2 避开 conftest 种子(sentence 集合含 tb_1 的 4 条)
-        fake_db.add("sentence", {"sentence_id": "s1", "unit_id": "u1", "index": 1, "text": "Hi", "text_book_id": "tb_2"})
-        fake_db.add("unit", {"unit_id": "u1", "title": "U1", "text_book_id": "tb_2"})
-        client = _client(monkeypatch, fake_db)
-        resp = client.post(
-            "/tracking/stats",
-            json={
-                "scholar_id": "scholar_1",
-                "text_book_id": "tb_2",
-                "record_list": [
-                    {"sentence_id": "s1", "time_spent": 120, "status": "learned"},
-                ],
-            },
-        )
-        assert resp.status_code == 200
-        data = resp.json()["data"]
-        assert data["summary"]["total_time_spent"] == 120.0
-        assert data["summary"]["learned_sentence_count"] == 1
-        assert data["summary"]["textbook_progress"] == pytest.approx(1.0)

@@ -4,7 +4,7 @@
 - `study_attempt`：append-only 学习事件日志，每次学习行为写一条，只插入不修改
 - `study_session`：学习会话，start 创建 / end 结算，duration_sec 与 attempt_count 在结算时回填
 
-字段映射（旧 learning_mastery_tracking → study_attempt）：
+字段映射（旧学习追踪模型 → study_attempt）：
 - `time_spent` → `time_spent`（归入事件聚合与 scholar_book.total_time_spent）
 - `status/score/mastery` → 事件级状态与得分
 - `study_count` → 多次上报产生多条 attempt（聚合时再统计次数）

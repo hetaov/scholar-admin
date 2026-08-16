@@ -10,49 +10,42 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 from services.dependencies import get_db
+from services.models_content import SENTENCE_V2, TEXTBOOK_V2
 
 logger = logging.getLogger("scholar-admin.routes.admin")
 router = APIRouter(tags=["管理"])
 
 # ==================== 删除接口 ====================
 
-COLLECTIONS_TO_CLEANUP = [
-    "textbook",
-    "unit",
-    "paragraph",
-    "sentence",
-    "learning_mastery_tracking",
-]
-
 
 @router.post("/admin/textbook/cleanup")
 async def cleanup_textbooks(data: dict):
-    """根据 text_book_id 列表批量删除教材及其关联数据
+    """根据 textbook_id 列表批量删除教材及其关联数据（新表模型）
 
     请求体：
     {
-      "text_book_ids": ["tb_xxxxx", "tb_yyyyy"]
+      "textbook_ids": ["tb_xxxxx", "tb_yyyyy"]
     }
 
-    会依次从 textbook / unit / paragraph / sentence / learning_mastery_tracking
-    5 张表中删除所有关联记录。
+    会依次从 textbook_v2 / chapter / lesson / sentence_v2 /
+    skill_state / study_attempt / study_session 中删除关联记录。
     """
-    text_book_ids: list[str] = data.get("text_book_ids", [])
-    if not text_book_ids:
-        raise HTTPException(status_code=400, detail="缺少 text_book_ids 参数")
+    textbook_ids: list[str] = data.get("textbook_ids", [])
+    if not textbook_ids:
+        raise HTTPException(status_code=400, detail="缺少 textbook_ids 参数")
 
     db = get_db()
     results: dict[str, int] = {}
     total = 0
 
-    # ------------------- 1. 先查 sentence 的 ID（用于 learning_mastery_tracking 间接关联） -------------------
+    # 1. 收集该教材下 sentence_v2 的 ID（用于删除句子级学习记录 study_attempt）
     sentence_ids: list[str] = []
     try:
-        for i in range(0, len(text_book_ids), 100):
-            batch = text_book_ids[i : i + 100]
+        for i in range(0, len(textbook_ids), 100):
+            batch = textbook_ids[i : i + 100]
             resp = await db.query(
-                collection="sentence",
-                where={"text_book_id": {"$in": batch}},
+                collection=SENTENCE_V2,
+                where={"textbook_id": {"$in": batch}},
                 limit=5000,
                 select={"sentence_id": 1},
             )
@@ -60,42 +53,39 @@ async def cleanup_textbooks(data: dict):
                 if rec.get("sentence_id"):
                     sentence_ids.append(rec["sentence_id"])
     except Exception as e:
-        logger.warning(f"[cleanup] 查询 sentence_id 失败: {e}")
+        logger.warning(f"[cleanup] 查询 sentence_v2 失败: {e}")
 
-    # ------------------- 2. 删除 learning_mastery_tracking（通过 sentence_id 批量删除） -------------------
+    # 2. 删除句子级学习记录 study_attempt（按 sentence_id 批量删除）
     try:
+        cnt = 0
         if sentence_ids:
-            tm_cnt = 0
             for i in range(0, len(sentence_ids), 100):
                 batch = sentence_ids[i : i + 100]
                 resp = await db.delete(
-                    collection="learning_mastery_tracking",
+                    collection="study_attempt",
                     where={"sentence_id": {"$in": batch}},
                     multi=True,
                 )
-                tm_cnt += resp.get("deleted_count", 0)
-            results["learning_mastery_tracking"] = tm_cnt
-            total += tm_cnt
-            logger.info(f"[cleanup] learning_mastery_tracking: 删除 {tm_cnt} 条")
-        else:
-            results["learning_mastery_tracking"] = 0
+                cnt += resp.get("deleted_count", 0)
+        results["study_attempt"] = cnt
+        total += cnt
     except Exception as e:
-        logger.warning(f"[cleanup] learning_mastery_tracking 删除异常: {e}")
-        results["learning_mastery_tracking"] = -1
+        logger.warning(f"[cleanup] study_attempt 删除异常: {e}")
+        results["study_attempt"] = -1
 
-    # ------------------- 3. 删除 textbook / unit / paragraph / sentence -------------------
-    for coll in ["textbook", "unit", "paragraph", "sentence"]:
+    # 3. 删除教材级记录（textbook_v2 / chapter / lesson / sentence_v2 / skill_state / study_session）
+    for coll in ["textbook_v2", "chapter", "lesson", "sentence_v2", "skill_state", "study_session"]:
         try:
-            if coll == "textbook":
+            if coll == "textbook_v2":
                 resp = await db.delete(
                     collection=coll,
-                    where={"_id": {"$in": text_book_ids}},
+                    where={"_id": {"$in": textbook_ids}},
                     multi=True,
                 )
             else:
                 resp = await db.delete(
                     collection=coll,
-                    where={"text_book_id": {"$in": text_book_ids}},
+                    where={"textbook_id": {"$in": textbook_ids}},
                     multi=True,
                 )
             cnt = resp.get("deleted_count", 0)
@@ -110,7 +100,7 @@ async def cleanup_textbooks(data: dict):
         "success": True,
         "deleted_total": total,
         "detail": results,
-        "text_book_ids": text_book_ids,
+        "textbook_ids": textbook_ids,
     }
 
 
@@ -119,32 +109,32 @@ async def cleanup_textbooks(data: dict):
 
 @router.post("/admin/textbook/merge")
 async def merge_textbooks(data: dict):
-    """将多个教材合并为一个 — 所选教材的 unit/sentence 全部转移到第一个教材下
+    """将多个教材合并为一个 — 所选教材的 chapter/lesson/sentence_v2 全部转移到第一个教材下
 
     请求体：
     {
-      "text_book_ids": ["tb_xxxxx", "tb_yyyyy", "tb_zzzzz"]
+      "textbook_ids": ["tb_xxxxx", "tb_yyyyy", "tb_zzzzz"]
     }
 
     合并规则：
     - 取第一个 ID 作为保留教材（survivor），其余教材将被删除
-    - 被合并教材的所有 unit / paragraph / sentence 的 text_book_id 更新为保留教材的 ID
-    - learning_mastery_tracking 通过 sentence_id 间接关联，无需修改
+    - 被合并教材的 chapter / lesson / sentence_v2 / skill_state / study_session
+      的 textbook_id 更新为保留教材的 ID（学习记录随教材一并迁移）
 
     返回：
     {
       "success": true,
       "survivor_id": "tb_xxxxx",
       "merged_ids": ["tb_yyyyy", "tb_zzzzz"],
-      "detail": { "unit": 10, "paragraph": 12, "sentence": 80, "deleted_textbook": 2 }
+      "detail": { "chapter": 10, "lesson": 20, "sentence_v2": 80, "deleted_textbook": 2 }
     }
     """
-    text_book_ids: list[str] = data.get("text_book_ids", [])
-    if len(text_book_ids) < 2:
+    textbook_ids: list[str] = data.get("textbook_ids", [])
+    if len(textbook_ids) < 2:
         raise HTTPException(status_code=400, detail="至少需要选择 2 本教材才能合并")
 
-    survivor_id = text_book_ids[0]
-    merge_ids = text_book_ids[1:]  # 将被合并后删除的教材
+    survivor_id = textbook_ids[0]
+    merge_ids = textbook_ids[1:]  # 将被合并后删除的教材
     now = int(time.time())
 
     db = get_db()
@@ -152,7 +142,7 @@ async def merge_textbooks(data: dict):
 
     # 1. 验证保留教材是否存在
     survivor_resp = await db.query(
-        collection="textbook",
+        collection=TEXTBOOK_V2,
         where={"_id": survivor_id},
         limit=1,
     )
@@ -160,78 +150,42 @@ async def merge_textbooks(data: dict):
         raise HTTPException(status_code=404, detail=f"教材不存在: {survivor_id}")
 
     try:
-        # 2. 迁移 unit / paragraph / sentence 的 text_book_id
-        for coll in ["unit", "paragraph", "sentence"]:
+        # 2. 迁移 chapter / lesson / sentence_v2 / skill_state / study_session 的 textbook_id
+        for coll in ["chapter", "lesson", "sentence_v2", "skill_state", "study_session"]:
             batch_cnt = 0
-            # CloudBase NoSQL 批量更新：遍历每个被合并的 textbook，将其下的记录迁移
             for mid in merge_ids:
-                # 查询该 merge_id 下当前集合的所有记录
                 query_resp = await db.query(
                     collection=coll,
-                    where={"text_book_id": mid},
+                    where={"textbook_id": mid},
                     limit=5000,
                 )
                 records_to_update = query_resp.get("records", [])
-                logger.info(
-                    f"[merge] {coll} mid={mid} "
-                    f"query_resp_keys={list(query_resp.keys())} "
-                    f"records_type={type(records_to_update).__name__} "
-                    f"records_len={getattr(records_to_update, '__len__', lambda: 0)()}"
-                )
-                # 防御：CloudBase 返回的 records 可能是 dict / str / list
                 if isinstance(records_to_update, dict):
-                    logger.info(
-                        f"[merge] {coll} mid={mid} records is dict, "
-                        f"keys={list(records_to_update.keys())[:10]} "
-                        f"sample_v={repr({k: type(v).__name__ for k, v in list(records_to_update.items())[:3]})}"
-                    )
                     records_to_update = [records_to_update]
                 elif isinstance(records_to_update, str):
-                    logger.info(
-                        f"[merge] {coll} mid={mid} records is str, "
-                        f"len={len(records_to_update)} preview={repr(records_to_update[:200])}"
-                    )
                     try:
                         records_to_update = json.loads(records_to_update) if records_to_update else []
-                        logger.info(
-                            f"[merge] {coll} mid={mid} after str decode → "
-                            f"type={type(records_to_update).__name__}"
-                        )
                     except (json.JSONDecodeError, TypeError) as e:
                         logger.error(f"[merge] {coll} mid={mid} JSON decode fail: {e}")
                         records_to_update = []
                     if isinstance(records_to_update, dict):
                         records_to_update = [records_to_update]
                 if not isinstance(records_to_update, list):
-                    logger.error(
-                        f"[merge] {coll} mid={mid} records is unexpected "
-                        f"type={type(records_to_update).__name__}, "
-                        f"value={repr(records_to_update)[:300]}"
-                    )
                     records_to_update = []
                 for rec in records_to_update:
-                    # 单个元素也可能是 JSON 字符串
                     if isinstance(rec, str):
                         try:
                             rec = json.loads(rec)
                         except (json.JSONDecodeError, TypeError):
-                            logger.warning(
-                                f"[merge] {coll} mid={mid} elem str not JSON: "
-                                f"{repr(rec[:100])}"
-                            )
                             continue
                     if not isinstance(rec, dict):
-                        logger.warning(
-                            f"[merge] {coll} mid={mid} elem not dict: "
-                            f"type={type(rec).__name__} val={repr(rec)[:100]}"
-                        )
                         continue
                     rec_id = rec.get("_id")
                     if rec_id:
                         await db.update(
                             collection=coll,
                             where={"_id": rec_id},
-                            data={"$set": {"text_book_id": survivor_id}},
+                            data={"$set": {"textbook_id": survivor_id}},
                             multi=False,
                         )
                         batch_cnt += 1
@@ -240,19 +194,19 @@ async def merge_textbooks(data: dict):
                 f"[merge] {coll}: 迁移 {batch_cnt} 条 → {survivor_id}"
             )
 
-        # 3. 删除被合并的 textbook 记录
+        # 3. 删除被合并的 textbook_v2 记录
         delete_resp = await db.delete(
-            collection="textbook",
+            collection=TEXTBOOK_V2,
             where={"_id": {"$in": merge_ids}},
             multi=True,
         )
         deleted_cnt = delete_resp.get("deleted_count", 0)
         results["deleted_textbook"] = deleted_cnt
-        logger.info(f"[merge] textbook: 删除 {deleted_cnt} 条合并源教材")
+        logger.info(f"[merge] textbook_v2: 删除 {deleted_cnt} 条合并源教材")
 
         # 4. 更新保留教材的 updated_at
         await db.update(
-            collection="textbook",
+            collection=TEXTBOOK_V2,
             where={"_id": survivor_id},
             data={"$set": {"updated_at": now}},
             multi=False,
@@ -335,7 +289,7 @@ MANAGE_PAGE = """<!DOCTYPE html>
 <body>
 <div class="container">
   <h1>📚 教材管理</h1>
-  <p class="sub">管理已生成的教材数据，选中教材后可一键删除该教材及其关联的所有 unit / sentence / 学习追踪记录。</p>
+  <p class="sub">管理已生成的教材数据，选中教材后可一键删除该教材及其关联的所有章节 / 课文 / 学习记录。</p>
 
   <div class="toolbar">
     <button class="btn btn-outline" onclick="selectAll()">全选</button>
@@ -452,7 +406,7 @@ async function doDelete() {
   const ids = [...selected];
   const ok = confirm(
     `确认删除以下 ${ids.length} 本教材及其关联的所有数据？\\n\\n` +
-    `删除范围：textbook / unit / paragraph / sentence / learning_mastery_tracking\\n\\n` +
+    `删除范围：textbook_v2 / chapter / lesson / sentence_v2 / skill_state / study_attempt / study_session\\n\\n` +
     `此操作不可撤销！`
   );
   if (!ok) return;
@@ -467,7 +421,7 @@ async function doDelete() {
     const resp = await fetch('/admin/textbook/cleanup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text_book_ids: ids }),
+      body: JSON.stringify({ textbook_ids: ids }),
     });
     const data = await resp.json();
     if (data.success) {
@@ -502,7 +456,7 @@ async function doMerge() {
     `保留教材（取第一个）：${titleList[0]}\\n` +
     `被合并教材（将被删除）：\\n` +
     titleList.slice(1).map(t => `  - ${t}`).join('\\n') +
-    `\\n\\n合并后，所有 unit / sentence 将归属到保留教材下，被合并教材本身将被删除。`
+    `\\n\\n合并后，所有章节 / 课文将归属到保留教材下，被合并教材本身将被删除。`
   );
   if (!ok) return;
 
@@ -517,7 +471,7 @@ async function doMerge() {
     const resp = await fetch('/admin/textbook/merge', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text_book_ids: ids }),
+      body: JSON.stringify({ textbook_ids: ids }),
     });
     const data = await resp.json();
     if (data.success) {

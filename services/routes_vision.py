@@ -25,70 +25,32 @@ async def _store_recognition_result(
     db,
     result: dict,
     image_source: str,
-    text_book_id: str | None = None,
+    textbook_id: str | None = None,
 ) -> dict:
-    """将识别结果存入 unit / paragraph / sentence 三张表"""
+    """将识别结果存入新表 chapter / lesson / sentence_v2（无教材关联时不写 textbook_v2）"""
     now = int(time.time())
-    unit_id = f"unit_{uuid.uuid4().hex[:16]}"
-    paragraph_id = f"para_{uuid.uuid4().hex[:16]}"
+    lesson_id = f"lesson_{uuid.uuid4().hex[:16]}"
 
     sentences = result.get("sentences", [])
-    sentence_ids = [f"sent_{uuid.uuid4().hex[:16]}" for _ in sentences]
 
-    # 1. 写入 unit
-    unit_doc = {
-        "unit_id": unit_id,
-        "title": result.get("title", ""),
-        "material_type": result.get("material_type", "other"),
-        "language": result.get("language", "en"),
-        "summary": result.get("summary", ""),
-        "image_source": image_source,
-        "total_sentences": len(sentences),
-        "paragraph_count": 1,
-        "text_book_id": text_book_id or "",
-        "created_at": now,
-        "updated_at": now,
-    }
-    await db.insert(collection="unit", data=unit_doc)
-
-    # 2. 写入 paragraph
-    paragraph_doc = {
-        "paragraph_id": paragraph_id,
-        "unit_id": unit_id,
-        "index": 1,
-        "sentence_ids": sentence_ids,
-        "sentence_count": len(sentences),
-        "created_at": now,
-    }
-    await db.insert(collection="paragraph", data=paragraph_doc)
-
-    # 3. 逐条写入 sentence(旧表照旧)
     sentence_docs: list[dict] = []
     for i, s in enumerate(sentences):
-        sentence_doc = {
-            "sentence_id": sentence_ids[i],
-            "unit_id": unit_id,
-            "paragraph_id": paragraph_id,
+        sentence_docs.append({
+            "sentence_id": f"sent_{uuid.uuid4().hex[:16]}",
             "index": s.get("index", i + 1),
             "text": s.get("text", ""),
             "translation": s.get("translation", ""),
             "level": s.get("level", ""),
             "keywords": s.get("keywords", []),
-            "text_book_id": text_book_id or "",
-            "created_at": now,
-        }
-        sentence_docs.append(sentence_doc)
-        await db.insert(collection="sentence", data=sentence_doc)
+        })
 
-    # 4. 双写新表(chapter / lesson / sentence_v2), 无教材时不写 textbook_v2
-    textbook_id = text_book_id or ""
     v2_stats = await write_content_v2(
         db,
-        textbook_id=textbook_id,
+        textbook_id=textbook_id or "",
         textbook_title=result.get("title", ""),
         units=[{
-            "unit_id": unit_id,
-            "unit_title": result.get("title", ""),
+            "lesson_id": lesson_id,
+            "lesson_title": result.get("title", ""),
             "sentences": sentence_docs,
         }],
         now=now,
@@ -96,14 +58,13 @@ async def _store_recognition_result(
     )
 
     logger.info(
-        f"[存储] unit={unit_id}, sentences={len(sentences)}, "
-        f"text_book_id={text_book_id}, image_source={image_source}, "
+        f"[存储] lesson={lesson_id}, sentences={len(sentences)}, "
+        f"textbook_id={textbook_id or ''}, image_source={image_source}, "
         f"v2={v2_stats}"
     )
 
     return {
-        "unit_id": unit_id,
-        "paragraph_id": paragraph_id,
+        "lesson_id": lesson_id,
         "sentence_count": len(sentences),
         "v2": v2_stats,
     }
@@ -115,13 +76,13 @@ async def _store_recognition_result(
 @router.post("/vision/recognize")
 async def recognize_image(
     file: UploadFile = File(...),
-    text_book_id: str | None = Form(None, alias="textbookId"),
+    textbook_id: str | None = Form(None, alias="textbookId"),
 ):
     """识别英文教材图片，提取语句并返回结构化 JSON
 
     参数：
     - file: 图片文件（必填）
-    - text_book_id: 关联的教材 ID（选填，表单字段名 textbookId）
+    - textbook_id: 关联的教材 ID（选填，表单字段名 textbookId）
     """
     _validate_image_ext(file.filename or "")
 
@@ -131,7 +92,7 @@ async def recognize_image(
         db = get_db()
 
         result = service.recognize(image_bytes=contents)
-        store_info = await _store_recognition_result(db, result, "upload", text_book_id)
+        store_info = await _store_recognition_result(db, result, "upload", textbook_id)
 
         return {
             "success": True,

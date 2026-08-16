@@ -266,8 +266,8 @@ class TestAggregateProgress:
         assert stats["chapters"][0]["lessons"][0]["lesson_id"] == "l1"
         assert stats["chapters"][0]["lessons"][0]["progress"] == 0.6
 
-        # 兼容字段
-        assert stats["units"][0]["unit_id"] == "l1"
+        # 平铺字段(命名统一: lesson_id)
+        assert stats["units"][0]["lesson_id"] == "l1"
         assert len(stats["sentences"]) == 4
         assert stats["sentences"][0]["learned"] is True
 
@@ -362,8 +362,8 @@ class TestAggregateProgress:
         assert summary["textbook_progress"] == round((0.8 + 0.4 + 0.0 + 0.0) / 4, 4)
         # chapters 为空数组
         assert stats["chapters"] == []
-        # full 模式下 lessons/units 平铺仍返回
-        assert [u["unit_id"] for u in stats["units"]] == ["l1", "l2"]
+        # full 模式下 lessons/units 平铺仍返回(命名统一: lesson_id)
+        assert [u["lesson_id"] for u in stats["units"]] == ["l1", "l2"]
 
     def test_no_chapter_overview(self):
         states = [

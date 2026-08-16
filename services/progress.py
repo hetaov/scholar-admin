@@ -26,9 +26,19 @@ from services.models_learning import (
     clamp,
     derive_progress,
 )
-from services.tracking_stats import format_duration
-
 logger = logging.getLogger("scholar-admin.progress")
+
+
+def format_duration(seconds: float) -> str:
+    """把秒数格式化为可读字符串，如 3725 → "1小时2分5秒"、"45分"、"30秒"。"""
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{secs}秒"
+    if minutes:
+        return f"{minutes}分{secs}秒"
+    return f"{secs}秒"
 
 # 状态枚举顺序（mastery_distribution 固定输出键）
 _DISTRIBUTION_KEYS = [
@@ -370,7 +380,7 @@ def aggregate_progress(
 
     result: dict = {
         "scholar_id": scholar_id,
-        "text_book_id": textbook_id,
+        "textbook_id": textbook_id,
         "skill_code": skill_code,
         "summary": summary,
     }
@@ -391,12 +401,8 @@ def aggregate_progress(
     if not chapters and detail in ("chapter", "overview"):
         result["lessons"] = list(lesson_items_by_id.values())
     if detail == "full":
-        flat_lessons = [
-            {**l, "unit_id": l["lesson_id"], "unit_title": l["lesson_title"]}
-            for l in lesson_items_by_id.values()
-        ]
-        result["lessons"] = flat_lessons
-        result["units"] = flat_lessons
+        result["lessons"] = list(lesson_items_by_id.values())
+        result["units"] = list(lesson_items_by_id.values())
         result["sentences"] = [
             {
                 "sentence_id": s.get("sentence_id"),

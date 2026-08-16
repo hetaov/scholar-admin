@@ -320,7 +320,7 @@ async def load_learned_sentences(db, scholar_id: str) -> list[dict]:
     """加载该学者全部已学语句（文本 + 翻译）
 
     从 `skill_state`（Phase 2 能力模型）取 sentence_id（去重、排除未开始），
-    再到 `sentence` 集合分批查询（$in 上限 100 条/批）。
+    再到 `sentence_v2` 集合分批查询（$in 上限 100 条/批）。
 
     Returns:
         [{"text": str, "translation": str}, ...]；无已学语句时返回 []
@@ -348,7 +348,7 @@ async def load_learned_sentences(db, scholar_id: str) -> list[dict]:
     for i in range(0, len(sentence_ids), 100):
         batch = sentence_ids[i : i + 100]
         sentence_result = await db.query(
-            collection="sentence",
+            collection="sentence_v2",
             where={"sentence_id": {"$in": batch}},
             limit=100,
         )

@@ -32,27 +32,27 @@ class TestGroupUnitsIntoChapters:
         assert group_units_into_chapters([]) == []
 
     def test_less_than_one_group(self):
-        units = [{"unit_id": "u1"}, {"unit_id": "u2"}]
+        units = [{"label": "u1"}, {"label": "u2"}]
         groups = group_units_into_chapters(units)
         assert len(groups) == 1
         assert groups[0]["chapter_index"] == 1
-        assert [u["unit_id"] for u in groups[0]["units"]] == ["u1", "u2"]
+        assert [u["label"] for u in groups[0]["units"]] == ["u1", "u2"]
 
     def test_multiple_groups(self):
-        units = [{"unit_id": f"u{i}"} for i in range(1, 10)]
+        units = [{"label": f"u{i}"} for i in range(1, 10)]
         groups = group_units_into_chapters(units, units_per_chapter=3)
         assert len(groups) == 3
         assert [g["chapter_index"] for g in groups] == [1, 2, 3]
         assert [len(g["units"]) for g in groups] == [3, 3, 3]
 
     def test_remainder_group(self):
-        units = [{"unit_id": f"u{i}"} for i in range(1, 11)]  # 10 units
+        units = [{"label": f"u{i}"} for i in range(1, 11)]  # 10 units
         groups = group_units_into_chapters(units, units_per_chapter=3)
         assert len(groups) == 4
         assert [len(g["units"]) for g in groups] == [3, 3, 3, 1]
 
     def test_zero_units_per_chapter_all_in_one(self):
-        units = [{"unit_id": f"u{i}"} for i in range(1, 10)]
+        units = [{"label": f"u{i}"} for i in range(1, 10)]
         groups = group_units_into_chapters(units, units_per_chapter=0)
         assert len(groups) == 1
         assert len(groups[0]["units"]) == 9
@@ -92,23 +92,22 @@ class TestBuildDocs:
         assert doc["textbook_id"] == "tb_1"
         assert doc["sentence_count"] == 5
 
-    def test_build_sentence_v2_doc_keeps_old_fields(self):
+    def test_build_sentence_v2_doc(self):
         old = {
             "sentence_id": "sent_1",
-            "unit_id": "unit_3",
             "index": 2,
             "text": "Hello",
             "translation": "你好",
-            "text_book_id": "tb_1",
             "keywords": ["a"],
         }
-        doc = build_sentence_v2_doc(old, "chapter_x", "unit_3", "tb_1", now=1000)
+        doc = build_sentence_v2_doc(old, "chapter_x", "lesson_3", "tb_1", now=1000)
         assert doc["_id"] == "sent_1"
         assert doc["chapter_id"] == "chapter_x"
-        assert doc["lesson_id"] == "unit_3"
+        assert doc["lesson_id"] == "lesson_3"
         assert doc["textbook_id"] == "tb_1"
-        assert doc["unit_id"] == "unit_3"  # 过渡期保留
-        assert doc["text_book_id"] == "tb_1"  # 过渡期保留
+        # Phase 6: 过渡字段 unit_id / text_book_id 已移除
+        assert "unit_id" not in doc
+        assert "text_book_id" not in doc
         assert doc["order"] == 2
 
 
@@ -122,15 +121,13 @@ class TestWriteContentV2:
         units = []
         for i in range(1, n + 1):
             units.append({
-                "unit_id": f"unit_{i}",
-                "unit_title": f"Lesson {i}",
+                "lesson_id": f"lesson_{i}",
+                "lesson_title": f"Lesson {i}",
                 "sentences": [
                     {
                         "sentence_id": f"sent_{i}_{j}",
-                        "unit_id": f"unit_{i}",
                         "index": j,
                         "text": f"Text {i}-{j}",
-                        "text_book_id": "tb_1",
                     }
                     for j in range(1, per + 1)
                 ],
@@ -163,7 +160,9 @@ class TestWriteContentV2:
         sentences = db.all("sentence_v2")
         for s in sentences:
             assert s["chapter_id"]
-            assert s["lesson_id"] == s["unit_id"]  # lesson_id 与旧 unit_id 一致
+            assert s["lesson_id"].startswith("lesson_")  # 输入 lesson_id 原样回填
+            assert "unit_id" not in s
+            assert "text_book_id" not in s
 
     def test_lesson_chapter_mapping(self):
         db = FakeDB()
@@ -220,6 +219,6 @@ class TestWriteContentV2:
             chapterless=True,
         ))
         lessons = asyncio.run(get_lessons_by_textbook(db, "tb_noch"))
-        assert [l["lesson_id"] for l in lessons] == ["unit_1", "unit_2", "unit_3"]
+        assert [l["lesson_id"] for l in lessons] == ["lesson_1", "lesson_2", "lesson_3"]
         # 无章教材: 不按 chapter_id 过滤也能查到全部课
         assert all(l["chapter_id"] == "" for l in lessons)

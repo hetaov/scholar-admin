@@ -2,8 +2,7 @@
 
 Phase 1 目标:
     textbook_v2 → chapter → lesson → sentence_v2
-新表独立创建, 旧表 textbook/sentence/unit/paragraph 照常服务线上。
-sentence_v2 过渡期保留 unit_id / text_book_id 旧字段, 便于迁移核对, Phase 6 移除。
+新表独立创建, 旧表 textbook/sentence/unit/paragraph 迁移结束后下线(Phase 6)。
 """
 
 from __future__ import annotations
@@ -250,10 +249,7 @@ def build_sentence_v2_doc(
     textbook_id: str,
     now: int | None = None,
 ) -> dict:
-    """旧 sentence → sentence_v2(全量复制 + 回填 chapter_id / lesson_id)。
-
-    过渡期保留 unit_id / text_book_id 旧字段(Phase 6 移除), 便于迁移核对。
-    """
+    """sentence → sentence_v2(全量复制 + 回填 chapter_id / lesson_id / textbook_id)。"""
     now = now or int(time.time())
     return {
         "_id": sentence_doc["sentence_id"],
@@ -261,8 +257,6 @@ def build_sentence_v2_doc(
         "textbook_id": textbook_id,
         "chapter_id": chapter_id,
         "lesson_id": lesson_id,
-        "unit_id": sentence_doc.get("unit_id", ""),
-        "text_book_id": sentence_doc.get("text_book_id", ""),
         "order": sentence_doc.get("index", sentence_doc.get("order", 1)),
         "text": sentence_doc.get("text", ""),
         "translation": sentence_doc.get("translation", ""),
@@ -294,7 +288,7 @@ async def write_content_v2(
 
     Args:
         textbook_id: 教材 ID; 为空时不写 textbook_v2(视觉识别等无教材场景)。
-        units: 每个单元含 unit_id / unit_title / sentences(旧 sentence doc 列表)。
+        units: 每个单元含 lesson_id / lesson_title / sentences(句子 doc 列表)。
                句子 doc 需含 sentence_id / index / text / translation 等字段。
         units_per_chapter: 每章包含的课数; 仅 chapterless=False 时生效。
         chapterless: True 时不创建 chapter, lesson 直接挂在 book 下(chapter_id 为空)。
@@ -316,14 +310,14 @@ async def write_content_v2(
     sentence_docs: list[dict] = []
 
     def _append_lesson(u: dict, chapter_id: str) -> None:
-        lesson_id = u["unit_id"]
+        lesson_id = u["lesson_id"]
         unit_sentences = u.get("sentences", [])
         lesson_docs.append(build_lesson_doc(
             lesson_id,
             chapter_id,
             textbook_id,
             lesson_offset + len(lesson_docs) + 1,
-            u.get("unit_title", f"Lesson {len(lesson_docs) + 1}"),
+            u.get("lesson_title", f"Lesson {len(lesson_docs) + 1}"),
             len(unit_sentences),
             now,
         ))
