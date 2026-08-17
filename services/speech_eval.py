@@ -67,7 +67,9 @@ def _load_sdk() -> bool:
         return True
     except ImportError:
         logger.error(
-            "[speech_eval] 缺少官方 SDK 源码，请先 git clone 到 vendor/tencentcloud-speech-sdk-python"
+            "[speech_eval] 缺少官方 SDK 源码（vendor/tencentcloud-speech-sdk-python），"
+            "请先 git clone；详细导入错误见下",
+            exc_info=True,
         )
         return False
 
@@ -128,7 +130,18 @@ class TencentSoeNProvider(SpeechProvider):
     @property
     def available(self) -> bool:
         """需要 AppID + SecretId + SecretKey（CloudRun 注入 / 本地 .env）"""
-        return bool(self._appid and self._secret_id and self._secret_key)
+        ok = bool(self._appid and self._secret_id and self._secret_key)
+        if not ok:
+            # 详细诊断日志：区分缺失项（不打印密钥值，仅打印存在性）
+            logger.warning(
+                "[speech_eval] SOE-N 凭据不完整 → available=False "
+                "（appid=%s secret_id=%s secret_key=%s；"
+                "cloudrun 自动注入 TENCENTCLOUD_*，TCB_APPID 需在服务环境变量手动配置，改后需重启服务）",
+                "OK" if self._appid else "MISSING",
+                "OK" if self._secret_id else "MISSING",
+                "OK" if self._secret_key else "MISSING",
+            )
+        return ok
 
     def evaluate(
         self, audio_bytes: bytes, ref_text: str, voice_format: str = DEFAULT_VOICE_FORMAT
@@ -189,7 +202,16 @@ class TencentSoeNProvider(SpeechProvider):
             logger.error("[speech_eval] 评测超时（%ss）", EVALUATE_TIMEOUT)
             return None
         except Exception as e:  # noqa: BLE001 — 任何 SDK/网络异常都降级为 None（路由层回退旧链路）
-            logger.error("[speech_eval] SOE-N 调用异常: %s", e)
+            logger.error(
+                "[speech_eval] SOE-N 调用异常: %s（appid=%s, voice_format=%s, ref_words=%d, "
+                "session_token=%s）",
+                e,
+                self._appid,
+                voice_format,
+                len(ref_text.split()),
+                "已配置" if self._session_token else "无",
+                exc_info=True,
+            )
             return None
 
 

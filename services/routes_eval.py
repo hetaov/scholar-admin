@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from config import SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_APPID
 from services.asr import get_asr_service, ASRService
 from services.dependencies import get_db
 from services.database import CloudBaseNoSQLClient
@@ -190,6 +191,16 @@ async def eval_speech(
 
     # 3. SOE-N 评测（同步 WSS 阻塞，丢线程池避免卡事件循环）
     if not provider.available:
+        # 详细诊断日志：区分缺失项（不打印密钥值，仅打印存在性）
+        logger.warning(
+            "[eval] /eval/speech SOE_UNAVAILABLE 诊断：TCB_APPID=%s, SECRET_ID=%s, "
+            "SECRET_KEY=%s, SESSION_TOKEN=%s；"
+            "来源=CloudRun 自动注入（TENCENTCLOUD_*）或控制台环境变量，改后需重启服务生效",
+            "已配置" if TCB_APPID else "缺失",
+            "已配置" if SECRET_ID else "缺失",
+            "已配置" if SECRET_KEY else "缺失",
+            "已配置" if SESSION_TOKEN else "缺失",
+        )
         return EvalTranslateResponse(
             success=False,
             code="SOE_UNAVAILABLE",
