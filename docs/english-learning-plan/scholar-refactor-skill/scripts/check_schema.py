@@ -42,6 +42,9 @@ TARGET_COLLECTIONS = {
     "study_session": "学习会话",
     "scholar_book": "学者×教材 关联",
     "knowledge_point": "知识点(可选)",
+    # P2 扩展（2026-08-17，见 03-change/proposals/2026-08-16-P2-后续扩展功能完整设计.md）
+    "badge": "徽章定义(P2/F8)",
+    "scholar_badge": "学者已获得徽章(P2/F8)",
 }
 
 # 旧集合 → 迁移目标(旧表仍可能被现有代码使用,迁移完成后从代码中移除)

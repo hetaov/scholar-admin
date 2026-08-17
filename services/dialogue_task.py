@@ -44,10 +44,22 @@ def build_task_id() -> str:
     return "dt_" + uuid.uuid4().hex
 
 
-async def create_task(db, *, scholar_id: str, sentence: str) -> dict:
+async def create_task(
+    db,
+    *,
+    scholar_id: str,
+    sentence: str,
+    scenario: str | None = None,
+    session_id: str | None = None,
+) -> dict:
     """创建 pending 任务并落库，返回任务文档。
 
     不做任何 LLM 调用，保证调用方（提交接口）耗时毫秒级。
+
+    P2/F10 扩展（2026-08-17）：
+    - `scenario`（可选）：`daily` / `travel` / `ordering` / `interview` / `free`，
+      缺省 `free`，仅透传至任务上下文（服务端无状态）；
+    - `session_id`（可选）：多轮会话标识，仅透传，不参与匹配。
     """
     now = _now_ms()
     task_doc: dict[str, Any] = {
@@ -62,9 +74,16 @@ async def create_task(db, *, scholar_id: str, sentence: str) -> dict:
         "updated_at": now,
         "expires_at": now + TASK_TTL_MS,
     }
+    # P2/F10：仅透传字段，保持向后兼容（旧任务无这两个字段）
+    if scenario:
+        task_doc["scenario"] = str(scenario)
+    if session_id:
+        task_doc["session_id"] = str(session_id)
     await db.insert(COLLECTION, task_doc)
     logger.info(
         f"[task] create → task_id={task_doc['task_id']}, scholar={scholar_id}"
+        + (f", scenario={scenario}" if scenario else "")
+        + (f", session_id={session_id}" if session_id else "")
     )
     return task_doc
 
@@ -205,13 +224,22 @@ async def recover_task_if_stale(db, task: dict, timeout_s: int = 120) -> bool:
     return False
 
 
-async def run_dialogue_task(task_id: str, scholar_id: str, sentence: str) -> None:
+async def run_dialogue_task(
+    task_id: str,
+    scholar_id: str,
+    sentence: str,
+    scenario: str | None = None,
+    session_id: str | None = None,
+) -> None:
     """后台执行对话匹配任务并写回结果。
 
     由提交接口 `asyncio.create_task(...)` 调度，与请求解耦：
     - claim_task 原子抢占：被其他实例抢占则直接返回，避免重复执行
     - 加载已学语句 → 执行 LangGraph 匹配 → finish_task 写回
     - 业务失败（无已学语句/匹配失败）与异常统一走 failed 分支，绝不抛到调度方
+
+    P2/F10（2026-08-17）：`scenario`/`session_id` 仅透传至任务上下文
+    （任务文档已落库，此处不参与匹配逻辑，保持向后兼容）。
     """
     db = get_db()
     if not await claim_task(db, task_id):

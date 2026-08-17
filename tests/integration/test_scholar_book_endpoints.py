@@ -136,6 +136,8 @@ class TestGetBooks:
         summary = book["summary"]
         assert summary["total_sentence_count"] == 2
         assert summary["learned_sentence_count"] == 1
+        # f3 累计学习次数：s1 translation(learned) attempt=2
+        assert summary["total_attempt_count"] == 2
         assert summary["textbook_progress"] == pytest.approx(0.4)  # (0.8 + 0.0) / 2
         # 综合掌握度：mastery_ratio 口径（s1 learned → 2/(3×2)，分母含未学 s2）
         assert summary["mastery"] == pytest.approx(0.3333)
@@ -175,6 +177,8 @@ class TestGetBooks:
         # 加权 = 1×learning + 2×learned + 3×mastered = 1+2+3 = 6；
         # 分母取 max(2 句, 3 记录) = 3 → 6/(3×3) ≈ 0.6667
         assert summary["mastery"] == pytest.approx(0.6667)
+        # f3 乐观 pick_state：s1 取 progress 最高者 conversation(mastered)=3，不计 translation=2
+        assert summary["total_attempt_count"] == 4  # s1=3 + s2=1
         # translation：learned + learning → 2+1 = 3，分母 max(2, 2) = 2 → 3/(3×2) = 0.5
         assert summary["skills"]["translation"] == pytest.approx(0.5)
         # conversation：mastered → 3，分母 max(2, 1) = 2 → 3/(3×2) = 0.5
@@ -196,6 +200,19 @@ class TestGetBooks:
         book = resp.json()["data"]["books"][0]
         assert book["current_chapter_id"] == "c1"
         assert book["current_lesson_id"] == "l5"
+
+    def test_attempt_count_zero_without_learning(self, monkeypatch, fake_db):
+        """f3 空态：加入教材但无学习记录 → total_attempt_count 为 0。"""
+        _seed_content(fake_db)
+        client = _tracking_client(monkeypatch, fake_db)
+        client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
+        )
+        resp = client.get("/scholar/s1/books")
+        summary = resp.json()["data"]["books"][0]["summary"]
+        assert summary["learned_sentence_count"] == 0
+        assert summary["total_attempt_count"] == 0
 
     def test_multiple_books_isolated(self, monkeypatch, fake_db):
         client = _tracking_client(monkeypatch, fake_db)

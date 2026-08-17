@@ -60,10 +60,14 @@ class TestCreateDialogueTask:
     def test_ok_returns_task_id_pending(self, monkeypatch, fake_db):
         called = {}
 
-        async def fake_run(task_id, scholar_id, sentence):
+        async def fake_run(
+            task_id, scholar_id, sentence, scenario=None, session_id=None
+        ):
             called["task_id"] = task_id
             called["scholar_id"] = scholar_id
             called["sentence"] = sentence
+            called["scenario"] = scenario
+            called["session_id"] = session_id
 
         monkeypatch.setattr(
             "services.routes_dialogue.run_dialogue_task", fake_run

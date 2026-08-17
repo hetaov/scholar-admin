@@ -74,6 +74,9 @@ class TestGetTextbookLessons:
         assert summary["learned_sentence_count"] == 2  # s1, s3
         # mastery: 档位加权 (learning=1, learned=2, mastered=3) /3: s2=1, s1=2, s3=3, s4=0 → 6/12
         assert summary["mastery"] == pytest.approx(0.5)
+        # f3 累计学习次数：乐观 pick_state 求和（s1 取 translation=2，不计 listening=1）
+        assert summary["total_attempt_count"] == 6  # s1=2 + s2=1 + s3=3
+        assert summary["avg_attempt_count"] == 3.0  # 6 / learned(2)
 
         # lessons 列表(2 课, 按序)
         assert [l["lesson_id"] for l in data["lessons"]] == ["l1", "l2"]
@@ -114,11 +117,29 @@ class TestGetTextbookLessons:
         assert data["summary"]["textbook_progress"] == 0.0
         assert data["summary"]["mastery"] == 0.0
         assert data["summary"]["learned_sentence_count"] == 0
+        # f3 空态：无任何学习记录 → 累计次数为 0，avg 分母为 0 → 0.0
+        assert data["summary"]["total_attempt_count"] == 0
+        assert data["summary"]["avg_attempt_count"] == 0.0
         l1 = data["lessons"][0]
         assert l1["progress"]["overall_percent"] == 0
         assert l1["progress"]["mastery"] == 0.0
         assert l1["progress"]["skills"] == {}
         assert l1["progress"]["status_distribution"] == [0, 0, 0, 0, 0, 0]
+
+    def test_avg_attempt_count_zero_when_none_learned(self, monkeypatch, fake_db):
+        """f3 分母边界：有学习次数但无 learned/mastered → avg 恒 0.0（不除零）。"""
+        _seed_content(fake_db)
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
+            "status": "learning", "mastery_score": 40, "attempt_count": 5,
+        })
+        client = _client(monkeypatch, fake_db)
+        resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
+        assert resp.status_code == 200
+        summary = resp.json()["data"]["summary"]
+        assert summary["learned_sentence_count"] == 0
+        assert summary["total_attempt_count"] == 5
+        assert summary["avg_attempt_count"] == 0.0
 
 
 class TestGetLessonSentences:

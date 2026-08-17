@@ -59,6 +59,22 @@ VALID_ATTEMPT_STATUSES = {
     ATTEMPT_STATUS_ABANDONED,
 }
 
+# 错误分类（P2/F11 错题本）：仅 attempt_status=incorrect 时有意义；显式传入才写入
+ERROR_TYPE_VOCABULARY = "vocabulary"
+ERROR_TYPE_GRAMMAR = "grammar"
+ERROR_TYPE_PRONUNCIATION = "pronunciation"
+ERROR_TYPE_COMPREHENSION = "comprehension"
+ERROR_TYPE_OTHER = "other"
+VALID_ERROR_TYPES = {
+    ERROR_TYPE_VOCABULARY,
+    ERROR_TYPE_GRAMMAR,
+    ERROR_TYPE_PRONUNCIATION,
+    ERROR_TYPE_COMPREHENSION,
+    ERROR_TYPE_OTHER,
+}
+# 错题本聚合时对缺失 error_type 的回落口径（存量数据归入 other）
+ERROR_TYPE_FALLBACK = ERROR_TYPE_OTHER
+
 # 会话状态
 SESSION_STATUS_ACTIVE = "active"
 SESSION_STATUS_ENDED = "ended"
@@ -139,13 +155,15 @@ def build_attempt_doc(
     time_spent: int | None = None,
     lesson_id: str | None = None,
     session_id: str | None = None,
+    error_type: str | None = None,
     attempt_id: str | None = None,
     now: int | None = None,
 ) -> dict:
     """构建 study_attempt 事件文档（纯函数，只生成不落库）。"""
     now = int(now or time.time())
     _id = attempt_id or new_attempt_id(now)
-    return {
+    normalized_status = normalize_attempt_status(status)
+    doc: dict[str, Any] = {
         "_id": _id,
         "attempt_id": _id,
         "scholar_id": scholar_id,
@@ -153,13 +171,19 @@ def build_attempt_doc(
         "lesson_id": lesson_id,
         "skill_code": skill_code,
         "attempt_type": normalize_attempt_type(attempt_type or infer_attempt_type(skill_code)),
-        "status": normalize_attempt_status(status),
+        "status": normalized_status,
         "score": score,
         "mastery": mastery,
         "time_spent": int(time_spent) if time_spent is not None else None,
         "session_id": session_id,
         "created_at": now,
     }
+    # P2/F11 错题本：仅 incorrect 且显式传入 error_type 时才写入，避免污染正确记录
+    if normalized_status == ATTEMPT_STATUS_INCORRECT and error_type:
+        _t = str(error_type).strip().lower()
+        if _t in VALID_ERROR_TYPES:
+            doc["error_type"] = _t
+    return doc
 
 
 def build_session_doc(
@@ -210,10 +234,12 @@ async def record_attempt(
     time_spent: int | None = None,
     lesson_id: str | None = None,
     session_id: str | None = None,
+    error_type: str | None = None,
     now: int | None = None,
 ) -> dict:
     """写入一条 study_attempt 事件（append-only，只插入不修改）。
 
+    - `error_type`（P2/F11 错题本）：仅 `status=incorrect` 且显式传入时写入文档。
     返回写入的事件文档。
     """
     doc = build_attempt_doc(
@@ -227,6 +253,7 @@ async def record_attempt(
         time_spent=time_spent,
         lesson_id=lesson_id,
         session_id=session_id,
+        error_type=error_type,
         now=now,
     )
     await db.insert(collection=STUDY_ATTEMPT, data=doc)

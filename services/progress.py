@@ -182,6 +182,27 @@ def status_distribution_array(distribution: dict) -> list[int]:
 # ---------------------------------------------------------------------------
 
 
+def sum_attempt_counts(sentence_items: list[dict]) -> int:
+    """累计学习次数（f3 汇总统计，乐观 `pick_state` 口径）。
+
+    sentence_items 每项为 `{"sentence_id", "state"|None}`，其中 state 由调用方
+    先经 `pick_state` 选定（progress 最高者，与掌握度聚合同源），故同一句子的
+    多 skill 记录不重复计数；无记录 / 缺省 / 非法 attempt_count 计 0。
+    """
+    total = 0
+    for it in sentence_items:
+        state = it.get("state")
+        if not state:
+            continue
+        try:
+            v = int(state.get("attempt_count") or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            total += v
+    return total
+
+
 def lesson_progress(lesson: dict, sentence_items: list[dict]) -> dict:
     """课内进度：sentence_items = [{"sentence_id", "state"|None}, ...]。
 
@@ -198,6 +219,7 @@ def lesson_progress(lesson: dict, sentence_items: list[dict]) -> dict:
         "progress": avg,
         "learned_sentence_count": learned,
         "total_sentence_count": total,
+        "total_attempt_count": sum_attempt_counts(sentence_items),
         "mastery_distribution": mastery_distribution(states),
     }
 
@@ -221,6 +243,7 @@ def chapter_progress(chapter: dict, lesson_items: list[dict]) -> dict:
         "progress": progress,
         "learned_sentence_count": learned,
         "total_sentence_count": total_sentences,
+        "total_attempt_count": sum(l.get("total_attempt_count", 0) for l in lesson_items),
         "lesson_count": len(lesson_items),
         "mastery_distribution": merge_distributions(
             [l["mastery_distribution"] for l in lesson_items]
@@ -245,6 +268,7 @@ def book_progress(chapter_items: list[dict]) -> dict:
         "progress": progress,
         "learned_sentence_count": learned,
         "total_sentence_count": total_sentences,
+        "total_attempt_count": sum(c.get("total_attempt_count", 0) for c in chapter_items),
         "chapter_count": len(chapter_items),
         "lesson_count": sum(c["lesson_count"] for c in chapter_items),
         "mastery_distribution": merge_distributions(
@@ -269,6 +293,7 @@ def book_progress_from_lessons(lesson_items: list[dict]) -> dict:
         "progress": progress,
         "learned_sentence_count": learned,
         "total_sentence_count": total_sentences,
+        "total_attempt_count": sum(l.get("total_attempt_count", 0) for l in lesson_items),
         "chapter_count": 0,
         "lesson_count": len(lesson_items),
         "mastery_distribution": merge_distributions(
@@ -370,6 +395,7 @@ def aggregate_progress(
         "textbook_progress": book["progress"],
         "learned_sentence_count": book["learned_sentence_count"],
         "total_sentence_count": book["total_sentence_count"],
+        "total_attempt_count": book["total_attempt_count"],
         "chapter_count": book["chapter_count"],
         "lesson_count": book["lesson_count"],
         "mastery_distribution": book["mastery_distribution"],

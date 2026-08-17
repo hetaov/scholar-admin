@@ -24,6 +24,7 @@ from services.progress import (
     sentence_progress,
     status_distribution_array,
     status_to_int,
+    sum_attempt_counts,
     sum_time_spent,
 )
 
@@ -122,6 +123,43 @@ class TestMasteryDistribution:
 
 
 # ===========================================================================
+# 学习次数汇总（f3）
+# ===========================================================================
+
+
+class TestSumAttemptCounts:
+    """f3 汇总统计：乐观 pick_state 后 attempt_count 求和，多 skill 不重复。"""
+
+    def test_mixed(self):
+        items = [
+            {"sentence_id": "s1", "state": {"attempt_count": 3, "status": STATUS_LEARNED}},
+            {"sentence_id": "s2", "state": {"attempt_count": 1, "status": STATUS_LEARNING}},
+            {"sentence_id": "s3", "state": None},  # 未学
+        ]
+        assert sum_attempt_counts(items) == 4
+
+    def test_dirty(self):
+        items = [
+            {"sentence_id": "s1", "state": {"attempt_count": "abc"}},
+            {"sentence_id": "s2", "state": {"attempt_count": -5}},
+            {"sentence_id": "s3", "state": {"attempt_count": 0}},
+            {"sentence_id": "s4", "state": {}},
+        ]
+        assert sum_attempt_counts(items) == 0
+
+    def test_empty(self):
+        assert sum_attempt_counts([]) == 0
+        assert sum_attempt_counts([{"sentence_id": "s1", "state": None}]) == 0
+
+    def test_positive_only(self):
+        items = [
+            {"sentence_id": "s1", "state": {"attempt_count": 0}},
+            {"sentence_id": "s2", "state": {"attempt_count": 2}},
+        ]
+        assert sum_attempt_counts(items) == 2
+
+
+# ===========================================================================
 # 课 / 章 / 书 逐级聚合
 # ===========================================================================
 
@@ -152,15 +190,16 @@ class TestChapterProgress:
     def test_weighted_by_sentences(self):
         lesson_items = [
             {"lesson_id": "l1", "total_sentence_count": 3, "learned_sentence_count": 3,
-             "progress": 1.0, "mastery_distribution": mastery_distribution(
+             "total_attempt_count": 5, "progress": 1.0, "mastery_distribution": mastery_distribution(
                  [{"status": STATUS_LEARNED} for _ in range(3)])},
             {"lesson_id": "l2", "total_sentence_count": 1, "learned_sentence_count": 0,
-             "progress": 0.0, "mastery_distribution": mastery_distribution([])},
+             "total_attempt_count": 0, "progress": 0.0, "mastery_distribution": mastery_distribution([])},
         ]
         item = chapter_progress({"chapter_id": "c1", "title": "Ch1", "order": 1}, lesson_items)
         assert item["progress"] == 0.75  # (3*1.0 + 1*0.0)/4
         assert item["total_sentence_count"] == 4
         assert item["learned_sentence_count"] == 3
+        assert item["total_attempt_count"] == 5  # f3：子课求和
         assert item["lesson_count"] == 2
         assert item["mastery_distribution"]["learned"] == 3
 
@@ -174,15 +213,16 @@ class TestBookProgress:
     def test_weighted(self):
         chapters = [
             {"total_sentence_count": 4, "learned_sentence_count": 4, "progress": 1.0,
-             "lesson_count": 2, "mastery_distribution": mastery_distribution(
+             "total_attempt_count": 6, "lesson_count": 2, "mastery_distribution": mastery_distribution(
                  [{"status": STATUS_LEARNED} for _ in range(4)])},
             {"total_sentence_count": 4, "learned_sentence_count": 0, "progress": 0.0,
-             "lesson_count": 1, "mastery_distribution": mastery_distribution([])},
+             "total_attempt_count": 0, "lesson_count": 1, "mastery_distribution": mastery_distribution([])},
         ]
         book = book_progress(chapters)
         assert book["progress"] == 0.5
         assert book["total_sentence_count"] == 8
         assert book["learned_sentence_count"] == 4
+        assert book["total_attempt_count"] == 6  # f3：子章求和
         assert book["chapter_count"] == 2
         assert book["lesson_count"] == 3
 

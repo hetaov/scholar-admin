@@ -138,6 +138,29 @@ async def get_sentences_by_lesson_ids(
     return records
 
 
+async def get_sentences_by_ids(
+    db,
+    sentence_ids: list[str],
+    page_size: int = 1000,
+) -> list[dict]:
+    """按多个句子 ID 批量查句子（$in，每批 200 防 $in 数组过大）。
+
+    供学者级调度接口（review-plan / weakness-plan）跨课/跨教材一次性
+    加载候选句子内容（text / translation / lesson_id），避免逐句 N+1。
+    """
+    if not sentence_ids:
+        return []
+    records: list[dict] = []
+    for i in range(0, len(sentence_ids), 200):
+        records.extend(await query_all_pages(
+            db,
+            collection=SENTENCE_V2,
+            where={"sentence_id": {"$in": sentence_ids[i:i + 200]}},
+            page_size=page_size,
+        ))
+    return records
+
+
 async def get_textbook_v2(db, textbook_id: str) -> dict | None:
     """按主键查教材 v2, 不存在返回 None。"""
     result = await db.query(collection=TEXTBOOK_V2, where={"_id": textbook_id}, limit=1)

@@ -90,10 +90,12 @@ async def match_dialogue_endpoint(data: dict):
 async def create_match_dialogue_task(data: dict):
     """提交异步对话匹配任务 — 毫秒级返回 taskId，匹配在后台执行
 
-    请求体（与同步接口一致）：
+    请求体（与同步接口一致，P2/F10 新增可选 scenario/sessionId）：
     {
       "scholarId": "6d758f346a6daee000859c332ed11089",
-      "sentence": "I go to school by bus every day."
+      "sentence": "I go to school by bus every day.",
+      "scenario": "daily",        // 可选：daily/travel/ordering/interview/free，缺省 free
+      "sessionId": "ses_xxx"      // 可选：多轮会话标识，仅透传
     }
 
     返回：
@@ -104,6 +106,8 @@ async def create_match_dialogue_task(data: dict):
     """
     scholar_id = data.get("scholarId", "")
     input_sentence = data.get("sentence", "")
+    scenario = data.get("scenario")
+    session_id = data.get("sessionId")
 
     if not scholar_id:
         raise HTTPException(status_code=400, detail="缺少参数 scholarId")
@@ -113,12 +117,22 @@ async def create_match_dialogue_task(data: dict):
     try:
         db = get_db()
         task = await create_task(
-            db, scholar_id=scholar_id, sentence=input_sentence
+            db,
+            scholar_id=scholar_id,
+            sentence=input_sentence,
+            scenario=scenario,
+            session_id=session_id,
         )
         # 后台执行，不阻塞当前请求（毫秒级返回）。
         # 必须持有 task 引用并注册 done_callback，否则协程可能被 GC 回收而取消。
         bg = asyncio.create_task(
-            run_dialogue_task(task["task_id"], scholar_id, input_sentence)
+            run_dialogue_task(
+                task["task_id"],
+                scholar_id,
+                input_sentence,
+                scenario=scenario,
+                session_id=session_id,
+            )
         )
         _background_tasks.add(bg)
         bg.add_done_callback(_background_tasks.discard)

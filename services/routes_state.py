@@ -39,7 +39,9 @@ async def report_tracking_state(data: dict):
       "time_spent": 120,             // 可选，学习时长（秒），归入事件聚合
       "attempt_type": "translate",   // 可选，事件类型（read/translate/listen/speak/quiz）
       "attempt_status": "completed", // 可选，事件结果（correct/incorrect/completed/abandoned）
-      "session_id": "ses_xxx"        // 可选，所属会话（由 POST /tracking/session/start 创建）
+      "session_id": "ses_xxx",       // 可选，所属会话（由 POST /tracking/session/start 创建）
+      "error_type": "grammar"        // 可选（P2/F11）：仅 attempt_status=incorrect 时生效
+                                     //   vocabulary/grammar/pronunciation/comprehension/other
     }
 
     返回：
@@ -85,12 +87,14 @@ async def report_tracking_state(data: dict):
             time_spent=time_spent,
             lesson_id=data.get("lesson_id"),
             session_id=data.get("session_id"),
+            error_type=data.get("error_type"),
         )
         logger.info(
             f"[tracking/state] scholar_id={scholar_id}, sentence_id={sentence_id}, "
             f"skill_code={skill_code}, status={state.get('status')}, "
             f"attempt_count={state.get('attempt_count')}, time_spent={time_spent}, "
-            f"attempt_id={attempt.get('attempt_id')}"
+            f"attempt_id={attempt.get('attempt_id')}, "
+            f"error_type={attempt.get('error_type')}"
         )
         return {"success": True, "data": {"state": state, "attempt": attempt}}
     except Exception as e:
