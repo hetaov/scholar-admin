@@ -12,6 +12,10 @@ if _env_path.exists():
 # CloudBase 环境 ID
 ENV_ID = os.environ.get("TCB_ENV_ID", "knowlege-graph-env-d7cwud346b70b")
 
+# 腾讯云账号 AppID（SOE-N WSS 鉴权 URL 必需，控制台右上角头像 → 账号信息）
+# 与 scripts/soe_n_verify.py 同源（TCB_APPID），本地可写 scholar-admin/.env
+TCB_APPID = os.environ.get("TCB_APPID", "")
+
 # 区域
 REGION = os.environ.get("TCB_REGION", "ap-shanghai")
 

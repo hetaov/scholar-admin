@@ -82,12 +82,12 @@ class CloudBaseNoSQLClient:
         http_request_method = "POST"
         canonical_uri = "/"
         canonical_querystring = ""
-        ct = "application/json; charset=utf-8"
+        ct = "application/json"  # 与官方 SDK 完全一致（不带 charset，否则 AuthFailure.SignatureFailure）
         payload_str = json.dumps(payload)
-        canonical_headers = (
-            f"content-type:{ct}\nhost:{TCB_API_HOST}\nx-tc-action:{action.lower()}\n"
-        )
-        signed_headers = "content-type;host;x-tc-action"
+        # 对齐腾讯云官方 SDK（tencentcloud-sdk-python sign.py）：仅 content-type;host 参与签名，
+        # X-TC-Action 等仅作普通请求头，不写入 canonical/signed headers，否则 AuthFailure.SignatureFailure
+        canonical_headers = f"content-type:{ct}\nhost:{TCB_API_HOST}\n"
+        signed_headers = "content-type;host"
         hashed_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
         canonical_request = "\n".join(
             [
@@ -143,11 +143,16 @@ class CloudBaseNoSQLClient:
     async def _request(self, action: str, payload: dict) -> dict:
         """发起腾讯云 API 请求"""
         headers = self._sign_tc3(action, payload)
+        # 重要：签名基于 json.dumps(payload)（默认带空格，201 字节）；
+        # httpx 的 json= 参数会以紧凑格式(无空格,193 字节)重新序列化，导致服务端
+        # 按收到的 body 重算 sha256 与签名不符 → AuthFailure.SignatureFailure。
+        # 因此必须用 content= 发送与签名完全一致的预序列化字节。
+        body = json.dumps(payload)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     self.endpoint,
-                    json=payload,
+                    content=body,
                     headers=headers,
                 )
                 raw_result = resp.json()

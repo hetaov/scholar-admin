@@ -10,6 +10,7 @@
 - 教材构建   → services/routes_build.py
 - 管理       → services/routes_admin.py
 - 评估       → services/routes_eval.py
+- 语音合成   → services/routes_tts.py
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from services.routes_vision import router as vision_router
 from services.routes_build import router as build_router
 from services.routes_admin import router as admin_router
 from services.routes_eval import router as eval_router
+from services.routes_tts import router as tts_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -67,6 +69,7 @@ app.include_router(vision_router)
 app.include_router(build_router)
 app.include_router(admin_router)
 app.include_router(eval_router)
+app.include_router(tts_router)
 
 # ---------------------------------------------------------------------------
 # 启动

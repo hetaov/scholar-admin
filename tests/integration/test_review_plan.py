@@ -68,12 +68,14 @@ class TestReviewPlan:
             "next_review_at": _ts(16, 11),
         })
         client = _client(monkeypatch, fake_db)
-        resp = client.post("/tracking/review-plan", json={"scholar_id": "scholar_1"})
+        resp = client.post(
+            "/tracking/review-plan",
+            json={"scholar_id": "scholar_1", "date": "2026-08-16"},  # 显式传固定日期,避免"今日"漂移
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["success"] is True
         data = body["data"]
-        # 不传 date 默认今日(2026-08-16)
         assert data["date"] == "2026-08-16"
         assert data["total"] == 2
         queue = data["review_queue"]
