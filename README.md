@@ -77,6 +77,8 @@ tcb cloudrun deploy
 
 CloudRun 环境下，`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN` 会自动注入，**无需手动配置这三项**。
 
+> **SOE-N 语音评测依赖官方 SDK 源码**（`vendor/tencentcloud-speech-sdk-python`，PyPI 无包，纯源码分发）。`.gitignore` 排除了 `vendor/`，因此从 **git 仓库拉取构建** 的 CloudRun 部署产物不含该目录——Dockerfile 已在构建期兜底：若镜像缺 `vendor/tencentcloud-speech-sdk-python/common` 则在线 `git clone` 官方仓库。若构建机无法访问 GitHub，需先 `git add -f vendor/tencentcloud-speech-sdk-python` 入库后再部署。
+
 ## 配置项说明
 
 所有配置通过**环境变量**注入，定义在 `config.py` 中：

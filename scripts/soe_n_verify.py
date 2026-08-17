@@ -15,6 +15,9 @@
         scholar-admin/vendor/tencentcloud-speech-sdk-python
     pip install websocket-client requests      # SDK 依赖；readme 建议 websocket-client==0.48，新版实测兼容
 
+注意：vendor/ 已被 .gitignore 排除，git 仓库构建（CloudRun）时容器内没有该目录。
+Dockerfile 构建期已兜底在线 clone；若构建机无外网，需 git add -f vendor 入库。
+
 用法：
     export TENCENTCLOUD_SECRETID=... TENCENTCLOUD_SECRETKEY=...   # 与 scholar-admin/config.py 同源
     python scripts/soe_n_verify.py --appid 1306xxx --audio test16k.mp3 \

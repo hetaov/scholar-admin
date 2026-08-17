@@ -56,7 +56,14 @@ def _load_sdk() -> bool:
     global _sdk_credential, _sdk_speaking_assessment
     if _sdk_credential is not None:
         return True
-    if SDK_DIR.is_dir() and str(SDK_DIR) not in sys.path:
+    if not SDK_DIR.is_dir():
+        logger.error(
+            "[speech_eval] 缺少官方 SDK 源码目录: %s（镜像/部署产物未含 vendor/tencentcloud-speech-sdk-python；"
+            "git 部署时 .gitignore 排除了 vendor/，需 Dockerfile 构建期在线拉取或 git add -f vendor 入库后重部署）",
+            SDK_DIR,
+        )
+        return False
+    if str(SDK_DIR) not in sys.path:
         sys.path.insert(0, str(SDK_DIR))
     try:
         from common import credential as _c
@@ -67,8 +74,8 @@ def _load_sdk() -> bool:
         return True
     except ImportError:
         logger.error(
-            "[speech_eval] 缺少官方 SDK 源码（vendor/tencentcloud-speech-sdk-python），"
-            "请先 git clone；详细导入错误见下",
+            "[speech_eval] 官方 SDK 源码目录存在但导入失败: %s（目录结构不完整？traceback 见下）",
+            SDK_DIR,
             exc_info=True,
         )
         return False
