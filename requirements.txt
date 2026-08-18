@@ -1,7 +1,8 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 httpx==0.27.2
-pydantic==2.9.2
+# pydantic 约束与 deepeval 4.1.x（要求 >=2.11.7）对齐；2.9.2 为陈旧锁定，全新环境解析冲突
+pydantic>=2.11.7,<3.0.0
 openai>=1.0.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
