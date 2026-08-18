@@ -16,9 +16,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from services.routes_dialogue import router as dialogue_router
 from services.routes_tracking import router as tracking_router
 
@@ -63,27 +60,12 @@ def _skill_state(sid: str, scholar: str = "scholar_1", status: str = "learned") 
     }
 
 
-def _tracking_client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_tracking.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(tracking_router)
-    return TestClient(app)
-
-
-def _dialogue_client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_dialogue.get_db", lambda: fake_db)
-    monkeypatch.setattr("services.dialogue_task.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(dialogue_router)
-    return TestClient(app)
-
-
 class TestDailyGoal:
     """F6 POST /tracking/daily-goal"""
 
-    def test_no_history_falls_back_to_floor(self, monkeypatch, fake_db):
+    def test_no_history_falls_back_to_floor(self, make_client, fake_db):
         """近 7 天无记录 → goal 回落 floor（3/5/10），今日无进度 → percent=0。"""
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/daily-goal", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         body = resp.json()
@@ -94,7 +76,7 @@ class TestDailyGoal:
         assert data["percent"] == 0
         assert data["completed"] is False
 
-    def test_with_history_grows_goal(self, monkeypatch, fake_db):
+    def test_with_history_grows_goal(self, make_client, fake_db):
         """近 7 天有记录 → goal = clamp(round(avg×1.2), floor, cap)。"""
         # 昨天:3 句新学、20 分钟、10 次
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(1), time_spent=600))
@@ -103,7 +85,7 @@ class TestDailyGoal:
         fake_db.add("skill_state", _skill_state("s1"))
         fake_db.add("skill_state", _skill_state("s2"))
         fake_db.add("skill_state", _skill_state("s3"))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/daily-goal", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -113,7 +95,7 @@ class TestDailyGoal:
         assert data["goal"]["minutes"] >= 5
         assert data["completed"] is False
 
-    def test_today_progress_and_completed(self, monkeypatch, fake_db):
+    def test_today_progress_and_completed(self, make_client, fake_db):
         """今日进度按口径统计：新学句数/分钟/次数；达标 → completed。"""
         now = int(datetime.now(timezone.utc).timestamp())
         # 10 次尝试（floor.attempts=10 达标），其中 3 句达 learned（floor.new_sentences=3 达标）
@@ -124,7 +106,7 @@ class TestDailyGoal:
             )
         for i in range(3):
             fake_db.add("skill_state", _skill_state(f"s{i}"))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/daily-goal", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -135,13 +117,13 @@ class TestDailyGoal:
         assert data["percent"] >= 100
         assert data["completed"] is True
 
-    def test_missing_scholar_id_400(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_missing_scholar_id_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.post("/tracking/daily-goal", json={})
         assert resp.status_code == 400
 
-    def test_bad_date_400(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_bad_date_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.post(
             "/tracking/daily-goal",
             json={"scholar_id": "scholar_1", "date": "2026-13-99"},
@@ -152,14 +134,14 @@ class TestDailyGoal:
 class TestLeaderboard:
     """F8 GET /tracking/leaderboard"""
 
-    def test_metric_minutes_ranking(self, monkeypatch, fake_db):
+    def test_metric_minutes_ranking(self, make_client, fake_db):
         """week 窗口按 minutes 排序；昵称来自 scholars，无 openid。"""
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(0), scholar="scholar_a", time_spent=300))
         fake_db.add("study_attempt", _attempt("a2", "s2", _ts(0), scholar="scholar_a", time_spent=300))
         fake_db.add("study_attempt", _attempt("a3", "s3", _ts(0), scholar="scholar_b", time_spent=120))
         fake_db.add("scholars", {"_id": "scholar_a", "name": "小a"})
         fake_db.add("scholars", {"_id": "scholar_b", "name": "小b"})
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/leaderboard?period=week&metric=minutes&scholar_id=scholar_a")
         assert resp.status_code == 200
         body = resp.json()
@@ -180,48 +162,48 @@ class TestLeaderboard:
         # 隐私：不返回 openid
         assert "openid" not in items[0]
 
-    def test_metric_sentences_dedup(self, monkeypatch, fake_db):
+    def test_metric_sentences_dedup(self, make_client, fake_db):
         """sentences 指标：同一学者重复句子去重计数。"""
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(0), scholar="scholar_a"))
         fake_db.add("study_attempt", _attempt("a2", "s1", _ts(0), scholar="scholar_a"))
         fake_db.add("study_attempt", _attempt("a3", "s2", _ts(0), scholar="scholar_a"))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/leaderboard?metric=sentences")
         assert resp.status_code == 200
         items = resp.json()["data"]["items"]
         assert items[0]["value"] == 2  # s1 + s2 去重
 
-    def test_period_filter_excludes_old(self, monkeypatch, fake_db):
+    def test_period_filter_excludes_old(self, make_client, fake_db):
         """week 窗口不含 8 天前记录。"""
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(0), scholar="scholar_a", time_spent=60))
         fake_db.add("study_attempt", _attempt("a2", "s2", _ts(8), scholar="scholar_b", time_spent=600))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/leaderboard?period=week")
         assert resp.status_code == 200
         items = resp.json()["data"]["items"]
         assert len(items) == 1
         assert items[0]["scholar_id"] == "scholar_a"
 
-    def test_my_rank_null_when_not_listed(self, monkeypatch, fake_db):
+    def test_my_rank_null_when_not_listed(self, make_client, fake_db):
         """请求学者未上榜 → my_rank=null，is_me=false。"""
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(0), scholar="scholar_a", time_spent=60))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/leaderboard?scholar_id=scholar_missing")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["my_rank"] is None
         assert all(not it["is_me"] for it in data["items"])
 
-    def test_empty_returns_empty(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_empty_returns_empty(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.get("/tracking/leaderboard")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["items"] == []
         assert data["my_rank"] is None
 
-    def test_invalid_params_400(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_invalid_params_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         assert client.get("/tracking/leaderboard?period=day").status_code == 400
         assert client.get("/tracking/leaderboard?metric=hours").status_code == 400
         assert client.get("/tracking/leaderboard?limit=0").status_code == 400
@@ -260,12 +242,12 @@ class TestBadges:
             "enabled": False,
         })
 
-    def test_earn_and_lock(self, monkeypatch, fake_db):
+    def test_earn_and_lock(self, make_client, fake_db):
         """达标 → 幂等发放进 earned；未达标 → locked 含 progress。"""
         self._seed_badges(fake_db)
         fake_db.add("skill_state", _skill_state("s1"))  # learned_count=1 → 达标 first_learn
         fake_db.add("study_attempt", _attempt("a1", "s1", _ts(0), time_spent=60))  # 1 分钟
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/badges")
         assert resp.status_code == 200
         body = resp.json()
@@ -279,11 +261,11 @@ class TestBadges:
         assert "minutes_30" in locked
         assert locked["minutes_30"]["progress"] == {"current": 1, "target": 30}
 
-    def test_idempotent_award(self, monkeypatch, fake_db):
+    def test_idempotent_award(self, make_client, fake_db):
         """重复调用幂等：scholar_badge 只发一条，earned 不重复。"""
         self._seed_badges(fake_db)
         fake_db.add("skill_state", _skill_state("s1"))
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         for _ in range(3):
             resp = client.get("/tracking/scholar_1/badges")
             assert resp.status_code == 200
@@ -294,16 +276,16 @@ class TestBadges:
         assert first[0]["first_awarded_at"] == first[0]["awarded_at"]
         assert first[0]["badge_code"] == "first_learn"
 
-    def test_no_badge_definitions(self, monkeypatch, fake_db):
+    def test_no_badge_definitions(self, make_client, fake_db):
         """无徽章定义 → success:true, earned:[], locked:[]。"""
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/badges")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data == {"earned": [], "locked": []}
 
-    def test_missing_scholar_400(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_missing_scholar_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.get("/tracking//badges")
         assert resp.status_code in (400, 404)  # 空路径由框架处理，此处不强约束
 
@@ -311,7 +293,7 @@ class TestBadges:
 class TestWrongBook:
     """F11 GET /tracking/{scholar_id}/wrong-book"""
 
-    def test_aggregation_and_ordering(self, monkeypatch, fake_db):
+    def test_aggregation_and_ordering(self, make_client, fake_db):
         """incorrect 事件按句子聚合：error_count、error_types 分布、按 last_error_at 降序。"""
         fake_db.add("study_attempt", _attempt("w1", "s1", _ts(1), time_spent=30, status="incorrect", error_type="grammar"))
         fake_db.add("study_attempt", _attempt("w2", "s1", _ts(0), time_spent=30, status="incorrect", error_type="vocabulary"))
@@ -331,7 +313,7 @@ class TestWrongBook:
             "lesson_id": "l1",
             "chapter_id": "c1",
         })
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/wrong-book")
         assert resp.status_code == 200
         body = resp.json()
@@ -350,12 +332,12 @@ class TestWrongBook:
         types = {t["type"]: t["count"] for t in s1["error_types"]}
         assert types == {"grammar": 1, "vocabulary": 1}
 
-    def test_error_type_filter(self, monkeypatch, fake_db):
+    def test_error_type_filter(self, make_client, fake_db):
         """error_type 入参：仅统计该类型错误；error_types 仍为全量分布。"""
         fake_db.add("study_attempt", _attempt("w1", "s1", _ts(0), time_spent=30, status="incorrect", error_type="grammar"))
         fake_db.add("study_attempt", _attempt("w2", "s1", _ts(0), time_spent=30, status="incorrect", error_type="vocabulary"))
         fake_db.add("sentence_v2", {"sentence_id": "s1", "text": "T", "translation": "译"})
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/wrong-book?error_type=grammar")
         assert resp.status_code == 200
         item = resp.json()["data"]["items"][0]
@@ -363,28 +345,28 @@ class TestWrongBook:
         types = {t["type"]: t["count"] for t in item["error_types"]}
         assert types == {"grammar": 1, "vocabulary": 1}  # 全量
 
-    def test_legacy_missing_error_type_falls_back_to_other(self, monkeypatch, fake_db):
+    def test_legacy_missing_error_type_falls_back_to_other(self, make_client, fake_db):
         """存量数据无 error_type → 回落 other 口径。"""
         doc = _attempt("w1", "s1", _ts(0), time_spent=30, status="incorrect")
         fake_db.add("study_attempt", doc)
         fake_db.add("sentence_v2", {"sentence_id": "s1", "text": "T", "translation": "译"})
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/wrong-book")
         assert resp.status_code == 200
         item = resp.json()["data"]["items"][0]
         assert item["error_count"] == 1
         assert item["error_types"] == [{"type": "other", "count": 1}]
 
-    def test_empty(self, monkeypatch, fake_db):
+    def test_empty(self, make_client, fake_db):
         """无错题 → success:true, total:0, items:[]。"""
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/tracking/scholar_1/wrong-book")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data == {"total": 0, "items": []}
 
-    def test_invalid_limit_400(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_invalid_limit_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         assert client.get("/tracking/scholar_1/wrong-book?limit=0").status_code == 400
         assert client.get("/tracking/scholar_1/wrong-book?limit=201").status_code == 400
 
@@ -392,7 +374,7 @@ class TestWrongBook:
 class TestDialogueTaskScenario:
     """F10 POST /match/dialogue/task — scenario/sessionId 透传"""
 
-    def test_scenario_and_session_id_persisted(self, monkeypatch, fake_db):
+    def test_scenario_and_session_id_persisted(self, make_client, monkeypatch, fake_db):
         called = {}
 
         async def fake_run(task_id, scholar_id, sentence, scenario=None, session_id=None):
@@ -405,7 +387,7 @@ class TestDialogueTaskScenario:
             })
 
         monkeypatch.setattr("services.routes_dialogue.run_dialogue_task", fake_run)
-        client = _dialogue_client(monkeypatch, fake_db)
+        client = make_client(dialogue_router)
         resp = client.post(
             "/match/dialogue/task",
             json={
@@ -423,7 +405,7 @@ class TestDialogueTaskScenario:
         assert stored["scenario"] == "travel"
         assert stored["session_id"] == "ses_abc"
 
-    def test_optional_fields_absent(self, monkeypatch, fake_db):
+    def test_optional_fields_absent(self, make_client, monkeypatch, fake_db):
         """未传 scenario/sessionId → 任务文档不含这些字段（向后兼容）。"""
         called = {}
 
@@ -431,7 +413,7 @@ class TestDialogueTaskScenario:
             called.update({"scenario": scenario, "session_id": session_id})
 
         monkeypatch.setattr("services.routes_dialogue.run_dialogue_task", fake_run)
-        client = _dialogue_client(monkeypatch, fake_db)
+        client = make_client(dialogue_router)
         resp = client.post(
             "/match/dialogue/task",
             json={"scholarId": "s1", "sentence": "Hello"},

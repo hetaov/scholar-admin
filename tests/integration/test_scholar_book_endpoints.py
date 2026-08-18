@@ -12,45 +12,16 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from services.models_scholar_book import SCHOLAR_BOOK
 from services.routes_state import router as state_router
 from services.routes_tracking import router as tracking_router
-
-
-def _tracking_client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_tracking.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(tracking_router)
-    return TestClient(app)
-
-
-def _state_client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_state.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(state_router)
-    return TestClient(app)
-
-
-def _seed_content(fake_db):
-    """预置 tb_1 内容层级: 1 章 1 课 2 句。"""
-    fake_db.add("chapter", {"chapter_id": "c1", "textbook_id": "tb_1", "title": "Ch1", "order": 1})
-    fake_db.add("lesson", {"lesson_id": "l1", "chapter_id": "c1", "title": "L1", "order": 1})
-    fake_db.add(
-        "sentence_v2",
-        {"sentence_id": "s1", "lesson_id": "l1", "chapter_id": "c1", "textbook_id": "tb_1", "order": 1},
-    )
-    fake_db.add(
-        "sentence_v2",
-        {"sentence_id": "s2", "lesson_id": "l1", "chapter_id": "c1", "textbook_id": "tb_1", "order": 2},
-    )
+from tests.fakes.seed_factory import seed_content
 
 
 class TestPutPosition:
-    def test_first_join_creates_record(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_first_join_creates_record(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -63,8 +34,8 @@ class TestPutPosition:
         assert data["current_lesson_id"] == "l1"
         assert len(fake_db.all(SCHOLAR_BOOK)) == 1
 
-    def test_update_position_overwrites(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_update_position_overwrites(self, make_client, fake_db):
+        client = make_client(tracking_router)
         client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -79,8 +50,8 @@ class TestPutPosition:
         # 幂等: 同一 学者×教材 只有一条
         assert len(fake_db.all(SCHOLAR_BOOK)) == 1
 
-    def test_repeated_join_idempotent(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_repeated_join_idempotent(self, make_client, fake_db):
+        client = make_client(tracking_router)
         for _ in range(3):
             resp = client.put(
                 "/scholar/s1/books/tb_1/position",
@@ -89,8 +60,8 @@ class TestPutPosition:
             assert resp.status_code == 200
         assert len(fake_db.all(SCHOLAR_BOOK)) == 1
 
-    def test_only_last_studied_at_allowed(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_only_last_studied_at_allowed(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.put(
             "/scholar/s1/books/tb_1/position",
             json={"last_studied_at": 1234567890},
@@ -98,30 +69,30 @@ class TestPutPosition:
         assert resp.status_code == 200
         assert resp.json()["data"]["last_studied_at"] == 1234567890
 
-    def test_empty_body_rejected(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_empty_body_rejected(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.put("/scholar/s1/books/tb_1/position", json={})
         assert resp.status_code == 400
         assert "current_chapter_id" in resp.json()["detail"]
 
 
 class TestGetBooks:
-    def test_empty_list(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_empty_list(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.get("/scholar/s1/books")
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["scholar_id"] == "s1"
         assert data["books"] == []
 
-    def test_list_with_progress(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
+    def test_list_with_progress(self, make_client, fake_db):
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1", "s2"), include_text=False)
         fake_db.add(
             "skill_state",
             {"scholar_id": "s1", "sentence_id": "s1", "skill_code": "translation",
              "status": "learned", "mastery_score": 80, "attempt_count": 2},
         )
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -148,9 +119,9 @@ class TestGetBooks:
         assert "speaking" not in summary["skills"]
         assert "reading" not in summary["skills"]
 
-    def test_summary_mastery_and_skills_weighted(self, monkeypatch, fake_db):
+    def test_summary_mastery_and_skills_weighted(self, make_client, fake_db):
         """多状态加权：综合掌握度含未学分母；分能力只统计该能力状态。"""
-        _seed_content(fake_db)
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1", "s2"), include_text=False)
         fake_db.add(
             "skill_state",
             {"scholar_id": "s1", "sentence_id": "s1", "skill_code": "translation",
@@ -166,7 +137,7 @@ class TestGetBooks:
             {"scholar_id": "s1", "sentence_id": "s2", "skill_code": "translation",
              "status": "learning", "mastery_score": 40, "attempt_count": 1},
         )
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -185,9 +156,9 @@ class TestGetBooks:
         assert summary["skills"]["conversation"] == pytest.approx(0.5)
         assert "listening" not in summary["skills"]
 
-    def test_breakpoint_retrieved_after_update(self, monkeypatch, fake_db):
+    def test_breakpoint_retrieved_after_update(self, make_client, fake_db):
         """验收标准: 断点更新后重新获取列表能取回 current_lesson_id。"""
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -201,10 +172,10 @@ class TestGetBooks:
         assert book["current_chapter_id"] == "c1"
         assert book["current_lesson_id"] == "l5"
 
-    def test_attempt_count_zero_without_learning(self, monkeypatch, fake_db):
+    def test_attempt_count_zero_without_learning(self, make_client, fake_db):
         """f3 空态：加入教材但无学习记录 → total_attempt_count 为 0。"""
-        _seed_content(fake_db)
-        client = _tracking_client(monkeypatch, fake_db)
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1", "s2"), include_text=False)
+        client = make_client(tracking_router)
         client.put(
             "/scholar/s1/books/tb_1/position",
             json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
@@ -214,8 +185,8 @@ class TestGetBooks:
         assert summary["learned_sentence_count"] == 0
         assert summary["total_attempt_count"] == 0
 
-    def test_multiple_books_isolated(self, monkeypatch, fake_db):
-        client = _tracking_client(monkeypatch, fake_db)
+    def test_multiple_books_isolated(self, make_client, fake_db):
+        client = make_client(tracking_router)
         client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
         client.put("/scholar/s1/books/tb_2/position", json={"current_lesson_id": "l2"})
         resp = client.get("/scholar/s1/books")
@@ -239,9 +210,9 @@ class TestBooksQueryCount:
     优化前本场景（2 本教材）需 1 + 2×(2 书名 + 5 聚合) = 15 次，优化后为 10 次。
     """
 
-    def test_learning_data_fetched_once(self, monkeypatch, fake_db):
+    def test_learning_data_fetched_once(self, make_client, fake_db):
         # 两本教材内容：tb_1 复用 _seed_content；tb_2 手动预置
-        _seed_content(fake_db)
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1", "s2"), include_text=False)
         fake_db.add("chapter", {"chapter_id": "c2", "textbook_id": "tb_2", "title": "Ch2", "order": 1})
         fake_db.add("lesson", {"lesson_id": "l2", "chapter_id": "c2", "title": "L2", "order": 1})
         for i, sid in enumerate(("s3", "s4"), 1):
@@ -257,7 +228,7 @@ class TestBooksQueryCount:
              "status": "learned", "mastery_score": 80, "attempt_count": 2},
         )
 
-        client = _tracking_client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
         client.put("/scholar/s1/books/tb_2/position", json={"current_lesson_id": "l2"})
 
@@ -289,9 +260,9 @@ class TestBooksQueryCount:
 
 class TestSessionSettlementWriteback:
     @pytest.mark.asyncio
-    async def test_end_session_writeback_time_and_stamp(self, monkeypatch, fake_db):
+    async def test_end_session_writeback_time_and_stamp(self, make_client, fake_db):
         """会话结算回写: scholar_book 的 last_studied_at 与 total_time_spent 被更新。"""
-        client = _state_client(monkeypatch, fake_db)
+        client = make_client(state_router)
         session = client.post(
             "/tracking/session/start",
             json={"scholar_id": "s1", "textbook_id": "tb_1"},
@@ -313,8 +284,8 @@ class TestSessionSettlementWriteback:
         assert book["total_time_spent"] > 0
 
     @pytest.mark.asyncio
-    async def test_end_session_accumulates_over_sessions(self, monkeypatch, fake_db):
-        client = _state_client(monkeypatch, fake_db)
+    async def test_end_session_accumulates_over_sessions(self, make_client, fake_db):
+        client = make_client(state_router)
         for _ in range(2):
             session = client.post(
                 "/tracking/session/start",
@@ -334,8 +305,8 @@ class TestSessionSettlementWriteback:
         assert books[0]["total_time_spent"] > 0
 
     @pytest.mark.asyncio
-    async def test_end_session_without_textbook_no_book(self, monkeypatch, fake_db):
-        client = _state_client(monkeypatch, fake_db)
+    async def test_end_session_without_textbook_no_book(self, make_client, fake_db):
+        client = make_client(state_router)
         session = client.post(
             "/tracking/session/start",
             json={"scholar_id": "s1"},

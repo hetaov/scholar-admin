@@ -58,3 +58,67 @@ VOLCANO_CHAT_MODEL = os.environ.get(
     "VOLCANO_CHAT_MODEL",
     os.environ.get("VOLCANO_VISION_MODEL", ""),
 )
+
+# LLM-as-a-Judge 模型（后置评估 L2，设计文档 §5.3 / 附录 B-4）
+# 约束：Judge ≠ Generator（同厂商不同型号），独立配置项可随时切换；
+# 未配置时回退 VOLCANO_CHAT_MODEL（生成模型），保证评估可用性但不保证独立性（低置信双判兜底）
+LLM_JUDGE_MODEL = os.environ.get("LLM_JUDGE_MODEL", "") or VOLCANO_CHAT_MODEL
+
+# 低置信门控阈值（设计文档 §9-2）：confidence < 阈值 不回写 SkillState
+EVAL_CONFIDENCE_THRESHOLD = float(os.environ.get("EVAL_CONFIDENCE_THRESHOLD", 0.6))
+
+# 冷启动先验默认（设计文档 §5.6.1）：无历史时 SkillState 返回先验默认（零外部调用）
+COLD_START_MASTERY = float(os.environ.get("COLD_START_MASTERY", 0.35))  # 未知偏保守
+COLD_START_DIFFICULTY = int(os.environ.get("COLD_START_DIFFICULTY", 1))  # 最低档起步
+
+# 证据稀疏阈值（设计文档 §5.6.2）：attempt_count < MIN_EVIDENCE 时更新权重打折
+MIN_EVIDENCE = int(os.environ.get("MIN_EVIDENCE", 3))
+
+# ==================== L3 批量评估配置（S4.1） ====================
+
+# 周报异常率告警阈值（设计文档 §9-6）：anomaly_rate > 阈值 触发告警
+EVAL_BATCH_ALERT_RATE = float(os.environ.get("EVAL_BATCH_ALERT_RATE", 0.1))
+
+# 周报抽样率（附录 B-3）：默认 10% 确定性抽样（seed 固定可复现）
+EVAL_BATCH_SAMPLE_RATE = float(os.environ.get("EVAL_BATCH_SAMPLE_RATE", 0.1))
+
+# 冷启动样本门槛（设计文档 §5.6.4）：抽样样本数 < 该值不启用异常率告警
+EVAL_BATCH_MIN_SAMPLES = int(os.environ.get("EVAL_BATCH_MIN_SAMPLES", 100))
+
+# ==================== S4.2 ConversationGraph L2 配置 ====================
+
+# L2 LangGraph 会话图开关：默认开启（1）；置 0 回退 L1 轻量状态机（§5 兼容回退）
+CONVERSATION_GRAPH_ENABLED = os.environ.get("CONVERSATION_GRAPH_ENABLED", "1") != "0"
+
+# LangGraph checkpointer 持久化集合（契约 data-model-contract §4.11.4）
+# 以 thread_id=session_id 维度保存每轮 checkpoint，支持断点续聊
+CONVERSATION_CHECKPOINT_COLLECTION = os.environ.get(
+    "CONVERSATION_CHECKPOINT_COLLECTION", "conversation_graph_checkpoint"
+)
+
+# ==================== S4.3 AI Planner 配置 ====================
+
+# AI Planner 开关：默认开启（1）；置 0 回退 S3.3 /training/recommend 简单推荐
+PLANNER_ENABLED = os.environ.get("PLANNER_ENABLED", "1") != "0"
+
+# 推荐条数上限（默认：复习 5 / 活动 4）
+PLANNER_TOP_REVIEW_ITEMS = int(os.environ.get("PLANNER_TOP_REVIEW_ITEMS", 5))
+PLANNER_TOP_ACTIVITIES = int(os.environ.get("PLANNER_TOP_ACTIVITIES", 4))
+
+# ==================== P2-2 RAG Retriever 配置 ====================
+
+# RAG 开关：默认开启（1）；置 0 回退非向量版（book/lesson/sentences 占位，S4.3 行为）
+RAG_RETRIEVER_ENABLED = os.environ.get("RAG_RETRIEVER_ENABLED", "1") != "0"
+
+# 方舟 embedding 模型（推理接入点/模型 ID，OpenAI 兼容接口 /embeddings）。
+# 未配置时 retriever 降级 no-op（返回空召回，不阻断 planner 主链路）
+RAG_EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "")
+
+# 句子向量缓存集合（契约 data-model-contract §4.13 sentence_embedding）
+RAG_EMBEDDING_COLLECTION = os.environ.get("RAG_EMBEDDING_COLLECTION", "sentence_embedding")
+
+# 跨课召回条数（Optional knowledge top-K）
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", 5))
+
+# embedding 批量大小（每批文本数，防单请求过大）
+RAG_EMBED_BATCH_SIZE = int(os.environ.get("RAG_EMBED_BATCH_SIZE", 16))

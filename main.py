@@ -28,8 +28,12 @@ from services.routes_dialogue import router as dialogue_router
 from services.routes_vision import router as vision_router
 from services.routes_build import router as build_router
 from services.routes_admin import router as admin_router
+from services.routes_conversation import router as conversation_router
 from services.routes_eval import router as eval_router
+from services.routes_evaluation import router as evaluation_router
+from services.routes_training import router as training_router
 from services.routes_tts import router as tts_router
+from services.routes_planner import router as planner_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -69,7 +73,11 @@ app.include_router(vision_router)
 app.include_router(build_router)
 app.include_router(admin_router)
 app.include_router(eval_router)
+app.include_router(evaluation_router)
+app.include_router(conversation_router)
+app.include_router(training_router)
 app.include_router(tts_router)
+app.include_router(planner_router)
 
 # ---------------------------------------------------------------------------
 # 启动

@@ -9,21 +9,10 @@
 
 from __future__ import annotations
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from services.routes_state import router as state_router
 
 
-def _client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_state.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(state_router)
-    return TestClient(app)
-
-
-def _start(client: TestClient, **overrides) -> dict:
+def _start(client, **overrides) -> dict:
     payload = {"scholar_id": "s1", "textbook_id": "tb_1", "device": "ios"}
     payload.update(overrides)
     resp = client.post("/tracking/session/start", json=payload)
@@ -32,8 +21,8 @@ def _start(client: TestClient, **overrides) -> dict:
 
 
 class TestSessionStart:
-    def test_create_active_session(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_create_active_session(self, make_client, fake_db):
+        client = make_client(state_router)
         session = _start(client)
         assert session["scholar_id"] == "s1"
         assert session["textbook_id"] == "tb_1"
@@ -46,14 +35,14 @@ class TestSessionStart:
         assert session["attempt_count"] == 0
         assert fake_db.all("study_session").__len__() == 1
 
-    def test_missing_scholar_id(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_scholar_id(self, make_client, fake_db):
+        client = make_client(state_router)
         resp = client.post("/tracking/session/start", json={"textbook_id": "tb_1"})
         assert resp.status_code == 400
         assert "scholar_id" in resp.json()["detail"]
 
-    def test_multiple_sessions_isolated(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_multiple_sessions_isolated(self, make_client, fake_db):
+        client = make_client(state_router)
         _start(client, scholar_id="s1")
         _start(client, scholar_id="s1")
         _start(client, scholar_id="s2")
@@ -64,8 +53,8 @@ class TestSessionStart:
 
 
 class TestSessionEnd:
-    def test_settles_session_with_attempt_count(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_settles_session_with_attempt_count(self, make_client, fake_db):
+        client = make_client(state_router)
         session = _start(client)
         session_id = session["session_id"]
         # 会话内上报 2 次学习事件
@@ -88,22 +77,22 @@ class TestSessionEnd:
         assert ended["ended_at"] is not None
         assert ended["duration_sec"] >= 0
 
-    def test_end_session_missing_id(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_end_session_missing_id(self, make_client, fake_db):
+        client = make_client(state_router)
         resp = client.post("/tracking/session/end", json={})
         assert resp.status_code == 400
         assert "session_id" in resp.json()["detail"]
 
-    def test_end_session_not_found(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_end_session_not_found(self, make_client, fake_db):
+        client = make_client(state_router)
         resp = client.post("/tracking/session/end", json={"session_id": "ses_unknown"})
         assert resp.status_code == 404
 
 
 class TestSessionAttemptIsolation:
-    def test_attempts_belongs_to_own_session(self, monkeypatch, fake_db):
+    def test_attempts_belongs_to_own_session(self, make_client, fake_db):
         """重复会话互不干扰:各会话的 attempt_count 只统计本会话事件。"""
-        client = _client(monkeypatch, fake_db)
+        client = make_client(state_router)
         ses_a = _start(client, scholar_id="s1")
         ses_b = _start(client, scholar_id="s1")
 
@@ -127,9 +116,9 @@ class TestSessionAttemptIsolation:
         assert sum(1 for a in attempts if a["session_id"] == ses_a["session_id"]) == 2
         assert sum(1 for a in attempts if a["session_id"] == ses_b["session_id"]) == 1
 
-    def test_events_outside_session_not_counted(self, monkeypatch, fake_db):
+    def test_events_outside_session_not_counted(self, make_client, fake_db):
         """无 session 的事件不进入任何会话的 attempt_count。"""
-        client = _client(monkeypatch, fake_db)
+        client = make_client(state_router)
         session = _start(client)
         client.post(
             "/tracking/state", json={"scholar_id": "s1", "sentence_id": "sent_outside"}

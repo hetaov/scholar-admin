@@ -45,20 +45,19 @@ BUILD_CONTENT = {
 
 
 class TestBuildNewTables:
-    def test_build_writes_new_tables(self, monkeypatch):
-        db = FakeDB()
-        monkeypatch.setattr("services.routes_build.get_db", lambda: db)
+    def test_build_writes_new_tables(self, fake_db):
+        # fake_db 由 tests/integration/conftest.py autouse 注入(方式 A),无需手动 setattr
         result = asyncio.run(_write_to_db(BUILD_CONTENT, "Test English"))
 
         # 只写新表(旧表 Phase 6 已下线, 不再写入)
-        assert len(db.all("textbook")) == 0
-        assert len(db.all("unit")) == 0
-        assert len(db.all("paragraph")) == 0
-        assert len(db.all("sentence")) == 0
-        assert len(db.all("textbook_v2")) == 1
-        assert len(db.all("chapter")) >= 1
-        assert len(db.all("lesson")) == 2
-        assert len(db.all("sentence_v2")) == 3
+        assert len(fake_db.all("textbook")) == 0
+        assert len(fake_db.all("unit")) == 0
+        assert len(fake_db.all("paragraph")) == 0
+        assert len(fake_db.all("sentence")) == 0
+        assert len(fake_db.all("textbook_v2")) == 1
+        assert len(fake_db.all("chapter")) >= 1
+        assert len(fake_db.all("lesson")) == 2
+        assert len(fake_db.all("sentence_v2")) == 3
 
         # 返回结构
         assert result["unit_count"] == 2
@@ -67,13 +66,11 @@ class TestBuildNewTables:
         assert all("lesson_id" in u for u in result["units"])
         assert all("unit_id" not in u for u in result["units"])
 
-    def test_sentence_v2_hierarchy_consistent(self, monkeypatch):
-        db = FakeDB()
-        monkeypatch.setattr("services.routes_build.get_db", lambda: db)
+    def test_sentence_v2_hierarchy_consistent(self, fake_db):
         asyncio.run(_write_to_db(BUILD_CONTENT, "Test English"))
-        for s in db.all("sentence_v2"):
+        for s in fake_db.all("sentence_v2"):
             assert s["chapter_id"]
-            lesson = next(l for l in db.all("lesson") if l["lesson_id"] == s["lesson_id"])
+            lesson = next(l for l in fake_db.all("lesson") if l["lesson_id"] == s["lesson_id"])
             assert lesson["chapter_id"] == s["chapter_id"]
             assert "unit_id" not in s
             assert "text_book_id" not in s

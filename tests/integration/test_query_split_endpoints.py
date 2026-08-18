@@ -13,56 +13,31 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from services.routes_tracking import router as tracking_router
+from tests.fakes.seed_factory import seed_content, seed_skill_states
 
-
-def _client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_tracking.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(tracking_router)
-    return TestClient(app)
-
-
-def _seed_content(fake_db):
-    """tb_1: 1 章 2 课 4 句(sentence_v2 新集合)。"""
-    fake_db.add("chapter", {"chapter_id": "c1", "textbook_id": "tb_1", "title": "Ch1", "order": 1})
-    fake_db.add("lesson", {"lesson_id": "l1", "chapter_id": "c1", "title": "L1", "order": 1})
-    fake_db.add("lesson", {"lesson_id": "l2", "chapter_id": "c1", "title": "L2", "order": 2})
-    for sid, lid in [("s1", "l1"), ("s2", "l1"), ("s3", "l2"), ("s4", "l2")]:
-        fake_db.add("sentence_v2", {
-            "sentence_id": sid, "lesson_id": lid, "chapter_id": "c1",
-            "textbook_id": "tb_1", "text": f"Text {sid}", "translation": f"译{sid}",
-            "order": int(sid[-1]),
-        })
-
-
-def _seed_states(fake_db, scholar_id="scholar_1"):
-    """与聚合测试一致的状态 + next_review_at。"""
-    states = [
-        {"scholar_id": scholar_id, "sentence_id": "s1", "skill_code": "translation",
-         "status": "learned", "mastery_score": 80, "attempt_count": 2,
-         "next_review_at": 1784282400},
-        {"scholar_id": scholar_id, "sentence_id": "s2", "skill_code": "translation",
-         "status": "learning", "mastery_score": 40, "attempt_count": 1},
-        {"scholar_id": scholar_id, "sentence_id": "s3", "skill_code": "translation",
-         "status": "mastered", "mastery_score": 95, "attempt_count": 3},
-        {"scholar_id": scholar_id, "sentence_id": "s1", "skill_code": "listening",
-         "status": "learning", "mastery_score": 30, "attempt_count": 1},
-    ]
-    for st in states:
-        fake_db.add("skill_state", st)
+# 与聚合测试一致的状态 + next_review_at（skill_state 数据工厂用例）
+SCHOLAR_STATES = [
+    {"scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
+     "status": "learned", "mastery_score": 80, "attempt_count": 2,
+     "next_review_at": 1784282400},
+    {"scholar_id": "scholar_1", "sentence_id": "s2", "skill_code": "translation",
+     "status": "learning", "mastery_score": 40, "attempt_count": 1},
+    {"scholar_id": "scholar_1", "sentence_id": "s3", "skill_code": "translation",
+     "status": "mastered", "mastery_score": 95, "attempt_count": 3},
+    {"scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "listening",
+     "status": "learning", "mastery_score": 30, "attempt_count": 1},
+]
 
 
 class TestGetTextbookLessons:
     """接口 2: GET /scholar/{scholar_id}/textbooks/{textbook_id}/lessons"""
 
-    def test_full_aggregation(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        _seed_states(fake_db)
-        client = _client(monkeypatch, fake_db)
+    def test_full_aggregation(self, make_client, fake_db):
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
+        client = make_client(tracking_router)
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -92,25 +67,25 @@ class TestGetTextbookLessons:
         # listening: l1 共 2 句, 仅 s1 有记录(learning) → 1/(3*2)
         assert prog["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
 
-    def test_lesson_skills_include_conversation(self, monkeypatch, fake_db):
+    def test_lesson_skills_include_conversation(self, make_client, fake_db):
         """每课 progress.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
-        _seed_content(fake_db)
-        _seed_states(fake_db)
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1",
             "skill_code": "conversation", "status": "learned",
             "mastery_score": 70, "attempt_count": 1,
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         l1 = resp.json()["data"]["lessons"][0]
         # l1 共 2 句，仅 s1 有 conversation(learned) → 2/(3*2)
         assert l1["progress"]["skills"]["conversation"] == pytest.approx(0.3333, abs=1e-4)
 
-    def test_no_states(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        client = _client(monkeypatch, fake_db)
+    def test_no_states(self, make_client, fake_db):
+        seed_content(fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -126,14 +101,14 @@ class TestGetTextbookLessons:
         assert l1["progress"]["skills"] == {}
         assert l1["progress"]["status_distribution"] == [0, 0, 0, 0, 0, 0]
 
-    def test_avg_attempt_count_zero_when_none_learned(self, monkeypatch, fake_db):
+    def test_avg_attempt_count_zero_when_none_learned(self, make_client, fake_db):
         """f3 分母边界：有学习次数但无 learned/mastered → avg 恒 0.0（不除零）。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
             "status": "learning", "mastery_score": 40, "attempt_count": 5,
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         summary = resp.json()["data"]["summary"]
@@ -145,10 +120,10 @@ class TestGetTextbookLessons:
 class TestGetLessonSentences:
     """接口 3: GET /tracking/textbooks/{textbook_id}/lessons/{lesson_id}/sentences"""
 
-    def test_sentence_detail_and_summary(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        _seed_states(fake_db)
-        client = _client(monkeypatch, fake_db)
+    def test_sentence_detail_and_summary(self, make_client, fake_db):
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
+        client = make_client(tracking_router)
         resp = client.get(
             "/tracking/textbooks/tb_1/lessons/l1/sentences",
             params={"scholar_id": "scholar_1"},
@@ -185,16 +160,16 @@ class TestGetLessonSentences:
         # listening: 该课 2 句仅 s1 有记录(learning) → 1/(3*2)
         assert summary["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
 
-    def test_summary_skills_include_conversation(self, monkeypatch, fake_db):
+    def test_summary_skills_include_conversation(self, make_client, fake_db):
         """概览 summary.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
-        _seed_content(fake_db)
-        _seed_states(fake_db)
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1",
             "skill_code": "conversation", "status": "learned",
             "mastery_score": 70, "attempt_count": 1,
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get(
             "/tracking/textbooks/tb_1/lessons/l1/sentences",
             params={"scholar_id": "scholar_1"},
@@ -210,9 +185,9 @@ class TestGetLessonSentences:
         assert s1["status"] == 2
         assert data["summary"]["learned_sentence_count"] == 1
 
-    def test_no_states(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        client = _client(monkeypatch, fake_db)
+    def test_no_states(self, make_client, fake_db):
+        seed_content(fake_db)
+        client = make_client(tracking_router)
         resp = client.get(
             "/tracking/textbooks/tb_1/lessons/l1/sentences",
             params={"scholar_id": "scholar_1"},
@@ -230,24 +205,24 @@ class TestGetLessonSentences:
         assert data["summary"]["learned_sentence_count"] == 0
         assert data["summary"]["skills"] == {}
 
-    def test_lesson_not_found(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        client = _client(monkeypatch, fake_db)
+    def test_lesson_not_found(self, make_client, fake_db):
+        seed_content(fake_db)
+        client = make_client(tracking_router)
         resp = client.get(
             "/tracking/textbooks/tb_1/lessons/nope/sentences",
             params={"scholar_id": "scholar_1"},
         )
         assert resp.status_code == 404
 
-    def test_states_query_scoped_to_lesson(self, monkeypatch, fake_db):
+    def test_states_query_scoped_to_lesson(self, make_client, fake_db):
         """性能回归：states 按本课句子 $in 过滤，查询固定 4 次，与学者总状态量解耦。
 
         防退化点：skill_state 必须按 sentence_id $in 查询（仅本课句子），
         不允许全量分页拉取该学者全部状态（1100+ 条无关状态会触发 2 次分页）。
         优化后章节明细查询恒为 4 次：chapter + lesson + sentence_v2 + skill_state。
         """
-        _seed_content(fake_db)
-        _seed_states(fake_db)
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
         # 大量无关状态（其它句子/教材），验证不会触发全量分页拉取
         for i in range(1100):
             fake_db.add("skill_state", {
@@ -267,7 +242,7 @@ class TestGetLessonSentences:
             return await orig_query(*args, **kwargs)
 
         fake_db.query = counting_query
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.get(
             "/tracking/textbooks/tb_1/lessons/l1/sentences",
             params={"scholar_id": "scholar_1"},
@@ -298,9 +273,9 @@ class TestQueryCountOptimization:
     优化前本场景（1 章 2 课）需 5×(1+1+1+2+1) = 30 次，优化后恒为 5 次。
     """
 
-    def test_query_count_is_constant(self, monkeypatch, fake_db):
-        _seed_content(fake_db)
-        _seed_states(fake_db)
+    def test_query_count_is_constant(self, make_client, fake_db):
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
 
         calls = {"n": 0}
         orig_query = fake_db.query
@@ -310,13 +285,13 @@ class TestQueryCountOptimization:
             return await orig_query(*args, **kwargs)
 
         fake_db.query = counting_query
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
 
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         assert calls["n"] == 5  # chapters + lessons + sentences + states + attempts
 
-    def test_query_count_scales_with_lessons_only_via_batch(self, monkeypatch, fake_db):
+    def test_query_count_scales_with_lessons_only_via_batch(self, make_client, fake_db):
         """扩大教材规模（3 章 6 课 12 句）查询次数仍为 5，验证批量 $in 生效。"""
         for i in range(1, 4):
             fake_db.add("chapter", {
@@ -342,7 +317,7 @@ class TestQueryCountOptimization:
             return await orig_query(*args, **kwargs)
 
         fake_db.query = counting_query
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
 
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200

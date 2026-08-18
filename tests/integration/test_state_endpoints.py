@@ -8,26 +8,13 @@
 
 from __future__ import annotations
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from services.routes_state import router as state_router
 from services.routes_tracking import router as tracking_router
 
 
-def _client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_state.get_db", lambda: fake_db)
-    monkeypatch.setattr("services.routes_tracking.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(state_router)
-    app.include_router(tracking_router)
-    return TestClient(app)
-
-
 class TestPostTrackingState:
-    def test_create_new(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_create_new(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state",
             json={
@@ -55,8 +42,8 @@ class TestPostTrackingState:
         assert attempt["attempt_id"]
         assert fake_db.all("study_attempt").__len__() == 1
 
-    def test_repeat_accumulates_state_but_appends_events(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_repeat_accumulates_state_but_appends_events(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         for _ in range(2):
             resp = client.post(
                 "/tracking/state",
@@ -69,27 +56,27 @@ class TestPostTrackingState:
         assert fake_db.all("skill_state").__len__() == 1
         assert fake_db.all("study_attempt").__len__() == 2
 
-    def test_missing_scholar_id(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_scholar_id(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post("/tracking/state", json={"sentence_id": "sent_1"})
         assert resp.status_code == 400
         assert "scholar_id" in resp.json()["detail"]
 
-    def test_missing_sentence_id(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_sentence_id(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post("/tracking/state", json={"scholar_id": "s1"})
         assert resp.status_code == 400
         assert "sentence_id" in resp.json()["detail"]
 
-    def test_default_skill_code(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_default_skill_code(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state", json={"scholar_id": "s1", "sentence_id": "sent_1"}
         )
         assert resp.json()["data"]["state"]["skill_code"] == "translation"
 
-    def test_attempt_type_inferred_from_skill_code(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_attempt_type_inferred_from_skill_code(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "skill_code": "listening"},
@@ -97,8 +84,8 @@ class TestPostTrackingState:
         attempt = resp.json()["data"]["attempt"]
         assert attempt["attempt_type"] == "listen"
 
-    def test_attempt_explicit_fields(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_attempt_explicit_fields(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state",
             json={
@@ -117,8 +104,8 @@ class TestPostTrackingState:
         assert attempt["lesson_id"] == "unit_1"
         assert attempt["session_id"] == "ses_abc"
 
-    def test_invalid_attempt_status_falls_back(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_invalid_attempt_status_falls_back(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "attempt_status": "???"},
@@ -127,8 +114,8 @@ class TestPostTrackingState:
 
 
 class TestGetTrackingByScholarV2:
-    def test_prefers_skill_state(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_prefers_skill_state(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
         client.post(
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "status": "learned"},
@@ -140,9 +127,9 @@ class TestGetTrackingByScholarV2:
         assert body["records"][0]["sentence_id"] == "sent_1"
         assert body["records"][0]["attempt_count"] == 1
 
-    def test_no_skill_state_returns_empty(self, monkeypatch, fake_db):
+    def test_no_skill_state_returns_empty(self, make_client, fake_db):
         """skill_state 无记录时返回空(旧表已下线, 无回退)。"""
-        client = _client(monkeypatch, fake_db)
+        client = make_client(state_router, tracking_router)
         resp = client.get("/tracking/legacy_user")
         assert resp.status_code == 200
         body = resp.json()

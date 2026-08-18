@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import time
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from services.dialogue_task import run_dialogue_task
 from services.routes_dialogue import router as dialogue_router
+from tests.fakes.seed_factory import seed_task
 
 TASK_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -27,37 +25,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_dialogue.get_db", lambda: fake_db)
-    monkeypatch.setattr("services.dialogue_task.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(dialogue_router)
-    return TestClient(app)
-
-
-def _seed_task(fake_db, **overrides) -> dict:
-    now = int(time.time() * 1000)
-    doc = {
-        "task_id": "dt_test",
-        "scholar_id": "s1",
-        "sentence": "Hello",
-        "status": "pending",
-        "result": None,
-        "is_question": None,
-        "error": None,
-        "created_at": now,
-        "updated_at": now,
-        "expires_at": now + TASK_TTL_MS,
-    }
-    doc.update(overrides)
-    fake_db.add("dialogue_task", doc)
-    return doc
-
-
 class TestCreateDialogueTask:
     """POST /match/dialogue/task"""
 
-    def test_ok_returns_task_id_pending(self, monkeypatch, fake_db):
+    def test_ok_returns_task_id_pending(self, make_client, monkeypatch, fake_db):
         called = {}
 
         async def fake_run(
@@ -72,7 +43,7 @@ class TestCreateDialogueTask:
         monkeypatch.setattr(
             "services.routes_dialogue.run_dialogue_task", fake_run
         )
-        client = _client(monkeypatch, fake_db)
+        client = make_client(dialogue_router)
 
         resp = client.post(
             "/match/dialogue/task",
@@ -95,15 +66,15 @@ class TestCreateDialogueTask:
         assert len(stored) == 1
         assert stored[0]["status"] == "pending"
 
-    def test_missing_scholar_id(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_scholar_id(self, make_client, fake_db):
+        client = make_client(dialogue_router)
         resp = client.post("/match/dialogue/task", json={"sentence": "Hello"})
         assert resp.status_code == 400
         assert "scholarId" in resp.json()["detail"]
         assert fake_db.all("dialogue_task") == []
 
-    def test_missing_sentence(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_sentence(self, make_client, fake_db):
+        client = make_client(dialogue_router)
         resp = client.post("/match/dialogue/task", json={"scholarId": "s1"})
         assert resp.status_code == 400
         assert "sentence" in resp.json()["detail"]
@@ -113,9 +84,9 @@ class TestCreateDialogueTask:
 class TestGetDialogueTask:
     """GET /match/dialogue/task/{task_id}"""
 
-    def test_ok_pending(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
-        _seed_task(fake_db)
+    def test_ok_pending(self, make_client, fake_db):
+        client = make_client(dialogue_router)
+        seed_task(fake_db)
         resp = client.get("/match/dialogue/task/dt_test")
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -125,8 +96,8 @@ class TestGetDialogueTask:
         assert data["is_question"] is None
         assert data["error"] is None
 
-    def test_ok_success_with_result(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_ok_success_with_result(self, make_client, fake_db):
+        client = make_client(dialogue_router)
         result = {
             "type": "qa",
             "statement": "Hi",
@@ -134,7 +105,7 @@ class TestGetDialogueTask:
             "source": "matched",
             "matched_text": "Hi",
         }
-        _seed_task(fake_db, status="success", result=result, is_question=False)
+        seed_task(fake_db, status="success", result=result, is_question=False)
         resp = client.get("/match/dialogue/task/dt_test")
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -142,9 +113,9 @@ class TestGetDialogueTask:
         assert data["result"] == result
         assert data["is_question"] is False
 
-    def test_ok_failed_with_error(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
-        _seed_task(fake_db, status="failed", error="LLM 调用超时")
+    def test_ok_failed_with_error(self, make_client, fake_db):
+        client = make_client(dialogue_router)
+        seed_task(fake_db, status="failed", error="LLM 调用超时")
         resp = client.get("/match/dialogue/task/dt_test")
         assert resp.status_code == 200
         data = resp.json()["data"]
@@ -152,27 +123,27 @@ class TestGetDialogueTask:
         assert data["error"] == "LLM 调用超时"
         assert data["result"] is None
 
-    def test_not_found(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_not_found(self, make_client, fake_db):
+        client = make_client(dialogue_router)
         resp = client.get("/match/dialogue/task/dt_missing")
         assert resp.status_code == 404
         assert "任务不存在" in resp.json()["detail"]
 
-    def test_expired_returns_404_doc_kept(self, monkeypatch, fake_db):
+    def test_expired_returns_404_doc_kept(self, make_client, fake_db):
         """过期任务查询按不存在处理（404）；物理清理已移出查询热路径，文档保留"""
-        client = _client(monkeypatch, fake_db)
-        _seed_task(fake_db, expires_at=int(time.time() * 1000) - 1000)
+        client = make_client(dialogue_router)
+        seed_task(fake_db, expires_at=int(time.time() * 1000) - 1000)
         resp = client.get("/match/dialogue/task/dt_test")
         assert resp.status_code == 404
         assert "已过期" in resp.json()["detail"]
         # TTL 清理由提交接口概率巡检执行，查询不再全集合 delete
         assert len(fake_db.all("dialogue_task")) == 1
 
-    def test_query_revives_stale_processing_task(self, monkeypatch, fake_db):
+    def test_query_revives_stale_processing_task(self, make_client, fake_db):
         """GET 定点自愈：被查询的卡死 processing 任务 → failed"""
-        client = _client(monkeypatch, fake_db)
+        client = make_client(dialogue_router)
         now = int(time.time() * 1000)
-        _seed_task(
+        seed_task(
             fake_db,
             task_id="dt_stale",
             status="processing",
@@ -188,12 +159,12 @@ class TestGetDialogueTask:
         assert stored["status"] == "failed"
         assert stored["error"] == "执行超时"
 
-    def test_query_fresh_processing_unaffected(self, monkeypatch, fake_db):
+    def test_query_fresh_processing_unaffected(self, make_client, fake_db):
         """查询热路径只做定点恢复：其他卡死任务不被误伤，正常任务不受影响"""
-        client = _client(monkeypatch, fake_db)
+        client = make_client(dialogue_router)
         now = int(time.time() * 1000)
-        _seed_task(fake_db, task_id="dt_ok")
-        _seed_task(
+        seed_task(fake_db, task_id="dt_ok")
+        seed_task(
             fake_db,
             task_id="dt_stale",
             status="processing",
@@ -220,8 +191,6 @@ class TestRunDialogueTask:
     }
 
     def _patch_worker(self, monkeypatch, fake_db, learned, match_result):
-        monkeypatch.setattr("services.dialogue_task.get_db", lambda: fake_db)
-
         async def fake_learn(db, scholar_id):
             return learned
 
@@ -235,7 +204,7 @@ class TestRunDialogueTask:
         )
         monkeypatch.setattr("services.dialogue_task.match_dialogue", fake_match)
 
-    def test_success_writes_result(self, monkeypatch, fake_db):
+    def test_success_writes_result(self, make_client, monkeypatch, fake_db):
         self._patch_worker(
             monkeypatch,
             fake_db,
@@ -246,7 +215,7 @@ class TestRunDialogueTask:
                 "is_question": False,
             },
         )
-        task = _seed_task(fake_db)
+        task = seed_task(fake_db)
         _run(run_dialogue_task(task["task_id"], "s1", "I like apples."))
 
         stored = fake_db.all("dialogue_task")[0]
@@ -255,9 +224,9 @@ class TestRunDialogueTask:
         assert stored["is_question"] is False
         assert stored["error"] is None
 
-    def test_no_learned_sentences_fails(self, monkeypatch, fake_db):
+    def test_no_learned_sentences_fails(self, make_client, monkeypatch, fake_db):
         self._patch_worker(monkeypatch, fake_db, learned=[], match_result=None)
-        task = _seed_task(fake_db)
+        task = seed_task(fake_db)
         _run(run_dialogue_task(task["task_id"], "s1", "I like apples."))
 
         stored = fake_db.all("dialogue_task")[0]
@@ -265,7 +234,7 @@ class TestRunDialogueTask:
         assert stored["error"] == "该学者暂无已学语句"
         assert stored["result"] is None
 
-    def test_match_business_failure(self, monkeypatch, fake_db):
+    def test_match_business_failure(self, make_client, monkeypatch, fake_db):
         self._patch_worker(
             monkeypatch,
             fake_db,
@@ -275,7 +244,7 @@ class TestRunDialogueTask:
                 "error": "模型输出无法解析",
             },
         )
-        task = _seed_task(fake_db)
+        task = seed_task(fake_db)
         _run(run_dialogue_task(task["task_id"], "s1", "I like apples."))
 
         stored = fake_db.all("dialogue_task")[0]
@@ -283,14 +252,14 @@ class TestRunDialogueTask:
         assert stored["error"] == "模型输出无法解析"
         assert stored["result"] is None
 
-    def test_match_raises_marks_failed(self, monkeypatch, fake_db):
+    def test_match_raises_marks_failed(self, make_client, monkeypatch, fake_db):
         self._patch_worker(
             monkeypatch,
             fake_db,
             learned=[{"text": "I like apples.", "translation": "我喜欢苹果。"}],
             match_result=RuntimeError("LLM 超时"),
         )
-        task = _seed_task(fake_db)
+        task = seed_task(fake_db)
         _run(run_dialogue_task(task["task_id"], "s1", "I like apples."))
 
         stored = fake_db.all("dialogue_task")[0]
@@ -299,7 +268,7 @@ class TestRunDialogueTask:
         assert "LLM 超时" in stored["error"]
         assert stored["result"] is None
 
-    def test_claim_failed_skips_execution(self, monkeypatch, fake_db):
+    def test_claim_failed_skips_execution(self, make_client, monkeypatch, fake_db):
         """任务已被抢占（processing）→ 执行器不调用匹配，状态保持不变"""
         calls = {"learn": 0, "match": 0}
 
@@ -311,13 +280,12 @@ class TestRunDialogueTask:
             calls["match"] += 1
             return {"success": True, "data": {}, "is_question": False}
 
-        monkeypatch.setattr("services.dialogue_task.get_db", lambda: fake_db)
         monkeypatch.setattr(
             "services.dialogue_task.load_learned_sentences", fake_learn
         )
         monkeypatch.setattr("services.dialogue_task.match_dialogue", fake_match)
 
-        task = _seed_task(fake_db, status="processing")
+        task = seed_task(fake_db, status="processing")
         _run(run_dialogue_task(task["task_id"], "s1", "I like apples."))
 
         assert calls["learn"] == 0

@@ -14,31 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from services.routes_tracking import router as tracking_router
-
-
-def _client(monkeypatch, fake_db) -> TestClient:
-    monkeypatch.setattr("services.routes_tracking.get_db", lambda: fake_db)
-    app = FastAPI()
-    app.include_router(tracking_router)
-    return TestClient(app)
-
-
-def _seed_content(fake_db):
-    """tb_1: 1 章 2 课 4 句(sentence_v2 新集合),含跨课候选。"""
-    fake_db.add("chapter", {"chapter_id": "c1", "textbook_id": "tb_1", "title": "Ch1", "order": 1})
-    fake_db.add("lesson", {"lesson_id": "l1", "chapter_id": "c1", "title": "L1", "order": 1})
-    fake_db.add("lesson", {"lesson_id": "l2", "chapter_id": "c1", "title": "L2", "order": 2})
-    for sid, lid, order in [("s1", "l1", 1), ("s2", "l1", 2), ("s3", "l2", 3), ("s4", "l2", 4)]:
-        fake_db.add("sentence_v2", {
-            "sentence_id": sid, "lesson_id": lid, "chapter_id": "c1",
-            "textbook_id": "tb_1", "text": f"Text {sid}", "translation": f"译{sid}",
-            "order": order,
-        })
+from tests.fakes.seed_factory import seed_content
 
 
 def _ts(day: int, hour: int) -> int:
@@ -49,9 +26,9 @@ def _ts(day: int, hour: int) -> int:
 class TestReviewPlan:
     """POST /tracking/review-plan 复习队列"""
 
-    def test_due_queue_filter_and_fields(self, monkeypatch, fake_db):
+    def test_due_queue_filter_and_fields(self, make_client, fake_db):
         """到期过滤 + 派生字段:mastered 排除、无记录排除、内容/技能字段同构。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
             "status": "learned", "mastery_score": 80, "attempt_count": 2,
@@ -67,7 +44,7 @@ class TestReviewPlan:
             "status": "mastered", "mastery_score": 95, "attempt_count": 3,
             "next_review_at": _ts(16, 11),
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post(
             "/tracking/review-plan",
             json={"scholar_id": "scholar_1", "date": "2026-08-16"},  # 显式传固定日期,避免"今日"漂移
@@ -91,9 +68,9 @@ class TestReviewPlan:
         assert s1["review_count"] == 2
         assert s1["next_review_at"].startswith("2026-08-16T10:00:00")
 
-    def test_pick_state_highest_progress(self, monkeypatch, fake_db):
+    def test_pick_state_highest_progress(self, make_client, fake_db):
         """乐观 pick_state:同句多能力取 progress 最高者(listening 90 > translation 80)。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
             "status": "learned", "mastery_score": 80, "attempt_count": 2,
@@ -104,7 +81,7 @@ class TestReviewPlan:
             "status": "learning", "mastery_score": 90, "attempt_count": 5,
             "next_review_at": _ts(16, 11),
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/review-plan", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         queue = resp.json()["data"]["review_queue"]
@@ -119,9 +96,9 @@ class TestReviewPlan:
         assert s1["skills"] == {"translation": 2, "listening": 1}
         assert s1["weakest_skill"] == "listening"
 
-    def test_sort_by_next_then_mastery(self, monkeypatch, fake_db):
+    def test_sort_by_next_then_mastery(self, make_client, fake_db):
         """同到期时间按 mastery_score 升序(薄弱优先)。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
             "status": "learned", "mastery_score": 80, "attempt_count": 2,
@@ -132,15 +109,15 @@ class TestReviewPlan:
             "status": "learned", "mastery_score": 40, "attempt_count": 1,
             "next_review_at": _ts(16, 10),
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/review-plan", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         queue = resp.json()["data"]["review_queue"]
         assert [q["sentence_id"] for q in queue] == ["s2", "s1"]  # 40 分薄弱在前
 
-    def test_specific_date_and_future_excluded(self, monkeypatch, fake_db):
+    def test_specific_date_and_future_excluded(self, make_client, fake_db):
         """指定 date;未来到期(next_review_at > 当日 23:59:59)不进入队列。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
             "status": "learned", "mastery_score": 80, "attempt_count": 2,
@@ -151,7 +128,7 @@ class TestReviewPlan:
             "status": "learning", "mastery_score": 40, "attempt_count": 1,
             "next_review_at": _ts(17, 8),  # 8/17 未到期
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post(
             "/tracking/review-plan", json={"scholar_id": "scholar_1", "date": "2026-08-16"},
         )
@@ -161,9 +138,9 @@ class TestReviewPlan:
         assert data["total"] == 1
         assert data["review_queue"][0]["sentence_id"] == "s1"
 
-    def test_empty_queue_no_due(self, monkeypatch, fake_db):
+    def test_empty_queue_no_due(self, make_client, fake_db):
         """无到期记录 → success:true, total:0,空队列(不报错)。"""
-        _seed_content(fake_db)
+        seed_content(fake_db)
         # 仅 mastered + 无 next_review_at 的记录
         fake_db.add("skill_state", {
             "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
@@ -174,14 +151,14 @@ class TestReviewPlan:
             "scholar_id": "scholar_1", "sentence_id": "s2", "skill_code": "translation",
             "status": "learning", "mastery_score": 40, "attempt_count": 1,
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/review-plan", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         data = resp.json()["data"]
         assert data["total"] == 0
         assert data["review_queue"] == []
 
-    def test_missing_content_graceful(self, monkeypatch, fake_db):
+    def test_missing_content_graceful(self, make_client, fake_db):
         """候选句子在内容集合缺失 → content/translation 空串仍入队(容错不死)。"""
         # 不 seed 内容,只 seed 状态(句子内容表里没有 s1)
         fake_db.add("skill_state", {
@@ -189,7 +166,7 @@ class TestReviewPlan:
             "status": "learning", "mastery_score": 50, "attempt_count": 1,
             "next_review_at": _ts(16, 10),
         })
-        client = _client(monkeypatch, fake_db)
+        client = make_client(tracking_router)
         resp = client.post("/tracking/review-plan", json={"scholar_id": "scholar_1"})
         assert resp.status_code == 200
         queue = resp.json()["data"]["review_queue"]
@@ -198,13 +175,13 @@ class TestReviewPlan:
         assert queue[0]["content"] == ""
         assert queue[0]["translation"] == ""
 
-    def test_missing_scholar_id_400(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_missing_scholar_id_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.post("/tracking/review-plan", json={})
         assert resp.status_code == 400
 
-    def test_invalid_date_400(self, monkeypatch, fake_db):
-        client = _client(monkeypatch, fake_db)
+    def test_invalid_date_400(self, make_client, fake_db):
+        client = make_client(tracking_router)
         resp = client.post(
             "/tracking/review-plan", json={"scholar_id": "scholar_1", "date": "2026/08/16"},
         )

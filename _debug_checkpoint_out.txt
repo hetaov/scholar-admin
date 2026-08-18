@@ -1,0 +1,307 @@
+=== BaseCheckpointSaver.list ===
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        """List checkpoints that match the given criteria.
+
+        Args:
+            config: Base configuration for filtering checkpoints.
+            filter: Additional filtering criteria.
+            before: List checkpoints created before this configuration.
+            limit: Maximum number of checkpoints to return.
+
+        Returns:
+            Iterator of matching checkpoint tuples.
+
+        Raises:
+            NotImplementedError: Implement this method in your custom checkpoint saver.
+        """
+        raise NotImplementedError
+
+=== BaseCheckpointSaver.put_writes ===
+    def put_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        """Store intermediate writes linked to a checkpoint.
+
+        Args:
+            config: Configuration of the related checkpoint.
+            writes: List of writes to store.
+            task_id: Identifier for the task creating the writes.
+            task_path: Path of the task creating the writes.
+
+        Raises:
+            NotImplementedError: Implement this method in your custom checkpoint saver.
+        """
+        raise NotImplementedError
+
+=== BaseCheckpointSaver.get_next_version ===
+    def get_next_version(self, current: V | None, channel: None) -> V:
+        """Generate the next version ID for a channel.
+
+        Default is to use integer versions, incrementing by `1`.
+
+        If you override, you can use `str`/`int`/`float` versions, as long as they are monotonically increasing.
+
+        Args:
+            current: The current version identifier (`int`, `float`, or `str`).
+            channel: Deprecated argument, kept for backwards compatibility.
+
+        Returns:
+            V: The next version identifier, which must be increasing.
+        """
+        if isinstance(current, str):
+            raise NotImplementedError
+        elif current is None:
+            return 1
+        else:
+            return current + 1
+
+=== InMemorySaver.put ===
+    def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        """Save a checkpoint to the in-memory storage.
+
+        This method saves a checkpoint to the in-memory storage. The checkpoint is associated
+        with the provided config.
+
+        Args:
+            config: The config to associate with the checkpoint.
+            checkpoint: The checkpoint to save.
+            metadata: Additional metadata to save with the checkpoint.
+            new_versions: New versions as of this write
+
+        Returns:
+            RunnableConfig: The updated config containing the saved checkpoint's timestamp.
+        """
+        c = checkpoint.copy()
+        thread_id = config["configurable"]["thread_id"]
+        checkpoint_ns = config["configurable"]["checkpoint_ns"]
+        values: dict[str, Any] = c.pop("channel_values")  # type: ignore[misc]
+        for k, v in new_versions.items():
+            self.blobs[(thread_id, checkpoint_ns, k, v)] = (
+                self.serde.dumps_typed(values[k]) if k in values else ("empty", b"")
+            )
+        self.storage[thread_id][checkpoint_ns].update(
+            {
+                checkpoint["id"]: (
+                    self.serde.dumps_typed(c),
+                    self.serde.dumps_typed(get_checkpoint_metadata(config, metadata)),
+                    config["configurable"].get("checkpoint_id"),  # parent
+                )
+            }
+        )
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint["id"],
+            }
+        }
+
+=== InMemorySaver.get_tuple ===
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        """Get a checkpoint tuple from the in-memory storage.
+
+        This method retrieves a checkpoint tuple from the in-memory storage based on the
+        provided config. If the config contains a `checkpoint_id` key, the checkpoint with
+        the matching thread ID and timestamp is retrieved. Otherwise, the latest checkpoint
+        for the given thread ID is retrieved.
+
+        Args:
+            config: The config to use for retrieving the checkpoint.
+
+        Returns:
+            The retrieved checkpoint tuple, or None if no matching checkpoint was found.
+        """
+        thread_id: str = config["configurable"]["thread_id"]
+        checkpoint_ns: str = config["configurable"].get("checkpoint_ns", "")
+        if checkpoint_id := get_checkpoint_id(config):
+            if saved := self.storage[thread_id][checkpoint_ns].get(checkpoint_id):
+                checkpoint, metadata, parent_checkpoint_id = saved
+                writes = self.writes[(thread_id, checkpoint_ns, checkpoint_id)].values()
+                checkpoint_: Checkpoint = self.serde.loads_typed(checkpoint)
+                return CheckpointTuple(
+                    config=config,
+                    checkpoint={
+                        **checkpoint_,
+                        "channel_values": self._load_blobs(
+                            thread_id, checkpoint_ns, checkpoint_["channel_versions"]
+                        ),
+                    },
+                    metadata=self.serde.loads_typed(metadata),
+                    pending_writes=[
+                        (id, c, self.serde.loads_typed(v)) for id, c, v, _ in writes
+                    ],
+                    parent_config=(
+                        {
+                            "configurable": {
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": parent_checkpoint_id,
+                            }
+                        }
+                        if parent_checkpoint_id
+                        else None
+                    ),
+                )
+        else:
+            if checkpoints := self.storage[thread_id][checkpoint_ns]:
+                checkpoint_id = max(checkpoints.keys())
+                checkpoint, metadata, parent_checkpoint_id = checkpoints[checkpoint_id]
+                writes = self.writes[(thread_id, checkpoint_ns, checkpoint_id)].values()
+                checkpoint_ = self.serde.loads_typed(checkpoint)
+                return CheckpointTuple(
+                    config={
+                        "configurable": {
+                            "thread_id": thread_id,
+                            "checkpoint_ns": checkpoint_ns,
+                            "checkpoint_id": checkpoint_id,
+                        }
+                    },
+                    checkpoint={
+                        **checkpoint_,
+                        "channel_values": self._load_blobs(
+                            thread_id, checkpoint_ns, checkpoint_["channel_versions"]
+                        ),
+                    },
+                    metadata=self.serde.loads_typed(metadata),
+                    pending_writes=[
+                        (id, c, self.serde.loads_typed(v)) for id, c, v, _ in writes
+                    ],
+                    parent_config=(
+                        {
+                            "configurable": {
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": parent_checkpoint_id,
+                            }
+                        }
+                        if parent_checkpoint_id
+                        else None
+                    ),
+                )
+
+=== InMemorySaver.list ===
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        """List checkpoints from the in-memory storage.
+
+        This method retrieves a list of checkpoint tuples from the in-memory storage based
+        on the provided criteria.
+
+        Args:
+            config: Base configuration for filtering checkpoints.
+            filter: Additional filtering criteria for metadata.
+            before: List checkpoints created before this configuration.
+            limit: Maximum number of checkpoints to return.
+
+        Yields:
+            An iterator of matching checkpoint tuples.
+        """
+        thread_ids = (config["configurable"]["thread_id"],) if config else self.storage
+        config_checkpoint_ns = (
+            config["configurable"].get("checkpoint_ns") if config else None
+        )
+        config_checkpoint_id = get_checkpoint_id(config) if config else None
+        for thread_id in thread_ids:
+            for checkpoint_ns in self.storage[thread_id].keys():
+                if (
+                    config_checkpoint_ns is not None
+                    and checkpoint_ns != config_checkpoint_ns
+                ):
+                    continue
+
+                for checkpoint_id, (
+                    checkpoint,
+                    metadata_b,
+                    parent_checkpoint_id,
+                ) in sorted(
+                    self.storage[thread_id][checkpoint_ns].items(),
+                    key=lambda x: x[0],
+                    reverse=True,
+                ):
+                    # filter by checkpoint ID from config
+                    if config_checkpoint_id and checkpoint_id != config_checkpoint_id:
+                        continue
+
+                    # filter by checkpoint ID from `before` config
+                    if (
+                        before
+                        and (before_checkpoint_id := get_checkpoint_id(before))
+                        and checkpoint_id >= before_checkpoint_id
+                    ):
+                        continue
+
+                    # filter by metadata
+                    metadata = self.serde.loads_typed(metadata_b)
+                    if filter and not all(
+                        query_value == metadata.get(query_key)
+                        for query_key, query_value in filter.items()
+                    ):
+                        continue
+
+                    # limit search results
+                    if limit is not None and limit <= 0:
+                        break
+                    elif limit is not None:
+                        limit -= 1
+
+                    writes = self.writes[
+                        (thread_id, checkpoint_ns, checkpoint_id)
+                    ].values()
+
+                    checkpoint_: Checkpoint = self.serde.loads_typed(checkpoint)
+
+                    yield CheckpointTuple(
+                        config={
+                            "configurable": {
+                                "thread_id": thread_id,
+                                "checkpoint_ns": checkpoint_ns,
+                                "checkpoint_id": checkpoint_id,
+                            }
+                        },
+                        checkpoint={
+                            **checkpoint_,
+                            "channel_values": self._load_blobs(
+                                thread_id,
+                                checkpoint_ns,
+                                checkpoint_["channel_versions"],
+                            ),
+                        },
+                        metadata=metadata,
+                        parent_config=(
+                            {
+                                "configurable": {
+                                    "thread_id": thread_id,
+                                    "checkpoint_ns": checkpoint_ns,
+                                    "checkpoint_id": parent_checkpoint_id,
+                                }
+                            }
+                            if parent_checkpoint_id
+                            else None
+                        ),
+                        pending_writes=[
+                            (id, c, self.serde.loads_typed(v)) for id, c, v, _ in writes
+                        ],
+                    )

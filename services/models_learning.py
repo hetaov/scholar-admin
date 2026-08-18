@@ -21,6 +21,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from config import MIN_EVIDENCE
+
 # ---------------------------------------------------------------------------
 # 集合名（顶层常量，供 check_schema.py 扫描）
 # ---------------------------------------------------------------------------
@@ -80,6 +82,44 @@ _STATUS_EN_ALIASES = {
 }
 
 DEFAULT_SKILL_CODE = "translation"
+
+# ---------------------------------------------------------------------------
+# S3.1 P1：SkillState 置信度 / 稳定性 / 难度策略常量（契约 §4.11.4 启用，设计文档 §5.4/§5.6.2）
+# ---------------------------------------------------------------------------
+
+CONFIDENCE_HISTORY_SIZE = 5  # confidence = 近 N 次评估置信度均值（EWMA 窗口）
+STABILITY_MIN_STREAK = 2  # stability 至少 2 次同方向才上升（§5.6.2）
+STABILITY_UP_STEP = 0.2  # 稳定性上升步长
+STABILITY_DOWN_STEP = 0.1  # 稳定性衰减步长（反方向立即回落）
+DIFFICULTY_MIN = 1  # 难度档位下限（对齐冷启动先验）
+DIFFICULTY_MAX = 5  # 难度档位上限
+
+# S3.1 P1：Activity → Skill 权重配置种子（契约 §4.11.5，草稿 §二十四）
+ACTIVITY_SKILL_WEIGHT = "activity_skill_weight"
+ACTIVITY_SKILL_WEIGHT_SEEDS: dict[str, dict[str, float]] = {
+    "SHADOWING": {
+        "Pronunciation": 0.45,
+        "Fluency": 0.30,
+        "Listening": 0.15,
+        "Speaking": 0.10,
+    },
+    "TRANSLATION": {
+        "Recall": 0.50,
+        "Usage": 0.30,
+        "Grammar": 0.20,
+    },
+    "DICTATION": {
+        "Listening": 0.60,
+        "Spelling": 0.20,
+        "Recall": 0.20,
+    },
+    "CONVERSATION": {
+        "Speaking": 0.40,
+        "Usage": 0.30,
+        "Listening": 0.20,
+        "Fluency": 0.10,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # skill 种子数据（预置能力定义与阈值）
@@ -243,6 +283,59 @@ def derive_progress(status: str, mastery_score: float | None) -> float:
 
 
 # ---------------------------------------------------------------------------
+# S3.1 P1：confidence / stability / difficulty 更新策略（§5.6.2，契约 §4.11.4）
+# ---------------------------------------------------------------------------
+
+
+def update_confidence(
+    prev: float | None, new_confidence: float, attempt_count: int
+) -> float:
+    """confidence = 近 N 次评估置信度均值(EWMA) × 证据系数（§5.6.2）。
+
+    - alpha = 1 / min(attempt_count, CONFIDENCE_HISTORY_SIZE)：证据越多越接近均值
+    - 证据系数 = min(1, attempt_count / MIN_EVIDENCE)：证据稀疏时整体打折（冷启动保护）
+    """
+    attempt = max(int(attempt_count), 1)
+    alpha = 1.0 / min(attempt, CONFIDENCE_HISTORY_SIZE)
+    ewma = float(prev or 0.0) * (1.0 - alpha) + float(new_confidence) * alpha
+    evidence = min(1.0, attempt / MIN_EVIDENCE) if MIN_EVIDENCE > 0 else 1.0
+    return round(clamp(ewma * evidence, 0.0, 1.0), 4)
+
+
+def update_stability(
+    prev: float | None,
+    outcome: str,
+    last_outcome: str | None,
+    stable_streak: int,
+) -> tuple[float, str, int]:
+    """stability 至少 2 次同方向才上升，反方向立即衰减（§5.6.2）。
+
+    返回 (new_stability, last_outcome, stable_streak)。
+    - 首次（无 last_outcome）：只记录方向，不改变稳定性
+    - 连续 ≥2 次同方向：stability + STABILITY_UP_STEP
+    - 反方向：stability - STABILITY_DOWN_STEP，streak 重置为 1
+    """
+    outcome = str(outcome or "")
+    streak = int(stable_streak or 0)
+    stability = float(prev or 0.0)
+    if not last_outcome:
+        return round(stability, 4), outcome, 1
+    if outcome == str(last_outcome):
+        streak += 1
+        if streak >= STABILITY_MIN_STREAK:
+            stability = min(1.0, stability + STABILITY_UP_STEP)
+        return round(stability, 4), outcome, streak
+    return round(max(0.0, stability - STABILITY_DOWN_STEP), 4), outcome, 1
+
+
+def update_difficulty(prev: int | float | None, new_difficulty: int | float | None) -> int:
+    """difficulty 取当前档位（会话/训练使用），clamp 到 [DIFFICULTY_MIN, DIFFICULTY_MAX]。"""
+    if new_difficulty is None:
+        return int(prev or DIFFICULTY_MIN)
+    return int(clamp(float(new_difficulty), DIFFICULTY_MIN, DIFFICULTY_MAX))
+
+
+# ---------------------------------------------------------------------------
 # skill_state 文档构建（纯函数）
 # ---------------------------------------------------------------------------
 
@@ -259,14 +352,21 @@ def build_skill_state_doc(
     attempt_count: int = 1,
     last_studied_at: int | None = None,
     now: int | None = None,
+    confidence: float | None = None,
+    stability: float | None = None,
+    difficulty: int | None = None,
 ) -> dict:
-    """构建 skill_state 文档（新插入用）。"""
+    """构建 skill_state 文档（新插入用）。
+
+    S3.1 P1：可选写入 confidence / stability / difficulty（契约 §4.11.4），
+    未提供时保持 nullable 不写入（向后兼容存量数据）。
+    """
     now = int(now or time.time())
     last_studied_at = int(last_studied_at or now)
     status = normalize_status(status)
     if progress is None:
         progress = derive_progress(status, mastery_score)
-    return {
+    doc = {
         "_id": skill_state_id(scholar_id, sentence_id, skill_code),
         "state_id": skill_state_id(scholar_id, sentence_id, skill_code),
         "scholar_id": scholar_id,
@@ -282,6 +382,13 @@ def build_skill_state_doc(
         "created_at": now,
         "updated_at": now,
     }
+    if confidence is not None:
+        doc["confidence"] = round(clamp(float(confidence), 0.0, 1.0), 4)
+    if stability is not None:
+        doc["stability"] = round(clamp(float(stability), 0.0, 1.0), 4)
+    if difficulty is not None:
+        doc["difficulty"] = update_difficulty(None, difficulty)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -303,17 +410,65 @@ async def seed_skills(db) -> dict:
     return {"created": created, "skipped": skipped}
 
 
+async def seed_activity_skill_weights(db) -> dict:
+    """幂等预置 Activity → Skill 权重配置（契约 §4.11.5，草稿 §二十四）。"""
+    created = 0
+    skipped = 0
+    for activity, weights in ACTIVITY_SKILL_WEIGHT_SEEDS.items():
+        existing = await db.query(
+            collection=ACTIVITY_SKILL_WEIGHT, where={"activity": activity}, limit=1
+        )
+        if existing.get("records"):
+            skipped += 1
+            continue
+        await db.insert(
+            collection=ACTIVITY_SKILL_WEIGHT,
+            data={"activity": activity, "skill_weights": dict(weights)},
+        )
+        created += 1
+    return {"created": created, "skipped": skipped}
+
+
+async def get_activity_skill_weights(db, activity: str) -> dict:
+    """读取某 Activity 的权重配置；未预置回退内置默认（草稿 §二十四）。"""
+    activity = str(activity or "").strip()
+    result = await db.query(
+        collection=ACTIVITY_SKILL_WEIGHT, where={"activity": activity}, limit=1
+    )
+    records = result.get("records", [])
+    if records:
+        return records[0].get("skill_weights") or {}
+    return dict(ACTIVITY_SKILL_WEIGHT_SEEDS.get(activity, {}))
+
+
 async def upsert_skill_state(
     db,
     *,
     scholar_id: str,
     sentence_id: str,
     skill_code: str = DEFAULT_SKILL_CODE,
+    sparse_discount: bool = False,
+    confidence: float | None = None,
+    outcome: str | None = None,
+    difficulty: int | None = None,
+    weight: float = 1.0,
     **update: Any,
 ) -> dict:
     """按复合键 upsert 一条 skill_state；重复上报只累加 attempt_count、刷新 last_studied_at。
 
     update 可含：status / score(0-100) / mastery(0-1) / lesson_id / last_studied_at / now。
+
+    sparse_discount（证据稀疏保护，设计文档 §5.6.2，冷启动路径启用）：
+    - attempt_count < MIN_EVIDENCE 时，增量更新量按 `attempt_count / MIN_EVIDENCE` 打折
+      （第 1 次后续更新只贡献 1/3，防单次偶然污染）；
+    - 默认 False 保持既有调用行为不变（旧调用不受影响）。
+
+    S3.1 P1（契约 §4.11.4 启用）：
+    - confidence：本轮评估置信度，写入前经 `update_confidence`（近 N 次均值 × 证据系数）
+    - outcome：本次结果方向（"success" / "fail"），用于 `update_stability` 稳定性更新
+    - difficulty：当前难度档位，直接落档（clamp [1, 5]）
+    - weight：增量权重（门控降权用，如整会话 ×0.5），与 sparse_discount 叠加
+
     返回最新状态文档。
     """
     now = int(update.get("now") or time.time())
@@ -327,9 +482,19 @@ async def upsert_skill_state(
         doc = records[0]
         attempt_count = int(doc.get("attempt_count") or 0) + 1
         old_score = doc.get("mastery_score")
-        mastery_score = to_mastery_score(update.get("score"), update.get("mastery"))
-        if mastery_score is None:
+        raw_score = to_mastery_score(update.get("score"), update.get("mastery"))
+        effective_weight = float(weight) if weight else 1.0
+        if raw_score is None:
             mastery_score = old_score
+        elif sparse_discount and attempt_count < MIN_EVIDENCE:
+            # 证据稀疏打折：只按证据比例贡献增量（§5.6.2）
+            effective_weight *= attempt_count / MIN_EVIDENCE
+            mastery_score = (old_score or 0.0) + (raw_score - (old_score or 0.0)) * effective_weight
+        elif effective_weight != 1.0:
+            # 门控降权（如整会话 ×0.5）：增量打折而非全量打折
+            mastery_score = (old_score or 0.0) + (raw_score - (old_score or 0.0)) * effective_weight
+        else:
+            mastery_score = raw_score
         has_mastery = mastery_score is not None
         status = derive_status(update.get("status"), mastery_score, has_mastery)
         progress = derive_progress(status, mastery_score)
@@ -344,6 +509,23 @@ async def upsert_skill_state(
             "next_review_at": compute_next_review_at(last_studied_at, attempt_count, mastery_score),
             "updated_at": now,
         }
+        # S3.1 P1：confidence / stability / difficulty 更新（契约 §4.11.4）
+        if confidence is not None:
+            changes["confidence"] = update_confidence(
+                doc.get("confidence"), confidence, attempt_count
+            )
+        if outcome:
+            new_stability, last_outcome, stable_streak = update_stability(
+                doc.get("stability"),
+                outcome,
+                doc.get("last_outcome"),
+                doc.get("stable_streak", 0),
+            )
+            changes["stability"] = new_stability
+            changes["last_outcome"] = last_outcome
+            changes["stable_streak"] = stable_streak
+        if difficulty is not None:
+            changes["difficulty"] = update_difficulty(doc.get("difficulty"), difficulty)
         await db.update(
             collection=SKILL_STATE,
             where={"_id": state_key},
@@ -366,7 +548,15 @@ async def upsert_skill_state(
         attempt_count=1,
         last_studied_at=last_studied_at,
         now=now,
+        difficulty=difficulty,
     )
+    # S3.1 P1：首次置信度同样经证据系数打折（§5.6.2：attempt=1 → ×1/3）
+    if confidence is not None:
+        doc["confidence"] = update_confidence(None, confidence, 1)
+    # S3.1 P1：首次带 outcome 时记录方向（稳定性首次不升降，§5.6.2）
+    if outcome:
+        doc["last_outcome"] = str(outcome)
+        doc["stable_streak"] = 1
     await db.insert(collection=SKILL_STATE, data=doc)
     return doc
 
