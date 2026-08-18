@@ -141,11 +141,37 @@ class TestDerive:
     def test_low_mastery_implies_review_due(self):
         assert derive_status(None, 50, True) == STATUS_REVIEW_DUE
 
-    def test_mid_mastery_implies_learning(self):
-        assert derive_status(None, 70, True) == STATUS_LEARNING
+    def test_mid_mastery_implies_learned(self):
+        """60 ≤ score < 80 且无显式状态词 → learned（介于 learning 与 mastered 之间）。
+
+        这是修复前的死角：derive_status 仅产出 review_due / mastered / learning，
+        60-80 区间从前会被卡在 learning，致 mastery 32% 等小数值永久不变。
+        """
+        assert derive_status(None, 70, True) == STATUS_LEARNED
+        assert derive_status(None, 60, True) == STATUS_LEARNED
+        assert derive_status(None, 79.9, True) == STATUS_LEARNED
+
+    def test_low_mastery_includes_learned_floor(self):
+        """< learned_threshold(60) → review_due。"""
+        assert derive_status(None, 59.9, True) == STATUS_REVIEW_DUE
 
     def test_no_mastery_falls_back_learning(self):
         assert derive_status(None, None, False) == STATUS_LEARNING
+
+    def test_per_skill_threshold(self):
+        """per-skill 阈值覆盖：传 skill_code 时按 SKILL_SEEDS 查 learned/mastered 阈值。
+
+        默认 translation/listening/speaking/reading 都为 0.6/0.8，验证 unknown 能力回落。
+        """
+        # 已存在的能力默认阈值
+        assert derive_status(None, 70, True, skill_code="translation") == STATUS_LEARNED
+        assert derive_status(None, 80, True, skill_code="listening") == STATUS_MASTERED
+        assert derive_status(None, 50, True, skill_code="reading") == STATUS_REVIEW_DUE
+        # 未知 skill_code 回落默认 0.6/0.8
+        assert derive_status(None, 70, True, skill_code="unknown_skill_xyz") == STATUS_LEARNED
+        assert derive_status(None, 79, True, skill_code=None) == STATUS_LEARNED
+        # 显式 status 仍最高优先
+        assert derive_status("学习中", 90, True, skill_code="translation") == STATUS_LEARNING
 
     def test_progress_from_mastery(self):
         assert derive_progress(STATUS_LEARNING, 80) == pytest.approx(0.8)

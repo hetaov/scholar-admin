@@ -122,3 +122,14 @@ RAG_TOP_K = int(os.environ.get("RAG_TOP_K", 5))
 
 # embedding 批量大小（每批文本数，防单请求过大）
 RAG_EMBED_BATCH_SIZE = int(os.environ.get("RAG_EMBED_BATCH_SIZE", 16))
+
+# ==================== 付费白名单鉴权配置 ====================
+
+# 鉴权模式：
+#   dev（默认）    —— 请求无 X-WX-OPENID 时放行，仅本地开发/测试使用
+#   enforce（生产）—— 所有请求必须携带 X-WX-OPENID 且 openid 在
+#                     app_whitelist 白名单内，否则 403 拒绝
+AUTH_MODE = os.environ.get("AUTH_MODE", "dev")
+
+# 付费能力白名单集合（文档 _id 固定为 "paid"，字段 openids: string[]）
+WHITELIST_COLLECTION = os.environ.get("WHITELIST_COLLECTION", "app_whitelist")

@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import PORT
+from services.auth import require_paid_user
 from services.routes_system import router as system_router
 from services.routes_crud import router as crud_router
 from services.routes_tracking import router as tracking_router
@@ -63,21 +64,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载所有路由
-app.include_router(system_router)
-app.include_router(crud_router)
-app.include_router(tracking_router)
-app.include_router(state_router)
-app.include_router(dialogue_router)
-app.include_router(vision_router)
-app.include_router(build_router)
-app.include_router(admin_router)
-app.include_router(eval_router)
-app.include_router(evaluation_router)
-app.include_router(conversation_router)
-app.include_router(training_router)
-app.include_router(tts_router)
-app.include_router(planner_router)
+# ---------------------------------------------------------------------------
+# 路由挂载
+# 调用付费 AI 能力（ASR/LLM/TTS/视觉/评测/内容生成）的路由必须通过白名单鉴权；
+# 基础数据路由（学习记录上报/查询等）保持开放，保证小程序基础功能可用。
+# ---------------------------------------------------------------------------
+
+# 免费/基础能力路由：保持开放
+_FREE_ROUTERS = [
+    system_router,
+    crud_router,
+    tracking_router,
+    state_router,
+    admin_router,
+]
+
+# 付费 AI 能力路由：require_paid_user 白名单鉴权
+_PAID_ROUTERS = [
+    dialogue_router,
+    vision_router,
+    build_router,
+    eval_router,
+    evaluation_router,
+    conversation_router,
+    training_router,
+    tts_router,
+    planner_router,
+]
+
+for _router in _FREE_ROUTERS:
+    app.include_router(_router)
+
+for _router in _PAID_ROUTERS:
+    app.include_router(_router, dependencies=[Depends(require_paid_user)])
 
 # ---------------------------------------------------------------------------
 # 启动

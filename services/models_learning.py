@@ -247,23 +247,66 @@ def compute_next_review_at(
     return int(last_studied_at) + review_interval_seconds(attempt_count, mastery_score)
 
 
-def derive_status(status: Any, mastery_score: float | None, has_mastery: bool) -> str:
-    """推断状态：显式已掌握/已学保留；低掌握度 → review_due；高分无显式 → mastered。
+# 默认分级阈值（0-1 比例）；未在 SKILL_SEEDS 中找到 skill_code 时回落。
+# 设计文档已为每个能力单独配置 learned_threshold=0.6 / mastered_threshold=0.8，
+# 但原 derive_status 未消费，导致 60-80 区间永远停留在 learning。
+# 现新增第三个产出档位：learned（介于 learning 与 mastered 之间），
+# 配合 SKILL_SEEDS.per_skill 阈值使得"已学但未掌握"可被显式表示，不再卡死 learning。
+_DEFAULT_LEARNED_THRESHOLD = 0.6
+_DEFAULT_MASTERED_THRESHOLD = 0.8
 
-    - mastery_score < 60 → review_due（除非显式 mastered / learned）
-    - 显式 status → 尊重（normalize_status）
-    - mastery_score ≥ 80 且无显式 → mastered
-    - 其余 → learning
+
+def _resolve_thresholds(skill_code: str | None) -> tuple[float, float]:
+    """按 skill_code 查 SKILL_SEEDS 的 (learned_threshold, mastered_threshold)。
+
+    未匹配（未知能力/None）回落默认值；阈值以 0-1 比例返回（独立于 mastery_score 0-100 入参）。
     """
-    if has_mastery and mastery_score is not None and mastery_score < 60:
+    if skill_code:
+        for seed in SKILL_SEEDS:
+            if seed.get("skill_code") == skill_code:
+                try:
+                    learned = float(seed.get("learned_threshold") or _DEFAULT_LEARNED_THRESHOLD)
+                except (TypeError, ValueError):
+                    learned = _DEFAULT_LEARNED_THRESHOLD
+                try:
+                    mastered = float(seed.get("mastery_threshold") or _DEFAULT_MASTERED_THRESHOLD)
+                except (TypeError, ValueError):
+                    mastered = _DEFAULT_MASTERED_THRESHOLD
+                return clamp(learned, 0.0, 1.0), clamp(mastered, 0.0, 1.0)
+    return _DEFAULT_LEARNED_THRESHOLD, _DEFAULT_MASTERED_THRESHOLD
+
+
+def derive_status(
+    status: Any,
+    mastery_score: float | None,
+    has_mastery: bool,
+    *,
+    skill_code: str | None = None,
+) -> str:
+    """推断状态：显式状态优先；分数自动分级（learned/mastered 双阈值，未达 learned 为 learning/review_due）。
+
+    阈值来源：SKILL_SEEDS.per_skill 的 learned_threshold / mastery_threshold（0-1 比例），
+    mastery_score 入参为 0-100；未匹配的能力回落 0.6 / 0.8。
+
+    决策表（has_mastery=True 且无显式状态词时）：
+    - score < learned_threshold×100  → review_due   （除非显式 mastered / learned）
+    - learned_threshold×100 ≤ score < mastered_threshold×100  → learned   ← 新增
+    - score ≥ mastered_threshold×100  → mastered
+    - 无 mastery_score                → learning
+    """
+    learned_thr, mastered_thr = _resolve_thresholds(skill_code)
+    if has_mastery and mastery_score is not None and mastery_score < learned_thr * 100.0:
         norm = normalize_status(status) if status else None
         if norm in (STATUS_MASTERED, STATUS_LEARNED):
             return norm
         return STATUS_REVIEW_DUE
     if status:
         return normalize_status(status)
-    if has_mastery and mastery_score is not None and mastery_score >= 80:
-        return STATUS_MASTERED
+    if has_mastery and mastery_score is not None:
+        if mastery_score >= mastered_thr * 100.0:
+            return STATUS_MASTERED
+        if mastery_score >= learned_thr * 100.0:
+            return STATUS_LEARNED
     return STATUS_LEARNING
 
 
@@ -496,7 +539,9 @@ async def upsert_skill_state(
         else:
             mastery_score = raw_score
         has_mastery = mastery_score is not None
-        status = derive_status(update.get("status"), mastery_score, has_mastery)
+        status = derive_status(
+            update.get("status"), mastery_score, has_mastery, skill_code=skill_code
+        )
         progress = derive_progress(status, mastery_score)
         lesson_id = update.get("lesson_id") or doc.get("lesson_id")
         changes = {
@@ -537,7 +582,9 @@ async def upsert_skill_state(
 
     mastery_score = to_mastery_score(update.get("score"), update.get("mastery"))
     has_mastery = mastery_score is not None
-    status = derive_status(update.get("status"), mastery_score, has_mastery)
+    status = derive_status(
+        update.get("status"), mastery_score, has_mastery, skill_code=skill_code
+    )
     doc = build_skill_state_doc(
         scholar_id=scholar_id,
         sentence_id=sentence_id,
