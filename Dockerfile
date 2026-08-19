@@ -6,6 +6,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 
+# F3.2 A4 练习纸渲染：安装 Chromium（playwright）与中文字体
+# - playwright install --with-deps 会安装 Chromium 及其系统依赖（libnss3/libatk 等）
+# - fonts-noto-cjk 保证中文与常用数学符号正常渲染（A4 PDF/PNG）
+# - PLAYWRIGHT_DOWNLOAD_HOST 可指定国内镜像加速浏览器下载
+RUN PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ \
+    python -m playwright install --with-deps chromium \
+    && apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 # 复制项目文件
 COPY . .
 

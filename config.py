@@ -64,6 +64,11 @@ VOLCANO_CHAT_MODEL = os.environ.get(
 # 未配置时回退 VOLCANO_CHAT_MODEL（生成模型），保证评估可用性但不保证独立性（低置信双判兜底）
 LLM_JUDGE_MODEL = os.environ.get("LLM_JUDGE_MODEL", "") or VOLCANO_CHAT_MODEL
 
+# LLM 教材总结模型（数学 F1/F2：教材描述草稿生成 / AI 知识总结，契约 §4.12.8）
+# 约束：Summary ≠ Judge ≠ Generator（同厂商不同型号），独立配置项可随时切换；
+# 未配置时回退 VOLCANO_CHAT_MODEL，保证生成可用性
+LLM_SUMMARY_MODEL = os.environ.get("LLM_SUMMARY_MODEL", "") or VOLCANO_CHAT_MODEL
+
 # 低置信门控阈值（设计文档 §9-2）：confidence < 阈值 不回写 SkillState
 EVAL_CONFIDENCE_THRESHOLD = float(os.environ.get("EVAL_CONFIDENCE_THRESHOLD", 0.6))
 
@@ -133,3 +138,41 @@ AUTH_MODE = os.environ.get("AUTH_MODE", "dev")
 
 # 付费能力白名单集合（文档 _id 固定为 "paid"，字段 openids: string[]）
 WHITELIST_COLLECTION = os.environ.get("WHITELIST_COLLECTION", "app_whitelist")
+
+# ==================== F3.2 A4 练习纸渲染配置 ====================
+
+# 渲染产物输出目录（PDF/PNG/预览图）。CloudRun 容器 /tmp 可写；生产可挂载持久盘后改环境变量。
+# 产物通过 main.py 挂载的 StaticFiles（/static/sheets）对外提供，file_refs 引用相对 URL。
+RENDER_OUTPUT_DIR = os.environ.get("RENDER_OUTPUT_DIR", "/tmp/scholar_sheets")
+
+# 产物静态访问 URL 前缀（file_refs.pdf/png 填相对路径，如 /static/sheets/ps_xxx/sheet.pdf）
+RENDER_STATIC_URL_PREFIX = os.environ.get("RENDER_STATIC_URL_PREFIX", "/static/sheets")
+
+# 家长核对二维码（ADR-0010 A-13：≥20×20mm 含签名与有效期）
+# 签名密钥：HMAC-SHA256(sheet_id + expires_at)。生产必须配置，缺失时二维码降级（qr_url 为空）。
+SHEET_QR_SECRET = os.environ.get("SHEET_QR_SECRET", "")
+# 二维码有效期（秒，默认 7 天）
+SHEET_QR_TTL_SECONDS = int(os.environ.get("SHEET_QR_TTL_SECONDS", 7 * 24 * 3600))
+# 二维码扫码落地页（家长核对 H5；MVP 由前端配置，服务端仅填 qr_url 前缀）
+SHEET_QR_SCAN_PAGE = os.environ.get("SHEET_QR_SCAN_PAGE", "/scan/sheet")
+
+# 单张渲染超时（秒，任务卡验收：单张 ≤10s）
+RENDER_TIMEOUT_SECONDS = int(os.environ.get("RENDER_TIMEOUT_SECONDS", 10))
+
+# ==================== F4.2 腾讯云 OCR 配置 ====================
+
+# 腾讯云 OCR 密钥：默认复用 CloudRun 注入的 TENCENTCLOUD_SECRETID/SECRETKEY
+# （与 services/asr.py 同源），可用 TENCENT_OCR_SECRET_ID/SECRET_KEY 独立覆盖。
+TENCENT_OCR_SECRET_ID = os.environ.get("TENCENT_OCR_SECRET_ID", "") or SECRET_ID
+TENCENT_OCR_SECRET_KEY = os.environ.get("TENCENT_OCR_SECRET_KEY", "") or SECRET_KEY
+
+# OCR 服务区域（腾讯云 OCR 支持 ap-guangzhou / ap-shanghai 等）
+TENCENT_OCR_REGION = os.environ.get("TENCENT_OCR_REGION", "ap-shanghai")
+
+# OCR 引擎（ADR-0020：MVP 通用印刷体二选一）：
+#   general_accurate → GeneralAccurateOCR（更准，适合中文数学题文本）
+#   general_fast     → GeneralFastOCR（更快更省）
+TENCENT_OCR_ENGINE = os.environ.get("TENCENT_OCR_ENGINE", "general_accurate")
+
+# 单次 OCR 调用超时（秒，超时进入重试/降级，不阻断上传链路）
+TENCENT_OCR_TIMEOUT_SECONDS = int(os.environ.get("TENCENT_OCR_TIMEOUT_SECONDS", 10))

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from services.database import CloudBaseNoSQLClient
+from services.math.ocr import OcrProvider, get_provider as _get_ocr_provider
 from services.volcano import VolcanoVisionService
 
 # ---------------------------------------------------------------------------
@@ -27,6 +28,11 @@ def get_vision() -> VolcanoVisionService:
     if _vision_service is None:
         _vision_service = VolcanoVisionService()
     return _vision_service
+
+
+def get_ocr() -> OcrProvider:
+    """OCR Provider 单例（F4.2），与 services.math.ocr.get_provider() 同源。"""
+    return _get_ocr_provider()
 
 
 # ---------------------------------------------------------------------------

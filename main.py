@@ -15,11 +15,14 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from config import PORT
+from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX
 from services.auth import require_paid_user
 from services.routes_system import router as system_router
 from services.routes_crud import router as crud_router
@@ -35,6 +38,7 @@ from services.routes_evaluation import router as evaluation_router
 from services.routes_training import router as training_router
 from services.routes_tts import router as tts_router
 from services.routes_planner import router as planner_router
+from services.routes_math import router as math_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -90,6 +94,7 @@ _PAID_ROUTERS = [
     training_router,
     tts_router,
     planner_router,
+    math_router,
 ]
 
 for _router in _FREE_ROUTERS:
@@ -97,6 +102,18 @@ for _router in _FREE_ROUTERS:
 
 for _router in _PAID_ROUTERS:
     app.include_router(_router, dependencies=[Depends(require_paid_user)])
+
+# ---------------------------------------------------------------------------
+# F3.2 练习纸渲染产物静态服务（PDF/PNG/预览图；目录启动时创建）
+# file_refs 引用 RENDER_STATIC_URL_PREFIX（默认 /static/sheets）下的相对 URL
+# ---------------------------------------------------------------------------
+
+Path(RENDER_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+app.mount(
+    RENDER_STATIC_URL_PREFIX,
+    StaticFiles(directory=RENDER_OUTPUT_DIR),
+    name="sheet_artifacts",
+)
 
 # ---------------------------------------------------------------------------
 # 启动

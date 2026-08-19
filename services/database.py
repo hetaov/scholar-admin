@@ -20,6 +20,17 @@ from config import ENV_ID, REGION, SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_API
 
 logger = logging.getLogger("scholar-admin.db")
 
+# ---------------------------------------------------------------------------
+# 集合名常量（数学学科 F1~F4，契约 data-model-contract §4.12）
+# ---------------------------------------------------------------------------
+CURRICULUM_NODE_COLLECTION = "curriculum_node"     # 教材图谱节点（F1/F2）
+MATH_SCAN_UPLOAD_COLLECTION = "math_scan_upload"   # 错题扫描上传（F4）
+AUDIT_LOG_COLLECTION = "audit_log"                 # 家长操作审计（F3/F1/F2/F4 共用）
+PRACTICE_SHEET_COLLECTION = "practice_sheet"       # A4 练习纸（F3.1）
+SHEET_TEMPLATE_COLLECTION = "sheet_template"       # 练习纸版式模板（F3.1）
+SHEET_RENDER_JOB_COLLECTION = "sheet_render_job"   # 练习纸异步渲染任务（F3.1）
+ERROR_RECORD_COLLECTION = "error_record"           # 错题错因记录（F4 写入，F3.1 消费）
+
 
 class CloudBaseNoSQLClient:
     """CloudBase 文档型数据库客户端"""

@@ -10,6 +10,8 @@ langgraph>=0.2.0
 tencentcloud-sdk-python-asr>=3.1.137
 # TTS 语音合成官方 SDK（F3/3.2，服务进程 .venv 必需；缺失时 /audio/tts 降级 TTS_UNAVAILABLE）
 tencentcloud-sdk-python-tts>=3.1.101
+# OCR 通用印刷体官方 SDK（F4.2，服务进程 .venv 必需；缺失/无凭据时扫描降级 ocr_status=failed）
+tencentcloud-sdk-python-ocr>=3.1.101
 # 腾讯云语音 SDK（SOE-N 新版，纯源码分发在 vendor/tencentcloud-speech-sdk-python）
 # 唯一第三方依赖：websocket-client（readme 建议 0.48，实测后锁版本）
 websocket-client>=0.48
@@ -29,3 +31,9 @@ langchain-openai>=0.3.0
 # 约束：ragas 0.4.x 依赖 langchain_community.chat_models.vertexai（0.4.x 已移除该模块），
 # 重装环境须保持 langchain-community<0.4（2026-08-18 安装踩坑记录，见执行计划 §3 S4.1 阻塞登记）
 langchain-community<0.4
+
+# F3.2 A4 练习纸渲染（ADR-0010 决策 4：HTML/CSS + Headless Chrome → PDF+PNG）
+# 需配套安装 Chromium（Dockerfile 已含 playwright install chromium）；未安装时渲染任务降级，不影响主链路
+playwright>=1.45.0
+# 家长核对二维码生成（纯 Python 生成 PNG/SVG，无系统依赖）
+qrcode[pil]>=7.4.0
