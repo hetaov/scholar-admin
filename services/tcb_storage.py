@@ -1,68 +1,59 @@
-"""CloudBase 云存储客户端（F4 错题扫描图片落对象存储）
+# Auto-generated backward-compatibility shim (READ+WRITE transparent proxy).
+# Original file moved to: services.infra.tcb_storage
+# This shim:
+#   - READS (access, import *) transparently come from the target module.
+#   - WRITES (monkeypatch.setattr, direct assignment) go through to the
+#     target module, so runtime code inside services.infra.tcb_storage that reads module-level
+#     globals (e.g. AUTH_MODE, LLM_JUDGE_MODEL, _call_judge, ...) always sees
+#     the monkey-patched value, even when tests patch via the old shim path.
+#   - Underscore-prefixed symbols like _repair_json are fully exported.
+import sys as _sys
+import importlib as _importlib
 
-复用 database.CloudBaseNoSQLClient 的 TC3 签名与请求管道（service=tcb，
-X-TC-Version=2018-06-08），凭据同样来自 config（SECRET_ID/SECRET_KEY/
-SESSION_TOKEN/REGION/ENV_ID），无需新增任何依赖：
+_target = _importlib.import_module("services.infra.tcb_storage")
+_target_name = "services.infra.tcb_storage"
+_shim_name = __name__
 
-- UploadFile：上传文件到云存储，返回 fileID（cloud://env/xxx）
-- GetTempFileURL：fileID → 临时 HTTPS 访问 URL（供小程序即时预览）
+class _ShimModule(type(_sys)):
+    """Custom module class that forwards attribute READ/WRITE to the target.
+    
+    This lets monkeypatch.setattr("services.X", attr, val) actually
+    mutate the real services.<group>.<mod> namespace where code runs.
+    """
+    _target_mod = _target
+    _dct = _sys.modules[_shim_name].__dict__  # shim's original dict
 
-契约：api-contract.md §3.10（F4 上传接口，image_url 出参）。
-"""
-from __future__ import annotations
+    def __getattr__(cls, name):
+        try:
+            return getattr(_target, name)
+        except AttributeError:
+            raise AttributeError(
+                f"module '{_shim_name}' (shim for {_target_name}) "
+                f"has no attribute '{name}'"
+            )
 
-import base64
-import logging
+    def __setattr__(cls, name, value):
+        # Rout ALL attribute writes to the REAL target module.
+        # Exception: Python-internal dunder names (used by import machinery)
+        # go to the shim's own dict to avoid breaking import system.
+        if name.startswith("__") and name.endswith("__"):
+            _ShimModule._dct[name] = value
+        else:
+            setattr(_target, name, value)
 
-from services.database import CloudBaseNoSQLClient
+    def __dir__(cls):
+        return sorted(set(list(_ShimModule._dct.keys()) + list(vars(_target).keys())))
 
-logger = logging.getLogger("scholar-admin.tcb_storage")
+# Replace the shim module's class with our proxying class
+_sys.modules[_shim_name].__class__ = _ShimModule
 
-
-class CloudBaseStorageClient(CloudBaseNoSQLClient):
-    """CloudBase 云存储客户端（继承 DB 客户端，复用 TC3 签名与 _request）"""
-
-    async def upload_file(self, cloud_path: str, data: bytes) -> dict:
-        """上传文件到云存储
-
-        Args:
-            cloud_path: 云存储路径（相对根目录、不含前导 /，如 "scan/scan_xxx.jpg"）
-            data: 文件二进制内容
-
-        Returns:
-            {"file_id": "cloud://env.xxx/scan/scan_xxx.jpg", "cloud_path": "..."}
-
-        Raises:
-            Exception: TCB API 错误（由 _request 抛出）
-        """
-        payload = {
-            "EnvId": self.env_id,
-            "FilePath": cloud_path,
-            "CloudPath": cloud_path,
-            "FileContent": base64.b64encode(data).decode("ascii"),
-        }
-        resp = await self._request("UploadFile", payload)
-        file_id = resp.get("FileId") or f"cloud://{self.env_id}/{cloud_path}"
-        logger.info(f"[storage] UploadFile ok cloud_path={cloud_path} file_id={file_id}")
-        return {"file_id": file_id, "cloud_path": cloud_path}
-
-    async def get_temp_file_url(self, cloud_path: str, max_age: int = 3600) -> str:
-        """获取云存储文件的临时 HTTPS 访问 URL
-
-        Args:
-            cloud_path: 云存储路径（与上传时一致）
-            max_age: 临时链接有效期（秒，默认 1 小时）
-
-        Returns:
-            临时 HTTPS URL；无返回时为空串（image_file_id 仍可永久引用）
-        """
-        payload = {
-            "EnvId": self.env_id,
-            "FileList": [{"CloudPath": cloud_path, "MaxAge": max_age}],
-        }
-        resp = await self._request("GetTempFileURL", payload)
-        urls = resp.get("FileURLs") or []
-        if urls:
-            return urls[0].get("TempFileURL", "")
-        logger.warning(f"[storage] GetTempFileURL 无返回 URL cloud_path={cloud_path}")
-        return ""
+# Also populate shim's __dict__ once so `from services.X import Y` /
+# `from services.X import *` immediately resolve via normal Python lookup
+# (Python skips __getattr__ if name already in module dict). We intentionally
+# do NOT pre-populate non-dunder names so __getattr__ is always invoked
+# (forces read delegation, keeping patched value in sync).
+# Only ensure __all__ points to target's public-ish names.
+try:
+    __all__
+except NameError:
+    __all__ = [n for n in vars(_target).keys() if not n.startswith("__")]

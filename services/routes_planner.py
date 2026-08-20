@@ -1,114 +1,59 @@
-"""S4.3 AI Planner 路由（契约 api-contract §3.9 第 9 个接口）
+# Auto-generated backward-compatibility shim (READ+WRITE transparent proxy).
+# Original file moved to: services.routes.planner
+# This shim:
+#   - READS (access, import *) transparently come from the target module.
+#   - WRITES (monkeypatch.setattr, direct assignment) go through to the
+#     target module, so runtime code inside services.routes.planner that reads module-level
+#     globals (e.g. AUTH_MODE, LLM_JUDGE_MODEL, _call_judge, ...) always sees
+#     the monkey-patched value, even when tests patch via the old shim path.
+#   - Underscore-prefixed symbols like _repair_json are fully exported.
+import sys as _sys
+import importlib as _importlib
 
-GET /planner/next-action — 下一次学习动作推荐（S4.3 AI Planner 闭环）
+_target = _importlib.import_module("services.routes.planner")
+_target_name = "services.routes.planner"
+_shim_name = __name__
 
-- 默认（PLANNER_ENABLED=1）：build_learning_context → build_plan →
-  generate_learning_plan 幂等落库 learning_plan（scholar_id + plan_date）。
-- 回退（PLANNER_ENABLED=0）：复用 S3.3 /training/recommend 同构响应
-  （strategy / has_history / gate_suggestion / difficulty / mastery /
-   evidence_sparse / activities / skill_states，无 review_items / rationale）。
-"""
-from __future__ import annotations
-
-import logging
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-
-from config import (
-    PLANNER_ENABLED,
-    PLANNER_TOP_ACTIVITIES,
-    PLANNER_TOP_REVIEW_ITEMS,
-)
-from services.database import CloudBaseNoSQLClient
-from services.dependencies import get_db
-from services.learning_planner import generate_learning_plan
-from services.pre_assessment import pre_assess
-from services.models_learning import get_skill_states
-from services.routes_training import _skill_states_from_records
-
-logger = logging.getLogger("scholar-admin.routes.planner")
-
-router = APIRouter(tags=["planner"])
-
-
-class PlannerResponse(BaseModel):
-    success: bool
-    code: str = "OK"
-    message: Optional[str] = None
-    data: Optional[dict] = None
-
-
-@router.get("/planner/next-action", response_model=PlannerResponse)
-async def planner_next_action(
-    scholar_id: Optional[str] = None,
-    date: Optional[str] = None,
-    db: CloudBaseNoSQLClient = Depends(get_db),
-) -> PlannerResponse:
-    """AI Planner 下一次学习动作推荐。
-
-    入参：scholar_id（必）、date（可选，YYYY-MM-DD，缺省今日）。
-    出参 200：{ success, data: { next_action: { strategy, review_items,
-    activities, difficulty, rationale } } }
+class _ShimModule(type(_sys)):
+    """Custom module class that forwards attribute READ/WRITE to the target.
+    
+    This lets monkeypatch.setattr("services.X", attr, val) actually
+    mutate the real services.<group>.<mod> namespace where code runs.
     """
-    scholar_id = str(scholar_id or "").strip()
-    if not scholar_id:
-        raise HTTPException(status_code=400, detail="缺少参数 scholar_id")
+    _target_mod = _target
+    _dct = _sys.modules[_shim_name].__dict__  # shim's original dict
 
-    if not PLANNER_ENABLED:
-        # S3.3 回退：与 /training/recommend 同构响应（无 review_items / rationale）
-        assess = await pre_assess(db, scholar_id=scholar_id)
-        records = (
-            (await get_skill_states(db, scholar_id=scholar_id)).get("records") or []
-        )
-        strategy = (
-            "cold_start"
-            if (not assess["has_history"] or assess["evidence_sparse"])
-            else "weakness"
-        )
-        logger.info(
-            "[planner/next-action] PLANNER_ENABLED=0 回退 S3.3 scholar_id=%s strategy=%s",
-            scholar_id, strategy,
-        )
-        return PlannerResponse(
-            success=True,
-            data={
-                "next_action": {
-                    "strategy": strategy,
-                    "has_history": assess["has_history"],
-                    "gate_suggestion": assess["gate_suggestion"],
-                    "difficulty": assess["difficulty"],
-                    "mastery": assess["mastery"],
-                    "evidence_sparse": assess["evidence_sparse"],
-                    "activities": assess["activity_recommendation"],
-                    "skill_states": _skill_states_from_records(records),
-                }
-            },
-        )
+    def __getattr__(cls, name):
+        try:
+            return getattr(_target, name)
+        except AttributeError:
+            raise AttributeError(
+                f"module '{_shim_name}' (shim for {_target_name}) "
+                f"has no attribute '{name}'"
+            )
 
-    try:
-        result = await generate_learning_plan(
-            db,
-            scholar_id=scholar_id,
-            date=date,
-            top_review=PLANNER_TOP_REVIEW_ITEMS,
-            top_activities=PLANNER_TOP_ACTIVITIES,
-        )
-    except Exception as exc:  # pragma: no cover - 防御：建议层不阻断
-        logger.exception(
-            "[planner/next-action] 生成学习计划失败 scholar_id=%s", scholar_id
-        )
-        raise HTTPException(status_code=500, detail=f"学习计划生成失败: {exc}")
+    def __setattr__(cls, name, value):
+        # Rout ALL attribute writes to the REAL target module.
+        # Exception: Python-internal dunder names (used by import machinery)
+        # go to the shim's own dict to avoid breaking import system.
+        if name.startswith("__") and name.endswith("__"):
+            _ShimModule._dct[name] = value
+        else:
+            setattr(_target, name, value)
 
-    logger.info(
-        "[planner/next-action] scholar_id=%s plan_date=%s strategy=%s",
-        scholar_id, result["plan_date"], result["plan"]["strategy"],
-    )
-    return PlannerResponse(
-        success=True,
-        data={
-            "next_action": result["plan"],
-            "plan_date": result["plan_date"],
-        },
-    )
+    def __dir__(cls):
+        return sorted(set(list(_ShimModule._dct.keys()) + list(vars(_target).keys())))
+
+# Replace the shim module's class with our proxying class
+_sys.modules[_shim_name].__class__ = _ShimModule
+
+# Also populate shim's __dict__ once so `from services.X import Y` /
+# `from services.X import *` immediately resolve via normal Python lookup
+# (Python skips __getattr__ if name already in module dict). We intentionally
+# do NOT pre-populate non-dunder names so __getattr__ is always invoked
+# (forces read delegation, keeping patched value in sync).
+# Only ensure __all__ points to target's public-ish names.
+try:
+    __all__
+except NameError:
+    __all__ = [n for n in vars(_target).keys() if not n.startswith("__")]

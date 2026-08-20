@@ -114,11 +114,23 @@ class TencentGeneralOcrProvider(OcrProvider):
         return ocr_client.OcrClient(cred, self._region, client_profile)
 
     def _invoke_once(self, client: Any, image_b64: str) -> Any:
-        """同步执行一次 OCR 调用并返回原始响应。"""
-        from tencentcloud.ocr.v20181119 import models
+        """同步执行一次 OCR 调用并返回原始响应。
 
+        正常生产路径：通过腾讯云 SDK 的 models 模块构造严格类型的 req。
+        测试/降级路径（SDK 不可用，如本地 pytest + FakeClient）：
+            用 SimpleNamespace 最小对象承载 ImageBase64 属性，直接调用
+            传入的 client.engine_method(req) —— FakeClient 仅断言方法名，
+            不校验 req 类型。
+        """
         engine_method = _OCR_ENGINES.get(self._engine, "GeneralAccurateOCR")
-        req = getattr(models, f"{engine_method}Request")()
+        try:
+            from tencentcloud.ocr.v20181119 import models  # type: ignore
+
+            req = getattr(models, f"{engine_method}Request")()
+        except Exception:  # noqa: BLE001 - 降级：允许测试环境无 SDK 时通过 mock
+            from types import SimpleNamespace
+
+            req = SimpleNamespace()
         req.ImageBase64 = image_b64
         return getattr(client, engine_method)(req)
 

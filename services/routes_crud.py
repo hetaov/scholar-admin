@@ -1,79 +1,59 @@
-"""通用 CRUD 接口：通用集合查询/增/改/删/计数"""
+# Auto-generated backward-compatibility shim (READ+WRITE transparent proxy).
+# Original file moved to: services.routes.crud
+# This shim:
+#   - READS (access, import *) transparently come from the target module.
+#   - WRITES (monkeypatch.setattr, direct assignment) go through to the
+#     target module, so runtime code inside services.routes.crud that reads module-level
+#     globals (e.g. AUTH_MODE, LLM_JUDGE_MODEL, _call_judge, ...) always sees
+#     the monkey-patched value, even when tests patch via the old shim path.
+#   - Underscore-prefixed symbols like _repair_json are fully exported.
+import sys as _sys
+import importlib as _importlib
 
-from __future__ import annotations
+_target = _importlib.import_module("services.routes.crud")
+_target_name = "services.routes.crud"
+_shim_name = __name__
 
-import logging
+class _ShimModule(type(_sys)):
+    """Custom module class that forwards attribute READ/WRITE to the target.
+    
+    This lets monkeypatch.setattr("services.X", attr, val) actually
+    mutate the real services.<group>.<mod> namespace where code runs.
+    """
+    _target_mod = _target
+    _dct = _sys.modules[_shim_name].__dict__  # shim's original dict
 
-from fastapi import APIRouter, HTTPException
+    def __getattr__(cls, name):
+        try:
+            return getattr(_target, name)
+        except AttributeError:
+            raise AttributeError(
+                f"module '{_shim_name}' (shim for {_target_name}) "
+                f"has no attribute '{name}'"
+            )
 
-from services.dependencies import (
-    DeleteRequest,
-    InsertRequest,
-    QueryRequest,
-    UpdateRequest,
-    get_db,
-)
+    def __setattr__(cls, name, value):
+        # Rout ALL attribute writes to the REAL target module.
+        # Exception: Python-internal dunder names (used by import machinery)
+        # go to the shim's own dict to avoid breaking import system.
+        if name.startswith("__") and name.endswith("__"):
+            _ShimModule._dct[name] = value
+        else:
+            setattr(_target, name, value)
 
-logger = logging.getLogger("scholar-admin.routes.crud")
-router = APIRouter(tags=["CRUD"])
+    def __dir__(cls):
+        return sorted(set(list(_ShimModule._dct.keys()) + list(vars(_target).keys())))
 
+# Replace the shim module's class with our proxying class
+_sys.modules[_shim_name].__class__ = _ShimModule
 
-@router.post("/collections/{collection}/query")
-async def query_documents(collection: str, body: QueryRequest):
-    """通用查询 — 支持 where / order / offset / limit / select"""
-    try:
-        db = get_db()
-        req = body.model_dump(exclude_none=True)
-        return await db.query(collection=collection, **req)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
-
-
-@router.post("/collections/{collection}/insert")
-async def insert_document(collection: str, body: InsertRequest):
-    """通用插入 — data 可为 dict 或 list[dict]"""
-    try:
-        db = get_db()
-        return await db.insert(collection=collection, data=body.data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"插入失败: {str(e)}")
-
-
-@router.post("/collections/{collection}/update")
-async def update_documents(collection: str, body: UpdateRequest):
-    """通用更新 — 必须提供 where 条件"""
-    try:
-        db = get_db()
-        return await db.update(
-            collection=collection,
-            where=body.where,
-            data=body.data,
-            upsert=body.upsert,
-            multi=body.multi,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"更新失败: {str(e)}")
-
-
-@router.post("/collections/{collection}/delete")
-async def delete_documents(collection: str, body: DeleteRequest):
-    """通用删除 — 必须提供 where 条件"""
-    try:
-        db = get_db()
-        return await db.delete(
-            collection=collection,
-            where=body.where,
-            multi=body.multi,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
-
-
-@router.post("/collections/{collection}/count")
-async def count_documents(collection: str, body: QueryRequest):
-    """通用计数 — 使用 where 条件过滤统计"""
-    try:
-        db = get_db()
-        return await db.count(collection=collection, where=body.where)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"计数失败: {str(e)}")
+# Also populate shim's __dict__ once so `from services.X import Y` /
+# `from services.X import *` immediately resolve via normal Python lookup
+# (Python skips __getattr__ if name already in module dict). We intentionally
+# do NOT pre-populate non-dunder names so __getattr__ is always invoked
+# (forces read delegation, keeping patched value in sync).
+# Only ensure __all__ points to target's public-ish names.
+try:
+    __all__
+except NameError:
+    __all__ = [n for n in vars(_target).keys() if not n.startswith("__")]

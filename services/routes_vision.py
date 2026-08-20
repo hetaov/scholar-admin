@@ -1,168 +1,59 @@
-"""火山引擎 AI 图片识别接口"""
+# Auto-generated backward-compatibility shim (READ+WRITE transparent proxy).
+# Original file moved to: services.routes.vision
+# This shim:
+#   - READS (access, import *) transparently come from the target module.
+#   - WRITES (monkeypatch.setattr, direct assignment) go through to the
+#     target module, so runtime code inside services.routes.vision that reads module-level
+#     globals (e.g. AUTH_MODE, LLM_JUDGE_MODEL, _call_judge, ...) always sees
+#     the monkey-patched value, even when tests patch via the old shim path.
+#   - Underscore-prefixed symbols like _repair_json are fully exported.
+import sys as _sys
+import importlib as _importlib
 
-from __future__ import annotations
+_target = _importlib.import_module("services.routes.vision")
+_target_name = "services.routes.vision"
+_shim_name = __name__
 
-import base64
-import json as json_lib
-import logging
-import time
-import uuid
-
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-
-from config import VOLCANO_IMAGE_FORMATS
-from services.dependencies import ImageUrlRequest, RecognizeBase64Request, get_db, get_vision
-from services.models_content import write_content_v2
-
-logger = logging.getLogger("scholar-admin.routes.vision")
-router = APIRouter(tags=["AI 识别"])
-
-
-# ==================== 存储逻辑 ====================
-
-
-async def _store_recognition_result(
-    db,
-    result: dict,
-    image_source: str,
-    textbook_id: str | None = None,
-) -> dict:
-    """将识别结果存入新表 chapter / lesson / sentence_v2（无教材关联时不写 textbook_v2）"""
-    now = int(time.time())
-    lesson_id = f"lesson_{uuid.uuid4().hex[:16]}"
-
-    sentences = result.get("sentences", [])
-
-    sentence_docs: list[dict] = []
-    for i, s in enumerate(sentences):
-        sentence_docs.append({
-            "sentence_id": f"sent_{uuid.uuid4().hex[:16]}",
-            "index": s.get("index", i + 1),
-            "text": s.get("text", ""),
-            "translation": s.get("translation", ""),
-            "level": s.get("level", ""),
-            "keywords": s.get("keywords", []),
-        })
-
-    v2_stats = await write_content_v2(
-        db,
-        textbook_id=textbook_id or "",
-        textbook_title=result.get("title", ""),
-        units=[{
-            "lesson_id": lesson_id,
-            "lesson_title": result.get("title", ""),
-            "sentences": sentence_docs,
-        }],
-        now=now,
-        units_per_chapter=1,
-    )
-
-    logger.info(
-        f"[存储] lesson={lesson_id}, sentences={len(sentences)}, "
-        f"textbook_id={textbook_id or ''}, image_source={image_source}, "
-        f"v2={v2_stats}"
-    )
-
-    return {
-        "lesson_id": lesson_id,
-        "sentence_count": len(sentences),
-        "v2": v2_stats,
-    }
-
-
-# ==================== 文件上传识别 ====================
-
-
-@router.post("/vision/recognize")
-async def recognize_image(
-    file: UploadFile = File(...),
-    textbook_id: str | None = Form(None, alias="textbookId"),
-):
-    """识别英文教材图片，提取语句并返回结构化 JSON
-
-    参数：
-    - file: 图片文件（必填）
-    - textbook_id: 关联的教材 ID（选填，表单字段名 textbookId）
+class _ShimModule(type(_sys)):
+    """Custom module class that forwards attribute READ/WRITE to the target.
+    
+    This lets monkeypatch.setattr("services.X", attr, val) actually
+    mutate the real services.<group>.<mod> namespace where code runs.
     """
-    _validate_image_ext(file.filename or "")
+    _target_mod = _target
+    _dct = _sys.modules[_shim_name].__dict__  # shim's original dict
 
-    try:
-        contents = await file.read()
-        service = get_vision()
-        db = get_db()
+    def __getattr__(cls, name):
+        try:
+            return getattr(_target, name)
+        except AttributeError:
+            raise AttributeError(
+                f"module '{_shim_name}' (shim for {_target_name}) "
+                f"has no attribute '{name}'"
+            )
 
-        result = service.recognize(image_bytes=contents)
-        store_info = await _store_recognition_result(db, result, "upload", textbook_id)
+    def __setattr__(cls, name, value):
+        # Rout ALL attribute writes to the REAL target module.
+        # Exception: Python-internal dunder names (used by import machinery)
+        # go to the shim's own dict to avoid breaking import system.
+        if name.startswith("__") and name.endswith("__"):
+            _ShimModule._dct[name] = value
+        else:
+            setattr(_target, name, value)
 
-        return {
-            "success": True,
-            "data": result,
-            "store": store_info,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"识别失败: {str(e)}")
+    def __dir__(cls):
+        return sorted(set(list(_ShimModule._dct.keys()) + list(vars(_target).keys())))
 
+# Replace the shim module's class with our proxying class
+_sys.modules[_shim_name].__class__ = _ShimModule
 
-# ==================== URL 图片识别 ====================
-
-
-@router.post("/vision/recognize-url")
-async def recognize_image_url(body: ImageUrlRequest):
-    """通过 URL 识别英文教材图片"""
-    if not body.url:
-        raise HTTPException(status_code=400, detail="缺少 url 参数")
-
-    try:
-        service = get_vision()
-        db = get_db()
-
-        result = service.recognize(image_url=body.url)
-        store_info = await _store_recognition_result(db, result, "url")
-
-        return {
-            "success": True,
-            "data": result,
-            "store": store_info,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"识别失败: {str(e)}")
-
-
-# ==================== Base64 图片识别 ====================
-
-
-@router.post("/vision/recognize-base64")
-async def recognize_image_base64(body: RecognizeBase64Request):
-    """通过 Base64 字符串识别英文教材图片"""
-    if not body.base64:
-        raise HTTPException(status_code=400, detail="缺少 base64 数据")
-
-    try:
-        raw = base64.b64decode(body.base64)
-        service = get_vision()
-        db = get_db()
-
-        buf = raw  # bytes
-        result = service.recognize(image_bytes=buf)
-
-        store_info = await _store_recognition_result(db, result, "base64")
-
-        return {
-            "success": True,
-            "data": result,
-            "store": store_info,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"识别失败: {str(e)}")
-
-
-# ==================== 工具 ====================
-
-
-def _validate_image_ext(filename: str) -> None:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if ext not in VOLCANO_IMAGE_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的图片格式: .{ext}，仅支持 {', '.join(VOLCANO_IMAGE_FORMATS)}",
-        )
+# Also populate shim's __dict__ once so `from services.X import Y` /
+# `from services.X import *` immediately resolve via normal Python lookup
+# (Python skips __getattr__ if name already in module dict). We intentionally
+# do NOT pre-populate non-dunder names so __getattr__ is always invoked
+# (forces read delegation, keeping patched value in sync).
+# Only ensure __all__ points to target's public-ish names.
+try:
+    __all__
+except NameError:
+    __all__ = [n for n in vars(_target).keys() if not n.startswith("__")]

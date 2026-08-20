@@ -1,277 +1,59 @@
-"""对话匹配异步任务模型 — `dialogue_task` 集合 CRUD 与状态流转
+# Auto-generated backward-compatibility shim (READ+WRITE transparent proxy).
+# Original file moved to: services.learning.dialogue_task
+# This shim:
+#   - READS (access, import *) transparently come from the target module.
+#   - WRITES (monkeypatch.setattr, direct assignment) go through to the
+#     target module, so runtime code inside services.learning.dialogue_task that reads module-level
+#     globals (e.g. AUTH_MODE, LLM_JUDGE_MODEL, _call_judge, ...) always sees
+#     the monkey-patched value, even when tests patch via the old shim path.
+#   - Underscore-prefixed symbols like _repair_json are fully exported.
+import sys as _sys
+import importlib as _importlib
 
-状态机（单向，禁止回退）：
-    pending ──(claim_task 原子抢占)──> processing ──┬──> success (+result)
-                                                    └──> failed  (+error)
+_target = _importlib.import_module("services.learning.dialogue_task")
+_target_name = "services.learning.dialogue_task"
+_shim_name = __name__
 
-- create_task      : 生成 `task_id`，插入 pending 任务，返回任务文档
-- claim_task       : 原子抢占 pending → processing（multi=False + modified_count>0 判成功）
-- finish_task      : processing → success(+result) | failed(+error)
-- get_task         : 按 task_id 查询（不过滤 TTL，接口层自行过滤）
-- cleanup_expired  : 删除 expires_at <= now 的任务（TTL 清理，Phase 4 巡检用）
-
-任务记录是唯一可靠状态源（不依赖进程内存），容器回收/重启后状态不丢。
-"""
-from __future__ import annotations
-
-import logging
-import time
-import uuid
-from typing import Any
-
-from services.dependencies import get_db
-from services.dialogue import load_learned_sentences, match_dialogue
-
-logger = logging.getLogger("scholar-admin.dialogue_task")
-
-COLLECTION = "dialogue_task"
-
-# 任务默认保留时长：24h，保证客户端轮询窗口(60s)+容错重试绰绰有余
-TASK_TTL_MS = 24 * 60 * 60 * 1000
-
-STATUS_PENDING = "pending"
-STATUS_PROCESSING = "processing"
-STATUS_SUCCESS = "success"
-STATUS_FAILED = "failed"
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def build_task_id() -> str:
-    """生成业务任务 ID：`dt_` + 32 位 uuid hex。"""
-    return "dt_" + uuid.uuid4().hex
-
-
-async def create_task(
-    db,
-    *,
-    scholar_id: str,
-    sentence: str,
-    scenario: str | None = None,
-    session_id: str | None = None,
-) -> dict:
-    """创建 pending 任务并落库，返回任务文档。
-
-    不做任何 LLM 调用，保证调用方（提交接口）耗时毫秒级。
-
-    P2/F10 扩展（2026-08-17）：
-    - `scenario`（可选）：`daily` / `travel` / `ordering` / `interview` / `free`，
-      缺省 `free`，仅透传至任务上下文（服务端无状态）；
-    - `session_id`（可选）：多轮会话标识，仅透传，不参与匹配。
+class _ShimModule(type(_sys)):
+    """Custom module class that forwards attribute READ/WRITE to the target.
+    
+    This lets monkeypatch.setattr("services.X", attr, val) actually
+    mutate the real services.<group>.<mod> namespace where code runs.
     """
-    now = _now_ms()
-    task_doc: dict[str, Any] = {
-        "task_id": build_task_id(),
-        "scholar_id": scholar_id,
-        "sentence": sentence,
-        "status": STATUS_PENDING,
-        "result": None,
-        "is_question": None,
-        "error": None,
-        "created_at": now,
-        "updated_at": now,
-        "expires_at": now + TASK_TTL_MS,
-    }
-    # P2/F10：仅透传字段，保持向后兼容（旧任务无这两个字段）
-    if scenario:
-        task_doc["scenario"] = str(scenario)
-    if session_id:
-        task_doc["session_id"] = str(session_id)
-    await db.insert(COLLECTION, task_doc)
-    logger.info(
-        f"[task] create → task_id={task_doc['task_id']}, scholar={scholar_id}"
-        + (f", scenario={scenario}" if scenario else "")
-        + (f", session_id={session_id}" if session_id else "")
-    )
-    return task_doc
+    _target_mod = _target
+    _dct = _sys.modules[_shim_name].__dict__  # shim's original dict
 
-
-async def claim_task(db, task_id: str) -> bool:
-    """原子抢占 pending → processing。
-
-    并发安全：where 限定 status=pending，multi=False 只更新一条；
-    `modified_count>0` 说明本实例抢占成功，否则已被其他实例抢占/状态已变。
-    """
-    res = await db.update(
-        COLLECTION,
-        where={"task_id": task_id, "status": STATUS_PENDING},
-        data={"$set": {"status": STATUS_PROCESSING, "updated_at": _now_ms()}},
-        multi=False,
-    )
-    return res.get("modified_count", 0) > 0
-
-
-async def finish_task(
-    db,
-    task_id: str,
-    *,
-    result: dict | list | None = None,
-    is_question: bool | None = None,
-    error: str | None = None,
-) -> None:
-    """写回执行结果：error 非空 → failed(+error, result 置 null)，否则 success(+result)。"""
-    if error is not None:
-        status = STATUS_FAILED
-        result_value = None
-        error_value = str(error)
-        logger.info(f"[task] fail → task_id={task_id}, error={error_value[:200]}")
-    else:
-        status = STATUS_SUCCESS
-        result_value = result
-        error_value = None
-        logger.info(f"[task] done → task_id={task_id}, status=success")
-    await db.update(
-        COLLECTION,
-        where={"task_id": task_id},
-        data={
-            "$set": {
-                "status": status,
-                "result": result_value,
-                "is_question": is_question,
-                "error": error_value,
-                "updated_at": _now_ms(),
-            }
-        },
-        multi=False,
-    )
-
-
-async def get_task(db, task_id: str) -> dict | None:
-    """按 task_id 查询任务，未命中返回 None（不过滤 TTL）。"""
-    res = await db.query(COLLECTION, where={"task_id": task_id}, limit=1)
-    records = res.get("records", [])
-    return records[0] if records else None
-
-
-async def cleanup_expired(db, now_ms: int | None = None) -> int:
-    """删除 expires_at <= now 的过期任务，返回删除数量。"""
-    now = now_ms if now_ms is not None else _now_ms()
-    res = await db.delete(COLLECTION, where={"expires_at": {"$lte": now}})
-    count = res.get("deleted_count", 0)
-    if count:
-        logger.info(f"[task] cleanup → 删除过期任务 {count} 条")
-    return count
-
-
-async def recover_stale_tasks(db, timeout_s: int = 120) -> int:
-    """巡检卡死的 processing 任务：updated_at 超过 timeout_s 未更新 → 置为 failed。
-
-    兜底容器回收 / 进程崩溃导致的 processing 卡死（任务记录是唯一状态源，
-    实例挂了没有 else 分支写 failed，必须靠巡检恢复）。
-
-    Returns:
-        修复（置为 failed）的任务数量
-    """
-    now = _now_ms()
-    threshold = now - timeout_s * 1000
-    res = await db.update(
-        COLLECTION,
-        where={
-            "status": STATUS_PROCESSING,
-            "updated_at": {"$lt": threshold},
-        },
-        data={
-            "$set": {
-                "status": STATUS_FAILED,
-                "error": "执行超时",
-                "updated_at": now,
-            }
-        },
-        multi=True,
-    )
-    count = res.get("modified_count", 0)
-    if count:
-        logger.info(f"[task] recover → 卡死任务标记 failed {count} 条")
-    return count
-
-
-async def recover_task_if_stale(db, task: dict, timeout_s: int = 120) -> bool:
-    """定点恢复：单条卡死 processing 任务（updated_at 超时）→ 置 failed。
-
-    与 `recover_stale_tasks` 的区别：只针对传入任务的 task_id 做单点更新，
-    避免查询热路径触发全集合条件更新（无索引时全表扫描会拖慢轮询）。
-
-    Args:
-        task: get_task 返回的任务文档
-
-    Returns:
-        是否恢复成功（该任务被置为 failed）
-    """
-    if task.get("status") != STATUS_PROCESSING:
-        return False
-    now = _now_ms()
-    if task.get("updated_at", 0) > now - timeout_s * 1000:
-        return False
-    res = await db.update(
-        COLLECTION,
-        where={"task_id": task["task_id"], "status": STATUS_PROCESSING},
-        data={
-            "$set": {
-                "status": STATUS_FAILED,
-                "error": "执行超时",
-                "updated_at": now,
-            }
-        },
-        multi=False,
-    )
-    if res.get("modified_count", 0):
-        logger.info(
-            f"[task] recover → task_id={task['task_id']} 卡死任务标记 failed"
-        )
-        return True
-    return False
-
-
-async def run_dialogue_task(
-    task_id: str,
-    scholar_id: str,
-    sentence: str,
-    scenario: str | None = None,
-    session_id: str | None = None,
-) -> None:
-    """后台执行对话匹配任务并写回结果。
-
-    由提交接口 `asyncio.create_task(...)` 调度，与请求解耦：
-    - claim_task 原子抢占：被其他实例抢占则直接返回，避免重复执行
-    - 加载已学语句 → 执行 LangGraph 匹配 → finish_task 写回
-    - 业务失败（无已学语句/匹配失败）与异常统一走 failed 分支，绝不抛到调度方
-
-    P2/F10（2026-08-17）：`scenario`/`session_id` 仅透传至任务上下文
-    （任务文档已落库，此处不参与匹配逻辑，保持向后兼容）。
-    """
-    db = get_db()
-    if not await claim_task(db, task_id):
-        logger.info(f"[task] run skip → task_id={task_id} 已被抢占或状态非 pending")
-        return
-    try:
-        learned = await load_learned_sentences(db, scholar_id)
-        if not learned:
-            await finish_task(db, task_id, error="该学者暂无已学语句")
-            return
-
-        result = await match_dialogue(
-            input_sentence=sentence,
-            scholar_id=scholar_id,
-            learned_sentences=learned,
-        )
-        if result.get("success"):
-            await finish_task(
-                db,
-                task_id,
-                result=result.get("data"),
-                is_question=result.get("is_question"),
+    def __getattr__(cls, name):
+        try:
+            return getattr(_target, name)
+        except AttributeError:
+            raise AttributeError(
+                f"module '{_shim_name}' (shim for {_target_name}) "
+                f"has no attribute '{name}'"
             )
+
+    def __setattr__(cls, name, value):
+        # Rout ALL attribute writes to the REAL target module.
+        # Exception: Python-internal dunder names (used by import machinery)
+        # go to the shim's own dict to avoid breaking import system.
+        if name.startswith("__") and name.endswith("__"):
+            _ShimModule._dct[name] = value
         else:
-            await finish_task(
-                db,
-                task_id,
-                error=result.get("error") or "对话匹配失败",
-            )
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            f"[task] run error → task_id={task_id}: {e}",
-            exc_info=True,
-        )
-        await finish_task(db, task_id, error=f"对话匹配失败: {str(e)[:500]}")
+            setattr(_target, name, value)
+
+    def __dir__(cls):
+        return sorted(set(list(_ShimModule._dct.keys()) + list(vars(_target).keys())))
+
+# Replace the shim module's class with our proxying class
+_sys.modules[_shim_name].__class__ = _ShimModule
+
+# Also populate shim's __dict__ once so `from services.X import Y` /
+# `from services.X import *` immediately resolve via normal Python lookup
+# (Python skips __getattr__ if name already in module dict). We intentionally
+# do NOT pre-populate non-dunder names so __getattr__ is always invoked
+# (forces read delegation, keeping patched value in sync).
+# Only ensure __all__ points to target's public-ish names.
+try:
+    __all__
+except NameError:
+    __all__ = [n for n in vars(_target).keys() if not n.startswith("__")]
