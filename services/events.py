@@ -194,9 +194,13 @@ def build_session_doc(
     source: str | None = None,
     session_id: str | None = None,
     started_at: int | None = None,
+    subject_type: str | None = None,
     now: int | None = None,
 ) -> dict:
-    """构建 study_session 文档（start 态：ended_at/duration_sec/attempt_count 为空）。"""
+    """构建 study_session 文档（start 态：ended_at/duration_sec/attempt_count 为空）。
+
+    subject_type 透传存储到 session，供 end_session 结算时回写 scholar_book 使用。
+    """
     now = int(now or time.time())
     started_at = int(started_at or now)
     _id = session_id or new_session_id(now)
@@ -207,6 +211,7 @@ def build_session_doc(
         "textbook_id": textbook_id,
         "device": device,
         "source": source,
+        "subject_type": subject_type,
         "status": SESSION_STATUS_ACTIVE,
         "started_at": started_at,
         "ended_at": None,
@@ -267,14 +272,19 @@ async def start_session(
     textbook_id: str | None = None,
     device: str | None = None,
     source: str | None = None,
+    subject_type: str | None = None,
     now: int | None = None,
 ) -> dict:
-    """创建一个 study_session（status=active），返回会话文档。"""
+    """创建一个 study_session（status=active），返回会话文档。
+
+    subject_type 透传存储到 session，供 end_session 结算时回写 scholar_book。
+    """
     doc = build_session_doc(
         scholar_id=scholar_id,
         textbook_id=textbook_id,
         device=device,
         source=source,
+        subject_type=subject_type,
         now=now,
     )
     await db.insert(collection=STUDY_SESSION, data=doc)

@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from services.dependencies import get_db
 from services.events import end_session, record_attempt, start_session
 from services.models_learning import DEFAULT_SKILL_CODE, upsert_skill_state
-from services.models_scholar_book import touch_scholar_book
+from services.models_scholar_book import touch_scholar_book, upsert_scholar_book
 
 logger = logging.getLogger("scholar-admin.routes.state")
 router = APIRouter(tags=["学习状态"])
@@ -110,6 +110,7 @@ async def start_tracking_session(data: dict):
     {
       "scholar_id": "scholar_xxx",   // 必填
       "textbook_id": "tb_xxx",       // 可选，当前学习教材
+      "subject_type": "math",        // 可选，学科标识（english/math/chinese，缺省 english）
       "device": "ios",               // 可选，设备标识
       "source": "app"                // 可选，来源（app/web/...）
     }
@@ -123,18 +124,30 @@ async def start_tracking_session(data: dict):
     scholar_id = str(data.get("scholar_id") or "").strip()
     if not scholar_id:
         raise HTTPException(status_code=400, detail="缺少参数 scholar_id")
+    textbook_id = data.get("textbook_id")
+    subject_type = data.get("subject_type")
     try:
         db = get_db()
         session = await start_session(
             db,
             scholar_id=scholar_id,
-            textbook_id=data.get("textbook_id"),
+            textbook_id=textbook_id,
             device=data.get("device"),
             source=data.get("source"),
+            subject_type=subject_type,
         )
+        # 同时创建/更新 scholar_book，使教材立即出现在学者 books 列表中（「学习中」状态）
+        if textbook_id:
+            await upsert_scholar_book(
+                db,
+                scholar_id=scholar_id,
+                textbook_id=textbook_id,
+                subject_type=subject_type,
+            )
         logger.info(
             f"[tracking/session/start] scholar_id={scholar_id}, "
-            f"session_id={session.get('session_id')}"
+            f"session_id={session.get('session_id')}, "
+            f"subject_type={subject_type}"
         )
         return {"success": True, "data": session}
     except Exception as e:
@@ -167,12 +180,14 @@ async def end_tracking_session(data: dict):
             raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
 
         # Phase 5：会话结算回写 scholar_book（刷新 last_studied_at、增量累加 total_time_spent）
+        # subject_type 从 session 透传，保证 scholar_book 学科标识一致
         book = await touch_scholar_book(
             db,
             scholar_id=session.get("scholar_id"),
             textbook_id=session.get("textbook_id"),
             last_studied_at=session.get("ended_at"),
             time_delta_sec=session.get("duration_sec") or 0,
+            subject_type=session.get("subject_type"),
         )
         logger.info(
             f"[tracking/session/end] session_id={session_id}, "

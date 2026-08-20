@@ -265,10 +265,14 @@ async def list_scholar_books(
 
     subject_type 可选过滤（english/math/chinese）；不传返回全部（向后兼容）。
     返回值经 normalize_scholar_book_doc 兜底（存量无 subject_type → english）。
+
+    **注意**：subject_type 过滤仅在内存侧执行，DB where 不带 subject_type 条件。
+    原因：存量 scholar_book 记录可能无 subject_type 字段，CloudBase（MongoDB 风格）
+    where 条件 `subject_type=math` 会漏掉无字段记录，导致 `?subject_type=english`
+    无法返回存量英语记录。改为 DB 只按 scholar_id 查询，内存侧 normalize 后过滤，
+    保证存量与新增记录均能正确过滤。
     """
     where: dict[str, Any] = {"scholar_id": scholar_id}
-    if subject_type:
-        where["subject_type"] = subject_type
     result = await db.query(
         collection=SCHOLAR_BOOK,
         where=where,
@@ -276,13 +280,9 @@ async def list_scholar_books(
         limit=1000,
     )
     records = result.get("records", [])
-    # 存量记录无 subject_type 字段时，读侧兜底 english；如显式按 english 过滤，
-    # DB where 条件会漏掉无字段记录，此处补充内存兜底过滤
+    # 读侧 normalize：存量无 subject_type → english
+    records = [normalize_scholar_book_doc(r) for r in records]
+    # 内存侧过滤：按 normalize 后的 subject_type 精确匹配
     if subject_type:
-        records = [
-            normalize_scholar_book_doc(r) for r in records
-            if normalize_scholar_book_doc(r).get("subject_type") == subject_type
-        ]
-    else:
-        records = [normalize_scholar_book_doc(r) for r in records]
+        records = [r for r in records if r.get("subject_type") == subject_type]
     return records
