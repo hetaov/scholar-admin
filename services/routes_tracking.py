@@ -156,12 +156,19 @@ async def _load_book_content(
 
 
 @router.get("/textbook")
-async def get_textbook_all():
-    """查询所有教材列表 — textbook_v2 集合全部数据"""
+async def get_textbook_all(subject_type: str = None):
+    """查询教材列表 — textbook_v2 集合
+    
+    Args:
+        subject_type: 学科过滤（english / math / chinese），缺省返回全部
+    """
     try:
         db = get_db()
-        result = await db.query(collection=TEXTBOOK_V2, where={})
-        logger.info(f"[查询] 查询 textbook_v2 集合全部数据，结果={result}")
+        where = {}
+        if subject_type:
+            where["subject_type"] = subject_type
+        result = await db.query(collection=TEXTBOOK_V2, where=where)
+        logger.info(f"[查询] 查询 textbook_v2 集合，subject_type={subject_type}，结果={result}")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
