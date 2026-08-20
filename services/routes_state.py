@@ -126,6 +126,10 @@ async def start_tracking_session(data: dict):
         raise HTTPException(status_code=400, detail="缺少参数 scholar_id")
     textbook_id = data.get("textbook_id")
     subject_type = data.get("subject_type")
+    logger.info(
+        f"[tracking/session/start] 收到请求 scholar_id={scholar_id} "
+        f"textbook_id={textbook_id!r} subject_type={subject_type!r}"
+    )
     try:
         db = get_db()
         session = await start_session(
@@ -138,11 +142,20 @@ async def start_tracking_session(data: dict):
         )
         # 同时创建/更新 scholar_book，使教材立即出现在学者 books 列表中（「学习中」状态）
         if textbook_id:
-            await upsert_scholar_book(
+            book = await upsert_scholar_book(
                 db,
                 scholar_id=scholar_id,
                 textbook_id=textbook_id,
                 subject_type=subject_type,
+            )
+            logger.info(
+                f"[tracking/session/start] scholar_book 已创建/更新: "
+                f"_id={book.get('_id') if book else 'None'} "
+                f"subject_type={book.get('subject_type') if book else 'None'}"
+            )
+        else:
+            logger.warning(
+                f"[tracking/session/start] textbook_id 为空，跳过 scholar_book 创建"
             )
         logger.info(
             f"[tracking/session/start] scholar_id={scholar_id}, "

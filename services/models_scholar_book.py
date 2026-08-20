@@ -21,8 +21,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
+
+logger = logging.getLogger("scholar-admin.models.scholar_book")
 
 # ---------------------------------------------------------------------------
 # 集合名（顶层常量，供 check_schema.py 扫描）
@@ -203,16 +206,29 @@ async def upsert_scholar_book(
         # subject_type 仅在显式传入合法值时更新（保留原值语义）
         if isinstance(subject_type, str) and subject_type.strip() in _SCHOLAR_BOOK_VALID_SUBJECT_TYPES:
             changes["subject_type"] = subject_type.strip()
-        await db.update(
+        update_result = await db.update(
             collection=SCHOLAR_BOOK,
             where={"_id": scholar_book_id(scholar_id, textbook_id)},
             data={"$set": changes},
             multi=False,
         )
-        latest = await get_scholar_book(
-            db, scholar_id=scholar_id, textbook_id=textbook_id
+        matched = update_result.get("matched_count", 0) if isinstance(update_result, dict) else 0
+        logger.info(
+            f"[upsert_scholar_book] UPDATE scholar_id={scholar_id} "
+            f"textbook_id={textbook_id} matched={matched} changes={list(changes.keys())}"
         )
-        return latest or {**existing, **changes}
+        # 防御：如果 update 未匹配到记录（get_scholar_book 误报 existing），
+        # 回退到 insert 分支，保证数据一定写入
+        if matched == 0:
+            logger.warning(
+                f"[upsert_scholar_book] UPDATE matched=0 (existing was truthy but _id not found), "
+                f"falling back to INSERT: scholar_id={scholar_id} textbook_id={textbook_id}"
+            )
+        else:
+            latest = await get_scholar_book(
+                db, scholar_id=scholar_id, textbook_id=textbook_id
+            )
+            return latest or {**existing, **changes}
 
     doc = build_scholar_book_doc(
         scholar_id=scholar_id,
@@ -225,6 +241,10 @@ async def upsert_scholar_book(
         now=now,
     )
     await db.insert(collection=SCHOLAR_BOOK, data=doc)
+    logger.info(
+        f"[upsert_scholar_book] INSERT scholar_id={scholar_id} "
+        f"textbook_id={textbook_id} subject_type={doc.get('subject_type')} _id={doc.get('_id')}"
+    )
     return doc
 
 
