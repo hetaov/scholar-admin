@@ -15,6 +15,8 @@
 - `status`：not_started / learning / completed（首次加入即 learning）
 - `total_time_spent`：累计学习时长（秒），端侧结算时增量累加，可周期重算
 - `last_studied_at`：最后学习时间（毫秒时间戳）
+- `subject_type`：学科标识（english/math/chinese，缺省 english；与 textbook_v2.subject_type
+  对齐，用于 scholar/{id}/books 按学科过滤）。读侧 getter 兼容无字段存量记录（零写回）。
 """
 
 from __future__ import annotations
@@ -37,6 +39,43 @@ VALID_BOOK_STATUSES = {
     BOOK_STATUS_LEARNING,
     BOOK_STATUS_COMPLETED,
 }
+
+# ---------------------------------------------------------------------------
+# subject_type 多学科常量（与 models_content.normalize_textbook_doc 对齐）
+# 存量 scholar_book 记录无 subject_type 字段时，读侧 getter 兜底 english（零写回）。
+# ---------------------------------------------------------------------------
+SCHOLAR_BOOK_SUBJECT_TYPE_ENGLISH = "english"
+SCHOLAR_BOOK_SUBJECT_TYPE_MATH = "math"
+SCHOLAR_BOOK_SUBJECT_TYPE_CHINESE = "chinese"
+_SCHOLAR_BOOK_DEFAULT_SUBJECT_TYPE = SCHOLAR_BOOK_SUBJECT_TYPE_ENGLISH
+_SCHOLAR_BOOK_VALID_SUBJECT_TYPES = frozenset({
+    SCHOLAR_BOOK_SUBJECT_TYPE_ENGLISH,
+    SCHOLAR_BOOK_SUBJECT_TYPE_MATH,
+    SCHOLAR_BOOK_SUBJECT_TYPE_CHINESE,
+})
+
+
+# ---------------------------------------------------------------------------
+# 读侧 getter 兼容（scholar_book 记录 → 规范化）
+# ---------------------------------------------------------------------------
+
+
+def normalize_scholar_book_doc(doc: dict) -> dict:
+    """读取 scholar_book 记录后的 getter 兼容层。
+
+    **契约对齐 §4.1（scholar_book 扩展）**：存量记录无 `subject_type` 字段时，
+    读侧透明注入 `english`，不回写 DB，保证零迁移。
+
+    实现原则（避免副作用）：
+    - 返回新字典，不修改传入 doc；
+    - `subject_type` 缺失 / None / 空串 / 非法 → 注入 `english`；
+    - 显式合法值（english/math/chinese）→ 保留原值。
+    """
+    out = dict(doc)
+    st = out.get("subject_type")
+    if not st or st not in _SCHOLAR_BOOK_VALID_SUBJECT_TYPES:
+        out["subject_type"] = _SCHOLAR_BOOK_DEFAULT_SUBJECT_TYPE
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +104,19 @@ def build_scholar_book_doc(
     last_studied_at: int | None = None,
     started_at: int | None = None,
     completed_at: int | None = None,
+    subject_type: str | None = None,
     now: int | None = None,
 ) -> dict:
-    """构建 scholar_book 文档（纯函数，只生成不落库）。"""
+    """构建 scholar_book 文档（纯函数，只生成不落库）。
+
+    subject_type 缺省 english（与 textbook_v2 对齐）；显式合法值 math/chinese 保留。
+    """
     now = int(now or time.time())
     _id = scholar_book_id(scholar_id, textbook_id)
+    # subject_type 兜底：None/空/非法 → english
+    st = subject_type if isinstance(subject_type, str) and subject_type.strip() else None
+    if st is None or st not in _SCHOLAR_BOOK_VALID_SUBJECT_TYPES:
+        st = _SCHOLAR_BOOK_DEFAULT_SUBJECT_TYPE
     return {
         "_id": _id,
         "scholar_book_id": _id,
@@ -82,6 +129,7 @@ def build_scholar_book_doc(
         "last_studied_at": int(last_studied_at) if last_studied_at is not None else now,
         "started_at": int(started_at) if started_at is not None else now,
         "completed_at": completed_at,
+        "subject_type": st,
         "created_at": now,
         "updated_at": now,
     }
@@ -98,14 +146,17 @@ async def get_scholar_book(
     scholar_id: str,
     textbook_id: str,
 ) -> dict | None:
-    """按 学者×教材 查询单条 scholar_book；不存在返回 None。"""
+    """按 学者×教材 查询单条 scholar_book；不存在返回 None。
+
+    返回值经 normalize_scholar_book_doc 兜底（存量无 subject_type → english）。
+    """
     result = await db.query(
         collection=SCHOLAR_BOOK,
         where={"_id": scholar_book_id(scholar_id, textbook_id)},
         limit=1,
     )
     records = result.get("records", [])
-    return records[0] if records else None
+    return normalize_scholar_book_doc(records[0]) if records else None
 
 
 async def upsert_scholar_book(
@@ -117,6 +168,7 @@ async def upsert_scholar_book(
     current_lesson_id: str | None = None,
     last_studied_at: int | None = None,
     time_delta_sec: int | float = 0,
+    subject_type: str | None = None,
     now: int | None = None,
 ) -> dict:
     """upsert scholar_book：存在则更新断点/时间并增量累加时长，不存在则插入。
@@ -125,6 +177,7 @@ async def upsert_scholar_book(
     - `current_chapter_id` / `current_lesson_id`：新断点，传 None 表示不更新。
     - `last_studied_at`：最后学习时间（毫秒）；会话结算时传 ended_at。
     - `time_delta_sec`：本次学习时长增量（秒），累加到 total_time_spent。
+    - `subject_type`：学科标识（首次插入时写入；更新时不传则保留原值）。
 
     返回最新 scholar_book 文档。
     """
@@ -147,6 +200,9 @@ async def upsert_scholar_book(
             changes["total_time_spent"] = int(existing.get("total_time_spent") or 0) + int(
                 time_delta_sec
             )
+        # subject_type 仅在显式传入合法值时更新（保留原值语义）
+        if isinstance(subject_type, str) and subject_type.strip() in _SCHOLAR_BOOK_VALID_SUBJECT_TYPES:
+            changes["subject_type"] = subject_type.strip()
         await db.update(
             collection=SCHOLAR_BOOK,
             where={"_id": scholar_book_id(scholar_id, textbook_id)},
@@ -165,6 +221,7 @@ async def upsert_scholar_book(
         current_lesson_id=current_lesson_id,
         total_time_spent=int(time_delta_sec or 0),
         last_studied_at=last_studied_at,
+        subject_type=subject_type,
         now=now,
     )
     await db.insert(collection=SCHOLAR_BOOK, data=doc)
@@ -178,6 +235,7 @@ async def touch_scholar_book(
     textbook_id: str,
     last_studied_at: int | None = None,
     time_delta_sec: int | float = 0,
+    subject_type: str | None = None,
     now: int | None = None,
 ) -> dict | None:
     """会话结算回写：刷新 last_studied_at 并增量累加 total_time_spent。
@@ -192,16 +250,39 @@ async def touch_scholar_book(
         textbook_id=textbook_id,
         last_studied_at=last_studied_at,
         time_delta_sec=time_delta_sec,
+        subject_type=subject_type,
         now=now,
     )
 
 
-async def list_scholar_books(db, *, scholar_id: str) -> list[dict]:
-    """查询某学者全部教材关联（按 last_studied_at 降序）。"""
+async def list_scholar_books(
+    db,
+    *,
+    scholar_id: str,
+    subject_type: str | None = None,
+) -> list[dict]:
+    """查询某学者全部教材关联（按 last_studied_at 降序）。
+
+    subject_type 可选过滤（english/math/chinese）；不传返回全部（向后兼容）。
+    返回值经 normalize_scholar_book_doc 兜底（存量无 subject_type → english）。
+    """
+    where: dict[str, Any] = {"scholar_id": scholar_id}
+    if subject_type:
+        where["subject_type"] = subject_type
     result = await db.query(
         collection=SCHOLAR_BOOK,
-        where={"scholar_id": scholar_id},
+        where=where,
         order=[{"field": "last_studied_at", "direction": "desc"}],
         limit=1000,
     )
-    return result.get("records", [])
+    records = result.get("records", [])
+    # 存量记录无 subject_type 字段时，读侧兜底 english；如显式按 english 过滤，
+    # DB where 条件会漏掉无字段记录，此处补充内存兜底过滤
+    if subject_type:
+        records = [
+            normalize_scholar_book_doc(r) for r in records
+            if normalize_scholar_book_doc(r).get("subject_type") == subject_type
+        ]
+    else:
+        records = [normalize_scholar_book_doc(r) for r in records]
+    return records

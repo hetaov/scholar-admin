@@ -176,7 +176,10 @@ async def get_textbook_all(subject_type: str = None):
 
 @router.post("/textbook")
 async def add_textbook(data: dict):
-    """添加教材 — 请求体 {"title": "新概念2"}（写入 textbook_v2）"""
+    """添加教材 — 请求体 {"title": "新概念2", "subject_type?": "english"}（写入 textbook_v2）
+
+    subject_type 缺省 english（向后兼容）；math 时需同时提供 semester。
+    """
     try:
         db = get_db()
         textbook_id = str(data.get("textbook_id") or data.get("_id") or "").strip() \
@@ -186,6 +189,11 @@ async def add_textbook(data: dict):
             title=str(data.get("title") or "").strip(),
             grade=str(data.get("grade") or "").strip(),
             level=str(data.get("level") or "").strip(),
+            subject_type=data.get("subject_type"),
+            semester=data.get("semester"),
+            publisher=data.get("publisher"),
+            cover_url=data.get("cover_url"),
+            isbn=data.get("isbn"),
         )
         result = await db.insert(collection=TEXTBOOK_V2, data=doc)
         logger.info(
@@ -221,13 +229,20 @@ async def _fetch_textbook_titles(db, textbook_ids: list[str]) -> dict[str, str]:
 
 
 @router.get("/scholar/{scholar_id}/books")
-async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
+async def get_scholar_books(
+    scholar_id: str,
+    skill_code: str | None = None,
+    subject_type: str | None = None,
+):
     """我的教材列表 — 该学者全部 scholar_book 关联（含教材级进度）。
 
     内容层级按书批量 $in 加载一次，学习数据（skill_state / study_attempt）全量
     仅查询一次后按各教材句子集合在内存内过滤聚合，书名一次 $in 批量取回；
     查询次数 = 1(books) + 2(states/attempts) + 3×N(内容) + 2(书名)，与学者级
     数据规模无关，避免每本书重复拉取 states/attempts 导致的 N+1 慢查询。
+
+    Args:
+        subject_type: 学科过滤（english/math/chinese），缺省返回全部（向后兼容）。
 
     返回：
     {
@@ -243,6 +258,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
             "last_studied_at": 123,
             "total_time_spent": 60,
             "status": "learning",
+            "subject_type": "english",
             "summary": { ...aggregate_progress summary... }
           }
         ]
@@ -251,7 +267,9 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
     """
     try:
         db = get_db()
-        books = await list_scholar_books(db, scholar_id=scholar_id)
+        books = await list_scholar_books(
+            db, scholar_id=scholar_id, subject_type=subject_type
+        )
         textbook_ids = [b.get("textbook_id") for b in books if b.get("textbook_id")]
 
         # 1. 内容层级：每本书批量加载一次（chapters + lessons + sentences），
@@ -349,6 +367,7 @@ async def get_scholar_books(scholar_id: str, skill_code: str | None = None):
                     "last_studied_at": book.get("last_studied_at"),
                     "total_time_spent": book.get("total_time_spent"),
                     "status": book.get("status"),
+                    "subject_type": book.get("subject_type"),
                     "summary": summary,
                 }
             )
@@ -396,12 +415,20 @@ async def _find_lesson_by_id(db, textbook_id: str, lesson_id: str) -> dict | Non
 
 
 @router.get("/scholar/{scholar_id}/textbooks/{textbook_id}/lessons")
-async def get_textbook_lessons(scholar_id: str, textbook_id: str, skill_code: str | None = None):
+async def get_textbook_lessons(
+    scholar_id: str,
+    textbook_id: str,
+    skill_code: str | None = None,
+    subject_type: str | None = None,
+):
     """教材详情（lesson 列表 + 顶部三概念）— 查询接口拆分后（接口 2）。
 
     内容层级与学习数据仅查询一次（批量 $in + 分页），按能力在内存内独立
     聚合构造每课 skills（口径与 summary.mastery 一致），避免 N+1 逐章/逐课
     查询与 5 次重复聚合触库导致的慢查询。
+
+    Args:
+        subject_type: 学科标识（english/math/chinese，契约对齐，缺省不限）。
 
     返回：
     {
@@ -714,22 +741,25 @@ async def update_book_position(
     {
       "current_chapter_id": "chapter_xxx",
       "current_lesson_id": "lesson_xxx",
-      "last_studied_at": 1234567890
+      "last_studied_at": 1234567890,
+      "subject_type": "english"  // 可选，首次加入时写入学科标识
     }
 
-    返回最新 scholar_book 文档。
+    返回最新 scholar_book 文档（含 subject_type）。
     """
     current_chapter_id = data.get("current_chapter_id")
     current_lesson_id = data.get("current_lesson_id")
     last_studied_at = data.get("last_studied_at")
+    subject_type = data.get("subject_type")
     if (
         current_chapter_id is None
         and current_lesson_id is None
         and last_studied_at is None
+        and subject_type is None
     ):
         raise HTTPException(
             status_code=400,
-            detail="至少提供一个字段: current_chapter_id / current_lesson_id / last_studied_at",
+            detail="至少提供一个字段: current_chapter_id / current_lesson_id / last_studied_at / subject_type",
         )
     try:
         db = get_db()
@@ -740,6 +770,7 @@ async def update_book_position(
             current_chapter_id=current_chapter_id,
             current_lesson_id=current_lesson_id,
             last_studied_at=last_studied_at,
+            subject_type=subject_type,
         )
         logger.info(
             f"[scholar/{scholar_id}/books/{textbook_id}/position] "

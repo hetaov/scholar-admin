@@ -78,8 +78,8 @@ async def list_collections():
         },
         {
             "name": "scholar_book",
-            "description": "学者×教材关联表 — 断点续学(current_chapter_id/current_lesson_id) + 累计时长(total_time_spent)",
-            "indexes": ["scholar_id", "textbook_id", "status", "last_studied_at"],
+            "description": "学者×教材关联表 — 断点续学(current_chapter_id/current_lesson_id) + 累计时长(total_time_spent) + 学科标识(subject_type)",
+            "indexes": ["scholar_id", "textbook_id", "status", "last_studied_at", "subject_type"],
         },
     ]
 
