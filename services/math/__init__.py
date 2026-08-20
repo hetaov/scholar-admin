@@ -1,14 +1,116 @@
 """数学学科服务包（scholar-admin /math 模块）
 
-承载数学学科 F1~F4 后端能力：
+承载数学学科 F1~F4 + G 管理端能力：
 - F1  AI 知识总结生成（knowledge_summary）
-- F2  教材描述四接口（curriculum_description，本任务 F2.1）
+- F2  教材描述四接口（curriculum_description）
 - F3  错题练习纸 A4 选题源扩展（沿用 ADR-0010）
 - F4  错题扫描上传与归类（scan_upload）
+- G0  textbook 多学科化扩展（常量 SUBJECT_TYPE_* + getter 兼容/写入校验）
+- G1  数学教材管理 CRUD + 概览/导入/清理（SOP G1.1）
+- G2  批量知识总结调度（SOP G1.2）
 
 路由统一挂载在 services/routes_math.py（prefix="/math"）。
 """
 from __future__ import annotations
+
+# ===========================================================================
+# G0: textbook 多学科扩展 常量（契约 data-model-contract §4.1 · SOP G0.1）
+# ===========================================================================
+
+# subject_type 取值（textbook_v2.subject_type 索引字段；契约 §4.1）
+SUBJECT_TYPE_ENGLISH = "english"      # 缺省，英语
+SUBJECT_TYPE_MATH = "math"            # 数学
+SUBJECT_TYPE_CHINESE = "chinese"      # 语文（预留扩展）
+DEFAULT_SUBJECT_TYPE = SUBJECT_TYPE_ENGLISH  # 契约 §4.1：存量/缺省 = english
+VALID_SUBJECT_TYPES = (SUBJECT_TYPE_ENGLISH, SUBJECT_TYPE_MATH, SUBJECT_TYPE_CHINESE)
+VALID_SUBJECT_TYPES_SET = frozenset(VALID_SUBJECT_TYPES)  # O(1) 合法性校验
+VALID_MATH_SEMESTERS = ("up", "down")  # 数学生效：上册/下册（契约 §4.1 semester 字段）
+VALID_MATH_SEMESTERS_SET = frozenset(VALID_MATH_SEMESTERS)
+
+# math 专用异常错误码（契约 api-contract §3.1 POST /textbook 校验规则）
+ERR_INVALID_SUBJECT_TYPE = "INVALID_SUBJECT_TYPE"
+ERR_MATH_SEMESTER_REQUIRED = "MATH_TEXTBOOK_SEMESTER_REQUIRED"
+ERR_INVALID_MATH_SEMESTER = "INVALID_MATH_SEMESTER"
+
+
+class TextbookPayloadError(ValueError):
+    """教材入参校验异常（含契约错误码，routes 层映射 → HTTP 400）。
+
+    用法：raise TextbookPayloadError(ERR_MATH_SEMESTER_REQUIRED, "数学必须指定 semester")
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+# ===========================================================================
+# G1.1 数学教材管理端专用错误码 + 异常类（SOP §5 G1.1 路由层 400/404 契约）
+# ===========================================================================
+
+# G1.1 管理端错误码（api-contract §3.10 G-CRUD-* 错误码对齐）
+ERR_TEXTBOOK_NOT_FOUND = "TEXTBOOK_NOT_FOUND"
+ERR_SUBJECT_TYPE_CHANGE_CONFIRM_REQUIRED = "SUBJECT_TYPE_CHANGE_CONFIRM_REQUIRED"  # PUT 跨学科改 subject_type
+ERR_UPDATE_TITLE_CONFIRM_MISMATCH = "UPDATE_TITLE_CONFIRM_MISMATCH"                 # PUT 标题变更二次核对
+ERR_DELETE_CONFIRM_MISMATCH = "DELETE_CONFIRM_MISMATCH"                              # DELETE confirm_textbook_title 不匹配
+ERR_TEXTBOOK_SUBJECT_TYPE_NOT_MATH = "TEXTBOOK_SUBJECT_TYPE_NOT_MATH"                # /math/textbook 接口内禁止英语操作
+ERR_IMPORT_NODES_DUPLICATE_CODE = "IMPORT_NODES_DUPLICATE_CODE"                      # 单次导入 payload 内 code 重复
+ERR_IMPORT_ON_DUPLICATE_INVALID = "IMPORT_ON_DUPLICATE_INVALID"                      # on_duplicate 取值非法（仅 skip/update）
+
+
+class TextbookNotFoundError(LookupError):
+    """教材 ID 不存在（routes 层映射 → HTTP 404）。"""
+
+    code = ERR_TEXTBOOK_NOT_FOUND
+
+    def __init__(self, textbook_id: str, message: str | None = None):
+        msg = message or f"教材不存在：{textbook_id!r}"
+        super().__init__(f"{self.code}: {msg}")
+        self.textbook_id = textbook_id
+        self.message = msg
+
+
+class ConfirmationMismatchError(ValueError):
+    """二次确认失败：PUT 跨学科改 subject_type / DELETE 标题不符（→ HTTP 400，code=对应 ERR_*_MISMATCH / *_CONFIRM_REQUIRED）。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+# curriculum_node 导入幂等键字段（契约 §4.12.1 node.code 是唯一编码，G2 导入以此判断重复）
+CURRICULUM_NODE_IDEMPOTENCY_FIELD = "code"
+VALID_IMPORT_ON_DUPLICATE = ("skip", "update")
+VALID_IMPORT_ON_DUPLICATE_SET = frozenset(VALID_IMPORT_ON_DUPLICATE)
+
+
+# ===========================================================================
+# G1.2 批量总结 3 接口 错误码 + 异常类（SOP §5 G1.2 · routes 层 400/404 契约）
+# ===========================================================================
+
+# G1.2 管理端错误码（api-contract §3.10 batch-manual 错误码对齐）
+ERR_BATCH_JOB_NOT_FOUND = "BATCH_JOB_NOT_FOUND"                    # batch-status job_id 不存在（404）
+ERR_INVALID_BATCH_SCOPE = "INVALID_BATCH_SCOPE"                    # batch-generate scope 非法（仅 not_generated_only/all/force）
+ERR_MANUAL_EDIT_NOOP = "MANUAL_EDIT_NOOP"                          # manual-edit 没有任何字段变更（400）
+ERR_NODE_NOT_FOUND = "NODE_NOT_FOUND"                              # curriculum_node ID 不存在（manual-edit / 读侧 404）
+
+VALID_BATCH_SCOPE = ("not_generated_only", "all", "force")
+VALID_BATCH_SCOPE_SET = frozenset(VALID_BATCH_SCOPE)
+
+
+class BatchJobNotFoundError(LookupError):
+    """批任务 ID 不存在或已过期（routes 层映射 → HTTP 404）。"""
+
+    code = ERR_BATCH_JOB_NOT_FOUND
+
+    def __init__(self, job_id: str, message: str | None = None):
+        msg = message or f"批任务不存在或已过期：{job_id!r}"
+        super().__init__(f"{self.code}: {msg}")
+        self.job_id = job_id
+        self.message = msg
+
 
 # ===========================================================================
 # curriculum_node 模型常量（契约 data-model-contract §4.12.1 / §4.12.8）

@@ -3,6 +3,11 @@
 Phase 1 目标:
     textbook_v2 → chapter → lesson → sentence_v2
 新表独立创建, 旧表 textbook/sentence/unit/paragraph 迁移结束后下线(Phase 6)。
+
+2026-08-20 SOP G0.1 扩展：
+    textbook_v2 多学科化 — subject_type（english/math/chinese）默认 english，
+    读侧 getter 兼容（normalize_textbook_doc）、写侧 build_doc 默认值、
+    入参校验 validate_textbook_payload（契约 §4.1 + api-contract §3.1）。
 """
 
 from __future__ import annotations
@@ -19,7 +24,144 @@ SENTENCE_V2 = "sentence_v2"
 
 DEFAULT_UNITS_PER_CHAPTER = 8
 
+# G0.1: textbook 多学科常量（避免循环依赖 math.__init__ → math 会 import models_content 中的内容）
+# 如后续需要对 math 可见，在 math/__init__.py 重新声明主值；此处保留底层副本，
+# 保证 models_content 可被 math 依赖路径上的任何模块使用，不产生循环 import。
+_SUBJECT_TYPE_ENGLISH = "english"
+_SUBJECT_TYPE_MATH = "math"
+_SUBJECT_TYPE_CHINESE = "chinese"
+_DEFAULT_SUBJECT_TYPE = _SUBJECT_TYPE_ENGLISH
+_VALID_SUBJECT_TYPES_SET = frozenset({_SUBJECT_TYPE_ENGLISH, _SUBJECT_TYPE_MATH, _SUBJECT_TYPE_CHINESE})
+_VALID_MATH_SEMESTERS_SET = frozenset({"up", "down"})
+
+_ERR_INVALID_SUBJECT_TYPE = "INVALID_SUBJECT_TYPE"
+_ERR_MATH_SEMESTER_REQUIRED = "MATH_TEXTBOOK_SEMESTER_REQUIRED"
+_ERR_INVALID_MATH_SEMESTER = "INVALID_MATH_SEMESTER"
+
 logger = logging.getLogger("scholar-admin.models.content")
+
+
+# ---------------------------------------------------------------------------
+# G0.1 — 读侧 getter 兼容（textbook_v2 记录 → 规范化）
+# ---------------------------------------------------------------------------
+
+
+def normalize_textbook_doc(doc: dict) -> dict:
+    """读取 textbook_v2 记录后的 getter 兼容层。
+
+    **契约 §4.1**：存量记录无 `subject_type` 字段时，读侧透明注入 `english`，
+    不回写 DB，保证零迁移。
+
+    实现原则（避免副作用）：
+    - 返回新字典，不修改传入 doc；
+    - `subject_type` 缺失 → 注入 `english`；
+    - `subject_type` 为 `None` / 空字符串 → 注入 `english`；
+    - 显式合法值（english/math/chinese）→ 保留原值；
+    - 非法 subject_type → **读侧不抛错**（避免破坏存量场景下的 GET 列表），
+      仅注入 `english` 兜底；非法值写入侧由 `validate_textbook_payload` 把关。
+    """
+    out = dict(doc)  # shallow copy 够了，调用方不依赖引用
+    st = out.get("subject_type")
+    if not st or st not in _VALID_SUBJECT_TYPES_SET:
+        out["subject_type"] = _DEFAULT_SUBJECT_TYPE
+    return out
+
+
+# ---------------------------------------------------------------------------
+# G0.1 — 入参校验（POST/PUT textbook 前）
+# ---------------------------------------------------------------------------
+
+
+class _TextbookPayloadError(ValueError):
+    """校验异常（私有本地别名，routes 层如已 import math.TextbookPayloadError 也可直接 except ValueError(code in ...)）。
+
+    为便于测试同时兼容两种风格：
+    1. 异常对象带 `code` 属性；
+    2. `str(err)` 以 `{CODE}: ` 开头，因此 assert "CODE" in str(err) 也成立。
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+def validate_textbook_payload(
+    *,
+    title: str = "",
+    grade: str = "",
+    level: str = "",
+    subject_type: str | None = None,
+    semester: str | None = None,
+    publisher: str | None = None,
+    cover_url: str | None = None,
+    isbn: str | None = None,
+    textbook_id: str | None = None,
+    chapters: list | None = None,
+) -> dict:
+    """教材 CRUD 入参校验 + 规范化（契约 api-contract §3.1 POST /textbook）。
+
+    校验规则：
+      1. subject_type 未传（None/空串）→ 默认 english；
+         传了但 ∉ {english,math,chinese} → 抛 ValueError(code=INVALID_SUBJECT_TYPE)。
+      2. subject_type='math' 且缺 semester → 抛 MATH_TEXTBOOK_SEMESTER_REQUIRED。
+      3. subject_type='math' 且 semester ∉ {up,down} → 抛 INVALID_MATH_SEMESTER。
+      4. 非 math（english/chinese 或默认 english）的 semester = None/空串 → 允许，
+         cleaned 结果中**不**输出 semester/publisher/cover_url/isbn 的空值（留作可选，
+         契约为 "仅数学生效"，英语侧为空不写入）。
+
+    返回：cleaned dict（仅包含合法的已填键，可选字段空值不强制写入）。
+    """
+    cleaned: dict = {}
+
+    # 1) 必填基本字段
+    if title is not None:
+        cleaned["title"] = title
+    if grade is not None:
+        cleaned["grade"] = grade
+    if level is not None:
+        cleaned["level"] = level
+    if textbook_id is not None:
+        cleaned["textbook_id"] = textbook_id
+    if chapters is not None:
+        cleaned["chapters"] = chapters
+
+    # 2) subject_type 默认 + 合法性
+    st_norm = subject_type.strip() if isinstance(subject_type, str) else None
+    if not st_norm:
+        st_norm = _DEFAULT_SUBJECT_TYPE
+    if st_norm not in _VALID_SUBJECT_TYPES_SET:
+        raise _TextbookPayloadError(
+            _ERR_INVALID_SUBJECT_TYPE,
+            f"subject_type 取值仅限 {sorted(_VALID_SUBJECT_TYPES_SET)}，实际={subject_type!r}",
+        )
+    cleaned["subject_type"] = st_norm
+
+    # 3) semester / publisher / cover_url / isbn
+    sem_norm = semester.strip() if isinstance(semester, str) else None
+    if st_norm == _SUBJECT_TYPE_MATH:
+        if not sem_norm:
+            raise _TextbookPayloadError(
+                _ERR_MATH_SEMESTER_REQUIRED,
+                "subject_type='math' 时必须指定 semester(up/down)",
+            )
+        if sem_norm not in _VALID_MATH_SEMESTERS_SET:
+            raise _TextbookPayloadError(
+                _ERR_INVALID_MATH_SEMESTER,
+                f"semester 取值仅限 {sorted(_VALID_MATH_SEMESTERS_SET)}，实际={semester!r}",
+            )
+        cleaned["semester"] = sem_norm
+        # math 的可选元数据（只要 truthy 就写入，否则 DB 层保持字段少，兼容英语侧查询时不输出 None）
+        if publisher:
+            cleaned["publisher"] = publisher
+        if cover_url:
+            cleaned["cover_url"] = cover_url
+        if isbn:
+            cleaned["isbn"] = isbn
+    # 非 math：semester/publisher/cover_url/isbn 不写入 cleaned，保持英语侧纯净
+    # （未来如需语文学科的独立字段，再走新 SOP 扩展，这里不预留）
+
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +346,32 @@ def build_textbook_v2_doc(
     lesson_count: int = 0,
     sentence_count: int = 0,
     now: int | None = None,
+    # 2026-08-20 SOP G0.1 扩展：多学科元数据（契约 §4.1）
+    subject_type: str | None = None,
+    semester: str | None = None,
+    publisher: str | None = None,
+    cover_url: str | None = None,
+    isbn: str | None = None,
 ) -> dict:
-    """旧 textbook → textbook_v2(全量复制 + version=1 + 冗余计数)。"""
+    """旧 textbook → textbook_v2(全量复制 + version=1 + 冗余计数)。
+
+    2026-08-20 G0.1 扩展：
+      - `subject_type` 缺省 = english（契约 §4.1），存量调用零修改自动写入 english；
+      - `semester/publisher/cover_url/isbn` 仅当 subject_type='math' 或 调用方显式传
+        非 None 时写入（英语侧默认不写入，DB 无多余字段）。
+    """
     now = now or int(time.time())
-    return {
+    # subject_type 默认 english
+    st_norm = subject_type.strip() if isinstance(subject_type, str) else None
+    if not st_norm:
+        st_norm = _DEFAULT_SUBJECT_TYPE
+    if st_norm not in _VALID_SUBJECT_TYPES_SET:
+        # build_doc 是内部辅助函数：非法值不给 routes 层抛错的机会，
+        # 写入侧的合法性应由 validate_textbook_payload 前置把关。
+        # 这里做一个兜底：非法值 → 注入 english，避免写入脏数据。
+        st_norm = _DEFAULT_SUBJECT_TYPE
+
+    doc = {
         "_id": textbook_id,
         "textbook_id": textbook_id,
         "title": title,
@@ -219,7 +383,19 @@ def build_textbook_v2_doc(
         "sentence_count": sentence_count,
         "created_at": now,
         "updated_at": now,
+        "subject_type": st_norm,
     }
+    # math 的可选元数据（仅 math 时写入）
+    if st_norm == _SUBJECT_TYPE_MATH:
+        if semester:
+            doc["semester"] = semester
+        if publisher:
+            doc["publisher"] = publisher
+        if cover_url:
+            doc["cover_url"] = cover_url
+        if isbn:
+            doc["isbn"] = isbn
+    return doc
 
 
 def build_chapter_doc(

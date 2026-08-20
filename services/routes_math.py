@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from services.auth import get_request_openid
 from services.database import CloudBaseNoSQLClient
@@ -68,6 +69,28 @@ from services.math.error_scanner import (
     classify_scan_upload,
     correct_scan_classify,
     create_scan_upload,
+)
+from services.math import (
+    ConfirmationMismatchError,
+    ERR_NODE_NOT_FOUND,
+    TextbookNotFoundError,
+    TextbookPayloadError,
+    BatchJobNotFoundError,
+)
+from services.math.knowledge_summary import (
+    KnowledgeSummaryError,
+    batchGenerateKnowledgeSummary,
+    getBatchSummaryStatus,
+    manualEditKnowledgeSummary,
+    NodeNotFoundError as SummaryNodeNotFoundError,
+)
+from services.math.textbook_management import (
+    create_math_textbook,
+    delete_math_textbook_cleanup,
+    get_textbook_overview,
+    import_curriculum_nodes,
+    list_math_textbooks,
+    update_math_textbook,
 )
 
 logger = logging.getLogger("scholar-admin.routes.math")
@@ -240,6 +263,94 @@ def _summary_error_to_http(exc: KnowledgeSummaryError) -> HTTPException:
     if isinstance(exc, LLMResponseError):
         return HTTPException(status_code=500, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))
+
+
+# ===========================================================================
+# G1.2 批量总结 3 接口（batch-generate / batch-status / manual-edit · 契约 §3.10）
+# 注：本节路由放在 F1 两条 knowledge-summary 路由「之前」注册，保证静态路径
+# /batch-generate /batch-status 不会被先定义的 GET /{curriculum_node_id} path-param 路由误匹配。
+# ===========================================================================
+
+
+class BatchGenerateRequest(BaseModel):
+    """POST /math/knowledge-summary/batch-generate 请求体。"""
+
+    textbook_id: str = Field(..., description="教材 ID（必须 math）", min_length=1)
+    scope: Literal["not_generated_only", "all", "force"] = Field(
+        "not_generated_only",
+        description="调度范围：not_generated_only 跳已生成；all 过 F1 幂等；force 强制重生成",
+    )
+    node_ids: list[str] | None = Field(
+        None,
+        description="可选：仅处理指定 node_id 列表（空或 None=该教材全部节点）",
+    )
+
+
+def _batch_summary_error_to_http(exc: Exception) -> HTTPException:
+    """G1.2 异常 → HTTP 映射（404/400/500 三段式，batch/manual-edit 共用）。"""
+    # 404 族：仅白名单内的「明确 Not Found 异常」（注意 KeyError/IndexError 也是 LookupError 子类但属程序 bug → 走 500）
+    if isinstance(exc, (TextbookNotFoundError, BatchJobNotFoundError)):
+        code = getattr(exc, "code", None) or getattr(type(exc), "code", None) or "LOOKUP_NOT_FOUND"
+        msg = getattr(exc, "message", None) or str(exc)
+        return HTTPException(status_code=404, detail={"code": code, "message": msg})
+    if isinstance(exc, SummaryNodeNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail={"code": ERR_NODE_NOT_FOUND, "message": str(exc)},
+        )
+    # 400 族：业务校验异常（ValueError 语义 + KnowledgeSummaryError 其余 + ConfirmationMismatchError）
+    if isinstance(exc, (TextbookPayloadError, ConfirmationMismatchError)):
+        return HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    if isinstance(exc, KnowledgeSummaryError):
+        code = f"KNOWLEDGE_SUMMARY_{type(exc).__name__}"
+        return HTTPException(status_code=400, detail={"code": code, "message": str(exc)})
+    # 500 兜底（含 KeyError/IndexError 等程序 bug）
+    logger.exception("Unhandled batch-summary error: %s", exc)
+    return HTTPException(
+        status_code=500,
+        detail={"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"},
+    )
+
+
+@router.post("/knowledge-summary/batch-generate")
+async def math_batch_summary_generate(
+    body: BatchGenerateRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST /math/knowledge-summary/batch-generate — 批量调度 AI 总结（G1.2 接口 1）。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await batchGenerateKnowledgeSummary(
+            db,
+            textbook_id=body.textbook_id,
+            scope=body.scope,
+            node_ids=body.node_ids,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (
+        TextbookPayloadError,
+        ConfirmationMismatchError,
+        KnowledgeSummaryError,
+        Exception,
+    ) as e:
+        raise _batch_summary_error_to_http(e) from e
+
+
+@router.get("/knowledge-summary/batch-status")
+async def math_batch_summary_status(
+    job_id: str = Query(..., description="批任务 ID（来自 batch-generate 响应）", min_length=1),
+):
+    """GET /math/knowledge-summary/batch-status — 查询批任务进度与 items（G1.2 接口 2）。"""
+    try:
+        data = await getBatchSummaryStatus(job_id=job_id)
+        return {"success": True, "data": data}
+    except (LookupError, Exception) as e:
+        raise _batch_summary_error_to_http(e) from e
 
 
 @router.post("/knowledge-summary/generate")
@@ -574,3 +685,247 @@ async def math_scan_correct(
         return {"success": True, "data": data}
     except (ScanCorrectError, ScanNotFoundError) as e:
         raise _scan_correct_error_to_http(e) from e
+
+
+# ===========================================================================
+# G1.1 数学教材管理 6 接口（SOP §5，契约 §3.10 API-3）
+# ===========================================================================
+
+
+# ------------- 请求体 Pydantic 模型 ------------- #
+
+
+class MathTextbookCreateRequest(BaseModel):
+    """POST /math/textbook 入参（对齐 math textbook_v2 DM-2）。"""
+    title: str = Field(..., min_length=1, description="教材全名")
+    grade: str = Field(..., description="年级，如 七年级")
+    semester: str | None = Field(None, description="数学生效：up/down")
+    subject_type: str | None = Field("math", description="固定 math（本接口禁止 english）")
+    publisher: str | None = Field(None)
+    cover_url: str | None = Field(None)
+    isbn: str | None = Field(None)
+    textbook_id: str | None = Field(None, description="自定义教材ID，缺省自动生成")
+    chapters: list[dict] = Field(default_factory=list)
+
+
+class MathTextbookUpdateRequest(BaseModel):
+    """PUT /math/textbook/{id} 入参。改标题/跨学科改 subject_type 需 confirm_title 二次确认。"""
+    title: str | None = Field(None)
+    grade: str | None = Field(None)
+    semester: str | None = Field(None)
+    subject_type: str | None = Field(None)
+    publisher: str | None = Field(None)
+    cover_url: str | None = Field(None)
+    isbn: str | None = Field(None)
+    chapters: list[dict] | None = Field(None)
+    confirm_title: str = Field("", description="改标题/改 subject_type 时必须传入确认标题")
+
+
+class MathTextbookImportNodesRequest(BaseModel):
+    """POST /math/textbook/import-nodes 入参。"""
+    textbook_id: str = Field(..., min_length=1)
+    nodes: list[dict] = Field(..., description="curriculum_node 列表，code 幂等")
+    on_duplicate: str = Field("skip", description="遇到同 code 时：skip 跳过（默认）/ update 覆盖")
+
+
+class MathTextbookDeleteCleanupRequest(BaseModel):
+    """DELETE /math/textbook/{id} 入参：需 confirm_textbook_title 二次确认。"""
+    confirm_textbook_title: str = Field(..., min_length=1, description="必须与当前教材标题完全相等")
+
+
+# ------------- 业务异常 → HTTP 映射 ------------- #
+
+
+def _textbook_error_to_http(exc: Exception) -> HTTPException:
+    """Textbook* 系列错误 → HTTP 状态码（契约 §3.10：404 不存在 / 400 校验失败 / 500 兜底）。"""
+    if isinstance(exc, TextbookNotFoundError):
+        return HTTPException(status_code=404, detail={
+            "code": exc.code, "message": str(exc),
+        })
+    if isinstance(exc, (TextbookPayloadError, ConfirmationMismatchError)):
+        return HTTPException(status_code=400, detail={
+            "code": getattr(exc, "code", "BAD_REQUEST"), "message": str(exc),
+        })
+    return HTTPException(status_code=500, detail={"code": "INTERNAL_ERROR", "message": str(exc)})
+
+
+# ------------- 6 路由端点 ------------- #
+
+
+@router.get("/textbook")
+async def math_textbook_list(
+    subject_type: str = "math",
+    grade: str | None = None,
+    semester: str | None = None,
+    keyword: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
+    request: Request = None,  # type: ignore[assignment]
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET /math/textbook — 数学教材列表。"""
+    try:
+        data = await list_math_textbooks(
+            db,
+            subject_type=subject_type,
+            grade=grade,
+            semester=semester,
+            keyword=keyword,
+            offset=offset,
+            limit=limit,
+        )
+        return {"success": True, "data": data}
+    except TextbookPayloadError as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.post("/textbook")
+async def math_textbook_create(
+    body: MathTextbookCreateRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST /math/textbook — 新增数学教材。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await create_math_textbook(db, payload=body.model_dump(), actor=actor)
+        return {"success": True, "data": data}
+    except (TextbookPayloadError, ConfirmationMismatchError) as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.put("/textbook/{textbook_id}")
+async def math_textbook_update(
+    textbook_id: str,
+    body: MathTextbookUpdateRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """PUT /math/textbook/{textbook_id} — 更新教材（改标题/学科需二次确认）。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await update_math_textbook(
+            db,
+            textbook_id=textbook_id,
+            update=body.model_dump(exclude_unset=False),
+            confirm_title=body.confirm_title,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (TextbookPayloadError, TextbookNotFoundError, ConfirmationMismatchError) as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.get("/textbook/overview")
+async def math_textbook_overview(
+    textbook_id: str,
+    request: Request = None,  # type: ignore[assignment]
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET /math/textbook/overview — 教材 + 节点统计概览（G-API-4）。"""
+    try:
+        data = await get_textbook_overview(db, textbook_id=textbook_id)
+        return {"success": True, "data": data}
+    except TextbookNotFoundError as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.post("/textbook/import-nodes")
+async def math_textbook_import_nodes(
+    body: MathTextbookImportNodesRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST /math/textbook/import-nodes — 批量导入 curriculum_node（G-API-5，code 幂等）。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await import_curriculum_nodes(
+            db,
+            textbook_id=body.textbook_id,
+            nodes=body.nodes,
+            on_duplicate=body.on_duplicate,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (TextbookPayloadError, TextbookNotFoundError, ConfirmationMismatchError) as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.delete("/textbook/{textbook_id}")
+async def math_textbook_delete_cleanup(
+    textbook_id: str,
+    body: MathTextbookDeleteCleanupRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """DELETE /math/textbook/{id} — 清理 description + ai_summary（不删节点结构，G-API-6）。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await delete_math_textbook_cleanup(
+            db,
+            textbook_id=textbook_id,
+            confirm_textbook_title=body.confirm_textbook_title,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (TextbookNotFoundError, ConfirmationMismatchError) as e:
+        raise _textbook_error_to_http(e) from e
+
+
+# ===========================================================================
+# G1.2 第 3 接口：人工修正 AI 知识点（DM-3 manual_edited* 字段 · 契约 §3.10 + §4.12.8(b)）
+# batch-generate / batch-status 两路由 + 异常映射函数已放在文件前段（F1 两接口之前）注册，
+# 保证静态路径 /knowledge-summary/batch-{generate,status} 不会被先定义的
+# GET /knowledge-summary/{curriculum_node_id} 路径参数路由误抢占匹配。
+# ===========================================================================
+
+
+class ManualEditSummaryRequest(BaseModel):
+    """POST /math/curriculum-node/{id}/manual-edit-summary 请求体（DM-3 manual_edited*）。"""
+
+    knowledge_points: list[dict] | None = Field(
+        None,
+        description="替换 ai_summary.knowledge_points（显式传 [] 清空，None 不改）",
+    )
+    extended_points: list[dict] | None = Field(
+        None,
+        description="替换 ai_summary.extended_points（显式传 [] 清空，None 不改）",
+    )
+    overwrite_ai: bool = Field(
+        False,
+        description="MVP 仅打标；true 表示后续 force 重生成允许覆盖人工编辑内容（SOP 暂未实现重生成行为）",
+    )
+    editor_id: str = Field(
+        "",
+        description="人工修正者标识；空串或缺省时使用请求 openid（fallback anonymous）",
+    )
+
+
+@router.post("/curriculum-node/{curriculum_node_id}/manual-edit-summary")
+async def math_curriculum_node_manual_edit_summary(
+    curriculum_node_id: str,
+    body: ManualEditSummaryRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST /math/curriculum-node/{id}/manual-edit-summary — 人工修正 AI 知识点（G1.2 接口 3，DM-3）。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await manualEditKnowledgeSummary(
+            db,
+            curriculum_node_id=curriculum_node_id,
+            editor_id=body.editor_id,
+            knowledge_points=body.knowledge_points,
+            extended_points=body.extended_points,
+            overwrite_ai=body.overwrite_ai,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (
+        LookupError,
+        KnowledgeSummaryError,
+        ConfirmationMismatchError,
+        TextbookPayloadError,
+        Exception,
+    ) as e:
+        raise _batch_summary_error_to_http(e) from e

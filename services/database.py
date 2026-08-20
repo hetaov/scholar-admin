@@ -21,7 +21,7 @@ from config import ENV_ID, REGION, SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_API
 logger = logging.getLogger("scholar-admin.db")
 
 # ---------------------------------------------------------------------------
-# 集合名常量（数学学科 F1~F4，契约 data-model-contract §4.12）
+# 集合名常量（数学学科 F1~F4 + G0 管理端多学科扩展，契约 data-model-contract）
 # ---------------------------------------------------------------------------
 CURRICULUM_NODE_COLLECTION = "curriculum_node"     # 教材图谱节点（F1/F2）
 MATH_SCAN_UPLOAD_COLLECTION = "math_scan_upload"   # 错题扫描上传（F4）
@@ -30,6 +30,7 @@ PRACTICE_SHEET_COLLECTION = "practice_sheet"       # A4 练习纸（F3.1）
 SHEET_TEMPLATE_COLLECTION = "sheet_template"       # 练习纸版式模板（F3.1）
 SHEET_RENDER_JOB_COLLECTION = "sheet_render_job"   # 练习纸异步渲染任务（F3.1）
 ERROR_RECORD_COLLECTION = "error_record"           # 错题错因记录（F4 写入，F3.1 消费）
+TEXTBOOK_V2 = "textbook_v2"                        # G0 多学科扩展：英语/数学/语文共用的教材集合（契约 §4.1）
 
 
 class CloudBaseNoSQLClient:
@@ -371,6 +372,23 @@ class CloudBaseNoSQLClient:
                 f"[db.query] step6 _normalize_types returned {type(records).__name__} instead of list, wrapping"
             )
             records = [records] if records else []
+
+        # 2026-08-20 SOP G0.1：GETTER 兼容层（仅 textbook_v2 集合，不触网不写回 DB）
+        # 存量记录无 subject_type → 注入 'english'，见 data-model-contract §4.1。
+        # models_content 不依赖 database（底层只读结构），导入路径无循环。
+        if collection == TEXTBOOK_V2:
+            try:
+                from services.models_content import normalize_textbook_doc
+                before_count = len(records)
+                records = [normalize_textbook_doc(r) for r in records]
+                logger.debug(
+                    f"[db.query] step7 textbook_v2 getter 兼容 subject_type 注入: records={before_count}"
+                )
+            except Exception as exc:  # pragma: no cover - 防御性日志，不应中断查询
+                logger.warning(
+                    f"[db.query] step7 textbook_v2 normalize 失败，保持原记录。错误: {exc!r}",
+                    exc_info=True,
+                )
 
         logger.info(f"[db.query] done → records_count={len(records)}")
         return {

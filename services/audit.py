@@ -1,15 +1,21 @@
-"""家长操作审计（契约 data-model-contract §4.12.7 / §4.12.10 / ADR-0011）
+"""家长操作审计（契约 data-model-contract §4.12.7 / §4.12.10 DM-4 / ADR-0011）
 
 audit_log 集合：
 - **append-only**：只插入，不可修改 / 删除；保留 ≥6 个月，到期归档
 - 字段：log_id、action、object_ref、actor、occurred_at、result、context
 
-action 枚举（以契约为准，任务卡命名冲突处契约优先）：
-- 既有 5 类：generate / share / download / return / modify（F3 沿用 ADR-0011）
-- 数学新增 7 类：
-  - F2：edit_description / draft_description / adopt_description
-  - F1：generate_knowledge_summary
-  - F4：scan_upload / scan_classify / scan_correct
+action 枚举（以契约 DM-4 必审清单 5 分组为准，5+7+5=17 类）：
+① 既有 5 类（ADR-0011，F3 练习纸）：
+  generate / share / download / return / modify
+② F2 描述 3 类：
+  edit_description / draft_description / adopt_description
+③ F1 总结 1 类：
+  generate_knowledge_summary
+④ F4 扫描 3 类：
+  scan_upload / scan_classify / scan_correct
+⑤ G 管理端 5 类（G0.2 新增，SOP §4.12.10(b) 定稿）：
+  create_math_textbook / update_math_textbook / delete_math_textbook
+  import_math_nodes / manual_edit_summary
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ AUDIT_ACTION_DOWNLOAD = "download"
 AUDIT_ACTION_RETURN = "return"
 AUDIT_ACTION_MODIFY = "modify"
 
-# 数学学科新增动作
+# 数学学科新增动作（F2/F1/F4 链路，7 类）
 AUDIT_ACTION_EDIT_DESCRIPTION = "edit_description"        # F2 人工编辑教材描述
 AUDIT_ACTION_DRAFT_DESCRIPTION = "draft_description"      # F2 AI 草稿生成
 AUDIT_ACTION_ADOPT_DESCRIPTION = "adopt_description"      # F2 草稿采纳
@@ -36,23 +42,42 @@ AUDIT_ACTION_SCAN_UPLOAD = "scan_upload"                  # F4 错题扫描上�
 AUDIT_ACTION_SCAN_CLASSIFY = "scan_classify"              # F4 错题自动归类
 AUDIT_ACTION_SCAN_CORRECT = "scan_correct"                # F4 人工修正归类
 
-# 必审动作全集（13 类）
+# —— G0.2 新增：G 管理端 5 类（契约 DM-4 必审清单第 ⑤ 组） —— #
+AUDIT_ACTION_CREATE_MATH_TEXTBOOK = "create_math_textbook"    # G1.3 数学生效：教材创建
+AUDIT_ACTION_UPDATE_MATH_TEXTBOOK = "update_math_textbook"    # G1.3 数学生效：教材元数据修改
+AUDIT_ACTION_DELETE_MATH_TEXTBOOK = "delete_math_textbook"    # G1.3 数学生效：教材删除
+AUDIT_ACTION_IMPORT_MATH_NODES = "import_math_nodes"          # G2 知识点/目录导入生效
+AUDIT_ACTION_MANUAL_EDIT_SUMMARY = "manual_edit_summary"      # G5.3/G5.6 人工修正总结结果
+
+# 必审动作全集（DM-4 定稿：5+7+5 = 17 类）
+# — 命名约定：双常量等价，REQUIRED_AUDIT_ACTIONS 为契约对外命名；MUST_AUDIT_ACTIONS 为历史命名（向后兼容）
 MUST_AUDIT_ACTIONS = frozenset(
     {
+        # ① ADR-0011：F3 练习纸（5 类）
         AUDIT_ACTION_GENERATE,
         AUDIT_ACTION_SHARE,
         AUDIT_ACTION_DOWNLOAD,
         AUDIT_ACTION_RETURN,
         AUDIT_ACTION_MODIFY,
+        # ② F2 描述（3 类）
         AUDIT_ACTION_EDIT_DESCRIPTION,
         AUDIT_ACTION_DRAFT_DESCRIPTION,
         AUDIT_ACTION_ADOPT_DESCRIPTION,
+        # ③ F1 总结（1 类）
         AUDIT_ACTION_GENERATE_KNOWLEDGE_SUMMARY,
+        # ④ F4 扫描（3 类）
         AUDIT_ACTION_SCAN_UPLOAD,
         AUDIT_ACTION_SCAN_CLASSIFY,
         AUDIT_ACTION_SCAN_CORRECT,
+        # ⑤ G 管理端（G0.2 新增，5 类）
+        AUDIT_ACTION_CREATE_MATH_TEXTBOOK,
+        AUDIT_ACTION_UPDATE_MATH_TEXTBOOK,
+        AUDIT_ACTION_DELETE_MATH_TEXTBOOK,
+        AUDIT_ACTION_IMPORT_MATH_NODES,
+        AUDIT_ACTION_MANUAL_EDIT_SUMMARY,
     }
 )
+REQUIRED_AUDIT_ACTIONS = MUST_AUDIT_ACTIONS  # 契约命名别名（DM-4 REQUIRED_AUDIT_ACTIONS）
 
 # 结果枚举（契约 §4.12.7：success / failed / denied + 原因码）
 AUDIT_RESULT_SUCCESS = "success"

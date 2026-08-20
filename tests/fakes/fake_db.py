@@ -136,6 +136,15 @@ class FakeDB:
         if select:
             keys = set(select)
             page = [{k: r[k] for k in keys if k in r} for r in page]
+        # 2026-08-20 SOP G0.1：与真实 database.py 同步的 GETTER 兼容层
+        # 对 textbook_v2 集合的返回记录注入 subject_type=english（存量兼容），
+        # 保证 integration 测试 GET /textbook 行为与生产完全一致。
+        if collection == "textbook_v2":
+            try:
+                from services.models_content import normalize_textbook_doc
+                page = [normalize_textbook_doc(r) for r in page]
+            except Exception:  # pragma: no cover - 防御性
+                pass
         return {"records": page, "total": total, "offset": offset, "limit": limit}
 
     # ---------------- 写操作 ----------------

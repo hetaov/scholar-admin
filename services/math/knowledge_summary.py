@@ -467,3 +467,349 @@ async def getKnowledgeSummary(db, *, curriculum_node_id: str) -> dict:
         "extended_points": ai_summary.get("extended_points") or [],
         "idempotency_key": ai_summary.get("idempotency_key") or "",
     }
+
+
+# ---------------------------------------------------------------------------
+# G1.2 批量总结 + 人工修正（SOP §5 G1.2 · service-contract §7.7）
+# ---------------------------------------------------------------------------
+#
+# 三接口：
+#   1) batchGenerateKnowledgeSummary   — 按 textbook_id (+scope+node_ids) 调度批量生成
+#   2) getBatchSummaryStatus           — 查 job 进度与 items
+#   3) manualEditKnowledgeSummary      — 人工修正 knowledge_points/extended_points + 打标 manual_edited*
+#
+# 实现取舍（MVP）：
+#   - 批任务状态存内存 dict（BATCH_JOBS），保留 TTL = BATCH_JOB_TTL_SEC（1h）
+#   - 调度：生产 asyncio.create_task（后台），测试模式同步 await（_BATCH_RUN_SYNC 开关）
+#   - 幂等键：完全复用 F1 summary_idempotency_key（无任何扩展，SOP 强制）
+#   - 审计：批完成 1 条 generate_knowledge_summary；人工修正 1 条 manual_edit_summary
+#   - overwrite_ai：只打标，MVP 不实现「下次重生成覆盖人工项」精细逻辑（SOP："仅打标标记"）
+
+import secrets as _secrets  # noqa: E402  — 模块尾导入，避免影响 F1 路径
+
+# 调度开关（测试用 monkeypatch 设 True）
+_BATCH_RUN_SYNC: bool = False
+
+# 批任务内存状态
+BATCH_JOBS: dict[str, dict] = {}
+BATCH_JOB_TTL_SEC: int = 3600  # 1h
+
+
+def _batch_job_stats(job: dict) -> dict:
+    """从 job 聚合 stats（routes 返回字段统一入口）。"""
+    return {
+        "success": job.get("success", 0),
+        "blocked_no_desc": job.get("blocked", 0),
+        "skipped_existing": job.get("skipped", 0),
+        "failed": job.get("failed", 0),
+        "total": job.get("total", 0),
+    }
+
+
+def _cleanup_expired_jobs(now_sec: float | None = None) -> None:
+    """懒清理 BATCH_JOB_TTL_SEC 外的过期任务（每次访问 batch-status 或 dispatch 前触发）。"""
+    now = now_sec if now_sec is not None else time.time()
+    expired = [jid for jid, j in BATCH_JOBS.items() if (now - (j.get("created_at") or 0)) > BATCH_JOB_TTL_SEC]
+    for jid in expired:
+        BATCH_JOBS.pop(jid, None)
+
+
+def _filter_candidates_by_scope(nodes: list[dict], scope: str) -> tuple[list[dict], int]:
+    """按 scope 过滤本次要生成的节点，返回 (to_run, skipped_count)。
+
+    SOP scope 语义：
+      - not_generated_only：跳过 ai_summary.status = success/generating 的节点
+      - all：只要是 SUMMARY_NODE_TYPES 的节点都跑（幂等键命中自然返回已有结果，但仍会调用 F1 函数）
+      - force：全部都跑（调用时 force_regenerate=True 重置）
+    """
+    # 仅 SUMMARY_NODE_TYPES（lesson/knowledge_point 等）需要总结；年级/学期/unit 跳过（计入 skipped）
+    summary_nodes = [n for n in nodes if n.get("node_type") in SUMMARY_NODE_TYPES]
+    non_summary_skipped = len(nodes) - len(summary_nodes)
+    if scope == "force" or scope == "all":
+        return summary_nodes, non_summary_skipped
+    # scope == "not_generated_only"（默认）
+    to_run = []
+    skipped_count = non_summary_skipped
+    for n in summary_nodes:
+        s = (n.get("ai_summary") or {}).get("status") or ""
+        if s in (SUMMARY_STATUS_SUCCESS, SUMMARY_STATUS_GENERATING):
+            skipped_count += 1
+        else:
+            to_run.append(n)
+    return to_run, skipped_count
+
+
+async def batchGenerateKnowledgeSummary(
+    db,
+    *,
+    textbook_id: str,
+    scope: str = "not_generated_only",
+    node_ids: list[str] | None = None,
+    actor: str = "",
+) -> dict:
+    """批量生成 AI 知识总结（路由层：POST /math/knowledge-summary/batch-generate）。
+
+    返回：
+      {job_id, status: running|done, scope, total_nodes, stats: {success,blocked,skipped,failed,total}, items?: [...]}
+      同步模式下带 items + stats 最终值；异步模式仅 initial。
+    """
+    from services.math import (  # noqa: WPS433  — 延迟 import 防 math ↔ summary 循环（math/__init__.py 反向导入本模块）
+        VALID_BATCH_SCOPE_SET,
+        ConfirmationMismatchError,
+        ERR_INVALID_BATCH_SCOPE,
+        SUBJECT_TYPE_MATH,
+        SUMMARY_STATUS_GENERATING,
+        TextbookNotFoundError,
+    )
+    from services.audit import AUDIT_ACTION_MANUAL_EDIT_SUMMARY  # noqa: WPS433  — F1 模块没导入 G0.2 新常量
+    from services.database import TEXTBOOK_V2  # noqa: WPS433
+    # 复用 G1.1 教材存在性校验（不存在或非 math → TextbookNotFoundError 404，语义完全一致）
+    from services.math.textbook_management import (  # noqa: WPS433 — 延迟 import
+        _get_math_textbook_or_404,
+    )
+
+    _cleanup_expired_jobs()
+    if not isinstance(scope, str) or scope not in VALID_BATCH_SCOPE_SET:
+        raise ConfirmationMismatchError(
+            ERR_INVALID_BATCH_SCOPE,
+            f"scope 非法：{scope!r}；仅允许 {sorted(VALID_BATCH_SCOPE_SET)!r}",
+        )
+
+    # ---- 1. 校验 textbook 存在且为 math（复用 G1.1，避免重复 subject_type/missing 判断） ---- #
+    tb = await _get_math_textbook_or_404(db, textbook_id)
+    grade = tb.get("grade") or ""
+    semester = tb.get("semester") or ""
+
+    # ---- 2. 查询 curriculum_node：按 textbook_id + 可选 node_ids ---- #
+    where: dict = {"textbook_id": textbook_id}
+    if node_ids:
+        where["node_id"] = {"$in": list(node_ids)}
+    nodes_resp = await db.query(CURRICULUM_NODE_COLLECTION, where=where, limit=1000)
+    # query() 返回 {records, total, offset, limit}（FakeDB / 真实 database.py 均保持该契约）
+    nodes = nodes_resp.get("records", []) if isinstance(nodes_resp, dict) else list(nodes_resp)
+
+    # ---- 3. scope 过滤候选 ---- #
+    candidates, skipped = _filter_candidates_by_scope(nodes, scope)
+    total = len(nodes)  # SOP total = 本次范围节点数（与 total_nodes 字段一致）
+
+    # ---- 4. 创建 job ---- #
+    now_s = time.time()
+    job_id = f"batch_{int(now_s * 1000)}_{_secrets.token_hex(4)}"
+    job: dict = {
+        "job_id": job_id,
+        "textbook_id": textbook_id,
+        "grade": grade,
+        "semester": semester,
+        "scope": scope,
+        "actor": actor,
+        "status": "running",
+        "total": total,
+        "done": 0,
+        "success": 0,
+        "blocked": 0,
+        "skipped": skipped,
+        "failed": 0,
+        "items": [],
+        "created_at": now_s,
+        "finished_at": 0,
+    }
+    BATCH_JOBS[job_id] = job
+
+    # 对 force scope：先把 candidates 的 ai_summary.status → generating（按 SOP 语义）
+    if scope == "force":
+        for n in candidates:
+            nid = n.get("node_id")
+            ai = dict(n.get("ai_summary") or {})
+            ai["status"] = SUMMARY_STATUS_GENERATING
+            # 不落库：_per_node summarizer 会在 force_regenerate=True 时处理并最终落库
+
+    # ---- 5. 定义批执行体 ---- #
+    async def _run() -> None:
+        success_n = 0
+        blocked_n = 0
+        failed_n = 0
+        items_out: list[dict] = []
+        for node in candidates:
+            nid = node.get("node_id") or ""
+            item: dict = {"node_id": nid, "status": "pending"}
+            try:
+                await generateKnowledgeSummary(
+                    db,
+                    curriculum_node_id=nid,
+                    force_regenerate=(scope == "force"),
+                    include_extended_points=True,
+                )
+                item["status"] = "success"
+                success_n += 1
+            except NoDescriptionError as exc:
+                item["status"] = "blocked_no_desc"
+                item["error"] = str(exc)
+                blocked_n += 1
+            except Exception as exc:  # noqa: BLE001
+                item["status"] = "failed"
+                item["error"] = f"{type(exc).__name__}: {exc}"
+                failed_n += 1
+            items_out.append(item)
+            job["done"] += 1
+            job["success"] = success_n
+            job["blocked"] = blocked_n
+            job["failed"] = failed_n
+            job["items"] = items_out
+        job["status"] = "failed" if (failed_n > 0 and success_n == 0 and blocked_n == 0) else "done"
+        job["finished_at"] = time.time()
+        # 批完成 → 审计 1 条 generate_knowledge_summary（F1 同 action）
+        stats_ctx = _batch_job_stats(job)
+        try:
+            await write_audit(
+                db,
+                action=AUDIT_ACTION_GENERATE_KNOWLEDGE_SUMMARY,
+                object_ref=textbook_id,
+                actor=actor,
+                context={
+                    "batch_job_id": job_id,
+                    "scope": scope,
+                    "textbook_id": textbook_id,
+                    "grade": grade,
+                    "semester": semester,
+                    **stats_ctx,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("batch_summary audit write failed: %s", exc)
+
+    # ---- 6. 调度：sync(测试) 同步 await；生产 create_task ---- #
+    if _BATCH_RUN_SYNC:
+        await _run()
+    else:
+        asyncio.create_task(_run(), name=f"ks-batch-{job_id}")  # noqa: RUF006
+
+    payload: dict = {
+        "job_id": job_id,
+        "status": job["status"],
+        "scope": scope,
+        "total_nodes": total,
+        "stats": _batch_job_stats(job),
+    }
+    if _BATCH_RUN_SYNC:
+        payload["items"] = job["items"]
+    return payload
+
+
+async def getBatchSummaryStatus(
+    *,
+    job_id: str,
+) -> dict:
+    """查询批任务进度（路由层：GET /math/knowledge-summary/batch-status）。"""
+    from services.math import BatchJobNotFoundError  # noqa: WPS433 — 延迟 import 防循环
+
+    _cleanup_expired_jobs()
+    job = BATCH_JOBS.get(job_id)
+    if job is None:
+        raise BatchJobNotFoundError(job_id)
+    total = job["total"] or 0
+    done = job.get("done", 0)
+    progress_pct = 100 if total == 0 else int(done * 100 / total)
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "total": total,
+        "done": done,
+        "success": job.get("success", 0),
+        "blocked_no_desc": job.get("blocked", 0),
+        "skipped_existing": job.get("skipped", 0),
+        "failed": job.get("failed", 0),
+        "progress_pct": progress_pct,
+        "items": job.get("items", []),
+        "created_at": int(job.get("created_at", 0) * 1000),
+        "finished_at": int((job.get("finished_at") or 0) * 1000),
+    }
+
+
+async def manualEditKnowledgeSummary(
+    db,
+    *,
+    curriculum_node_id: str,
+    editor_id: str = "",
+    knowledge_points: list | None = None,
+    extended_points: list | None = None,
+    overwrite_ai: bool = False,
+    actor: str = "",
+) -> dict:
+    """人工修正 AI 知识总结（契约 DM-3 manual_edited* 3 字段 · 路由层：POST /math/curriculum-node/{id}/manual-edit-summary）。
+
+    SOP 规则：
+      - knowledge_points is not None → 覆盖 ai_summary.knowledge_points
+      - extended_points  is not None → 覆盖 ai_summary.extended_points
+      - 其余：manual_edited=true / manual_edited_at / manual_edited_by（缺省 editor_id=actor）
+      - overwrite_ai：打标（MVP 不影响任何行为；下次 force 重生成时由 F/G 实现语义）
+      - 没有任何变更 → 400 MANUAL_EDIT_NOOP
+    """
+    from services.math import (  # noqa: WPS433 — 延迟 import
+        ConfirmationMismatchError,
+        ERR_MANUAL_EDIT_NOOP,
+    )
+    from services.audit import AUDIT_ACTION_MANUAL_EDIT_SUMMARY  # noqa: WPS433
+
+    # NodeNotFoundError 抛出自定义 -> 路由层映射 NODE_NOT_FOUND + 404（KnowledgeSummaryError 子类）
+    node = await _get_node(db, curriculum_node_id)
+    ai_summary: dict = dict(node.get("ai_summary") or {})
+
+    effective_editor = editor_id or actor or "anonymous"
+    changed_points_count = 0
+
+    if knowledge_points is not None:
+        kp_list = list(knowledge_points)
+        ai_summary["knowledge_points"] = kp_list
+        changed_points_count += len(kp_list)
+    if extended_points is not None:
+        ep_list = list(extended_points)
+        ai_summary["extended_points"] = ep_list
+        changed_points_count += len(ep_list)
+
+    if knowledge_points is None and extended_points is None:
+        # 没有任何入参要改 → 400（DM-3 语义：人工修正必带至少 1 个字段）
+        raise ConfirmationMismatchError(
+            ERR_MANUAL_EDIT_NOOP,
+            "人工修正至少提供 knowledge_points 或 extended_points 其中一个字段（允许空列表显式清空）。",
+        )
+
+    # DM-3：manual_edited 3 字段统一写入 ai_summary 下（与 F1 单节点 ai_summary 同位置）
+    now_ms = int(time.time() * 1000)
+    ai_summary["manual_edited"] = True
+    ai_summary["manual_edited_at"] = now_ms
+    ai_summary["manual_edited_by"] = effective_editor
+    # overwrite_ai：MVP 仅打标
+    ai_summary["overwrite_ai"] = bool(overwrite_ai)
+
+    await db.update(
+        CURRICULUM_NODE_COLLECTION,
+        where={"node_id": curriculum_node_id},
+        data={"$set": {"ai_summary": ai_summary, "updated_at": now_ms}},
+    )
+
+    # 审计：manual_edit_summary
+    try:
+        await write_audit(
+            db,
+            action=AUDIT_ACTION_MANUAL_EDIT_SUMMARY,
+            object_ref=curriculum_node_id,
+            actor=actor or effective_editor,
+            context={
+                "textbook_id": node.get("textbook_id") or "",
+                "grade": node.get("grade") or "",
+                "semester": node.get("semester") or "",
+                "changed_points_count": changed_points_count,
+                "overwrite_ai": bool(overwrite_ai),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("manual_edit_summary audit write failed: %s", exc)
+
+    return {
+        "node_id": curriculum_node_id,
+        "manual_edited": True,
+        "manual_edited_at": now_ms,
+        "manual_edited_by": effective_editor,
+        "changed_points_count": changed_points_count,
+        "overwrite_ai_flag": bool(overwrite_ai),
+    }
