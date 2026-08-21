@@ -207,6 +207,9 @@ async def _graph_load_node(db, state: KnowledgeSummaryState) -> dict:
     if not node.get("description"):
         raise _ks.NoDescriptionError(f"节点无描述，不总结: {node_id}")
 
+    if not _ks.LLM_SUMMARY_MODEL:
+        raise _ks.LLMNotConfiguredError("LLM_SUMMARY_MODEL 未配置，无法生成知识总结")
+
     # 幂等检查
     key = _ks.summary_idempotency_key(
         textbook_id=node.get("textbook_id") or "",
@@ -393,6 +396,11 @@ async def _persist_ai_summary_with_eval(
             where={"_id": node_id},
             data={"$set": {"ai_summary": ai_summary, "updated_at": now}},
         )
+    logger.info(
+        f"[_persist_ai_summary_with_eval] node_id={node_id} status={status} "
+        f"kp={len(knowledge_points)} ep={len(extended_points)} "
+        f"score={quality_score} matched={matched}"
+    )
     return ai_summary
 
 

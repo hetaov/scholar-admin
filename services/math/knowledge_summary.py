@@ -333,6 +333,10 @@ async def _persist_ai_summary(
             where={"_id": node_id},
             data={"$set": {"ai_summary": ai_summary, "updated_at": now}},
         )
+    logger.info(
+        f"[_persist_ai_summary] node_id={node_id} status={status} "
+        f"kp={len(knowledge_points)} ep={len(extended_points)} matched={matched}"
+    )
     return ai_summary
 
 
@@ -652,9 +656,16 @@ async def batchGenerateKnowledgeSummary(
         blocked_n = 0
         failed_n = 0
         items_out: list[dict] = []
+        logger.info(
+            f"[batch_summary] job={job_id} 开始执行, candidates={len(candidates)}, "
+            f"scope={scope}, textbook_id={textbook_id}"
+        )
+        if not candidates:
+            logger.warning(f"[batch_summary] job={job_id} 无候选节点, candidates=0")
         for node in candidates:
             nid = node.get("node_id") or ""
             item: dict = {"node_id": nid, "status": "pending"}
+            logger.info(f"[batch_summary] job={job_id} 开始处理 node_id={nid}")
             try:
                 await generateKnowledgeSummary(
                     db,
@@ -664,14 +675,17 @@ async def batchGenerateKnowledgeSummary(
                 )
                 item["status"] = "success"
                 success_n += 1
+                logger.info(f"[batch_summary] job={job_id} node_id={nid} 成功")
             except NoDescriptionError as exc:
                 item["status"] = "blocked_no_desc"
                 item["error"] = str(exc)
                 blocked_n += 1
+                logger.warning(f"[batch_summary] job={job_id} node_id={nid} 无描述: {exc}")
             except Exception as exc:  # noqa: BLE001
                 item["status"] = "failed"
                 item["error"] = f"{type(exc).__name__}: {exc}"
                 failed_n += 1
+                logger.error(f"[batch_summary] job={job_id} node_id={nid} 失败: {type(exc).__name__}: {exc}")
             items_out.append(item)
             job["done"] += 1
             job["success"] = success_n
@@ -680,6 +694,10 @@ async def batchGenerateKnowledgeSummary(
             job["items"] = items_out
         job["status"] = "failed" if (failed_n > 0 and success_n == 0 and blocked_n == 0) else "done"
         job["finished_at"] = time.time()
+        logger.info(
+            f"[batch_summary] job={job_id} 完成, status={job['status']}, "
+            f"success={success_n} blocked={blocked_n} failed={failed_n}"
+        )
         # 批完成 → 审计 1 条 generate_knowledge_summary（F1 同 action）
         stats_ctx = _batch_job_stats(job)
         try:

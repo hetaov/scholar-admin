@@ -509,3 +509,124 @@ async def delete_math_textbook_cleanup(
         "cleared_count": cleared,
         "total_nodes": len(nodes),
     }
+
+
+# ===========================================================================
+# 7. Curriculum Node 单节点 CRUD（管理页面用）
+# ===========================================================================
+
+
+async def list_curriculum_nodes(db, textbook_id: str) -> list[dict]:
+    """列出教材下所有 curriculum_node（按 unit_no / lesson_no 排序）。"""
+    await _get_math_textbook_or_404(db, textbook_id)
+    q = await db.query(
+        CURRICULUM_NODE_COLLECTION,
+        where={"textbook_id": textbook_id},
+        limit=2000,
+    )
+    nodes = q.get("records", []) if isinstance(q, dict) else list(q)
+    nodes.sort(key=lambda n: (
+        n.get("unit_no") or 0,
+        n.get("lesson_no") or 0,
+        0 if n.get("node_type") == "unit" else 1 if n.get("node_type") == "lesson" else 2,
+    ))
+    return nodes
+
+
+async def create_curriculum_node(db, *, textbook_id: str, node: dict, actor: str = "") -> dict:
+    """创建单个 curriculum_node（code 幂等，已存在则报错）。"""
+    await _get_math_textbook_or_404(db, textbook_id)
+    code = (node or {}).get(CURRICULUM_NODE_IDEMPOTENCY_FIELD)
+    if not code:
+        raise TextbookPayloadError(
+            ERR_IMPORT_NODES_DUPLICATE_CODE,
+            f"缺少幂等字段 {CURRICULUM_NODE_IDEMPOTENCY_FIELD!r}",
+        )
+    # 检查是否已存在
+    existing = await db.query(
+        CURRICULUM_NODE_COLLECTION,
+        where={CURRICULUM_NODE_IDEMPOTENCY_FIELD: str(code)},
+        limit=1,
+    )
+    if existing.get("records"):
+        raise TextbookPayloadError(
+            ERR_IMPORT_NODES_DUPLICATE_CODE,
+            f"节点 code={code!r} 已存在",
+        )
+    now = int(time.time() * 1000)
+    doc = {
+        "textbook_id": textbook_id,
+        "node_id": f"{textbook_id}_{code}",
+        "created_at": now,
+        "updated_at": now,
+        **node,
+    }
+    await db.insert(CURRICULUM_NODE_COLLECTION, doc)
+    await write_audit(
+        db,
+        action=AUDIT_ACTION_DELETE_MATH_TEXTBOOK,
+        object_ref=str(code),
+        actor=actor,
+        context={"action": "create_node", "textbook_id": textbook_id},
+    )
+    return doc
+
+
+async def update_curriculum_node(db, *, node_id: str, updates: dict, actor: str = "") -> dict:
+    """更新单个 curriculum_node（按 node_id 匹配，回退 _id）。"""
+    # 不允许改 code / textbook_id
+    safe_fields = {k: v for k, v in updates.items() if k not in ("code", "textbook_id", "_id", "node_id")}
+    if not safe_fields:
+        raise TextbookPayloadError(
+            ERR_IMPORT_ON_DUPLICATE_INVALID,
+            "无可更新字段（code/textbook_id/node_id 不可改）",
+        )
+    now = int(time.time() * 1000)
+    safe_fields["updated_at"] = now
+    result = await db.update(
+        CURRICULUM_NODE_COLLECTION,
+        where={"node_id": node_id},
+        data={"$set": safe_fields},
+        multi=False,
+    )
+    matched = result.get("matched_count", 0) if isinstance(result, dict) else 0
+    if matched == 0:
+        result = await db.update(
+            CURRICULUM_NODE_COLLECTION,
+            where={"_id": node_id},
+            data={"$set": safe_fields},
+            multi=False,
+        )
+    await write_audit(
+        db,
+        action=AUDIT_ACTION_DELETE_MATH_TEXTBOOK,
+        object_ref=node_id,
+        actor=actor,
+        context={"action": "update_node", "fields": list(safe_fields.keys())},
+    )
+    return {"node_id": node_id, "updated_fields": list(safe_fields.keys())}
+
+
+async def delete_curriculum_node(db, *, node_id: str, actor: str = "") -> dict:
+    """删除单个 curriculum_node（按 node_id 匹配，回退 _id）。"""
+    result = await db.delete(
+        CURRICULUM_NODE_COLLECTION,
+        where={"node_id": node_id},
+        multi=False,
+    )
+    deleted = result.get("deleted_count", 0) if isinstance(result, dict) else 0
+    if deleted == 0:
+        result = await db.delete(
+            CURRICULUM_NODE_COLLECTION,
+            where={"_id": node_id},
+            multi=False,
+        )
+        deleted = result.get("deleted_count", 0) if isinstance(result, dict) else 0
+    await write_audit(
+        db,
+        action=AUDIT_ACTION_DELETE_MATH_TEXTBOOK,
+        object_ref=node_id,
+        actor=actor,
+        context={"action": "delete_node", "deleted": deleted},
+    )
+    return {"node_id": node_id, "deleted": deleted}

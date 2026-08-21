@@ -91,6 +91,10 @@ from services.math.textbook_management import (
     import_curriculum_nodes,
     list_math_textbooks,
     update_math_textbook,
+    list_curriculum_nodes,
+    create_curriculum_node,
+    update_curriculum_node,
+    delete_curriculum_node,
 )
 
 logger = logging.getLogger("scholar-admin.routes.math")
@@ -987,3 +991,65 @@ async def math_get_textbook_knowledge_points(
             "total": len(kps),
         },
     }
+
+
+# ===========================================================================
+# Curriculum Node CRUD（管理页面用）
+# ===========================================================================
+
+
+@router.get("/textbook/{textbook_id}/nodes")
+async def math_list_curriculum_nodes(
+    textbook_id: str,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET /math/textbook/{textbook_id}/nodes — 列出教材下所有课程节点。"""
+    try:
+        nodes = await list_curriculum_nodes(db, textbook_id)
+        return {"success": True, "data": nodes, "total": len(nodes)}
+    except TextbookNotFoundError as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.post("/textbook/{textbook_id}/nodes")
+async def math_create_curriculum_node(
+    textbook_id: str,
+    body: dict,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST /math/textbook/{textbook_id}/nodes — 创建单个课程节点。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        doc = await create_curriculum_node(db, textbook_id=textbook_id, node=body, actor=actor)
+        return {"success": True, "data": doc}
+    except (TextbookPayloadError, TextbookNotFoundError) as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.put("/curriculum-node/{node_id}")
+async def math_update_curriculum_node(
+    node_id: str,
+    body: dict,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """PUT /math/curriculum-node/{node_id} — 更新单个课程节点。"""
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        result = await update_curriculum_node(db, node_id=node_id, updates=body, actor=actor)
+        return {"success": True, "data": result}
+    except TextbookPayloadError as e:
+        raise _textbook_error_to_http(e) from e
+
+
+@router.delete("/curriculum-node/{node_id}")
+async def math_delete_curriculum_node(
+    node_id: str,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """DELETE /math/curriculum-node/{node_id} — 删除单个课程节点。"""
+    actor = get_request_openid(request) or "anonymous"
+    result = await delete_curriculum_node(db, node_id=node_id, actor=actor)
+    return {"success": True, "data": result}
