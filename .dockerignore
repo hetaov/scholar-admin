@@ -6,3 +6,9 @@ venv/
 *.egg-info/
 dist/
 .git/
+# 生产镜像不含测试代码（开发依赖见 requirements-dev.txt）
+tests/
+# 本地 pytest 缓存
+.pytest_cache/
+.coverage
+htmlcov/

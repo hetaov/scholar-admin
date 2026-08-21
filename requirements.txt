@@ -1,3 +1,5 @@
+# 生产依赖 — Dockerfile 仅安装此文件。
+# 开发/测试/评估依赖（pytest/ragas/deepeval/langchain）见 requirements-dev.txt。
 fastapi==0.115.0
 uvicorn==0.30.6
 httpx==0.27.2
@@ -15,22 +17,6 @@ tencentcloud-sdk-python-ocr>=3.1.101
 # 腾讯云语音 SDK（SOE-N 新版，纯源码分发在 vendor/tencentcloud-speech-sdk-python）
 # 唯一第三方依赖：websocket-client（readme 建议 0.48，实测后锁版本）
 websocket-client>=0.48
-
-# 测试
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-
-# L3 批量评估（S4.1）：RAGAS 四指标（faithfulness/answer_relevancy/context_precision/context_recall）
-# 重依赖（langchain 生态）；服务层延迟导入，未安装时不影响其余模块运行。
-# 安装冒烟/失败登记见 会话训练评估重构执行计划.md §5 S4.1。
-ragas>=0.4.0,<0.5
-# L3 回归断言（S4.1-⑨，独立目录 tests/l3_regression，不进入默认 pytest 全量收集）
-deepeval>=4.1.0,<5.0
-# RAGAS LLM 走火山 OpenAI 兼容接口（langchain_openai.ChatOpenAI，base_url=VOLCANO_BASE_URL）
-langchain-openai>=0.3.0
-# 约束：ragas 0.4.x 依赖 langchain_community.chat_models.vertexai（0.4.x 已移除该模块），
-# 重装环境须保持 langchain-community<0.4（2026-08-18 安装踩坑记录，见执行计划 §3 S4.1 阻塞登记）
-langchain-community<0.4
 
 # F3.2 A4 练习纸渲染（ADR-0010 决策 4：HTML/CSS + Headless Chrome → PDF+PNG）
 # 需配套安装 Chromium（Dockerfile 已含 playwright install chromium）；未安装时渲染任务降级，不影响主链路
