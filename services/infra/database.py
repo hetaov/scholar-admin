@@ -87,14 +87,14 @@ class CloudBaseNoSQLClient:
         """腾讯云 API v3 签名（TC3-HMAC-SHA256）
 
         Args:
-            action: TCB action 名（如 RunCommands / UploadFile）
+            action: TCB action 名（如 RunCommands）
             body: 实际发送的请求体字节（签名 HashedRequestPayload 基于它）
-            content_type: 实际发送的 Content-Type 头值（含 boundary 则一并参与签名，
-                如 "multipart/form-data; boundary=..."）
+            content_type: 实际发送的 Content-Type 头值
 
-        说明：数据库类 action 用 application/json；云存储 UploadFile 要求
-        multipart/form-data（见 tcb_storage.py），二者都经此签名，保证
-        签名与实际发送字节/头完全一致。
+        说明：数据库类 action 用 application/json。签名基于实际发送字节/头，
+        保证服务端重算一致。（历史：曾用本函数为 tcb UploadFile 构造 multipart
+        签名，但该 action 无官方文档、验签规则不明且已弃用——云存储改走微信
+        云开发 HTTP API，见 tcb_storage.py。本扩展保留备用。）
         """
         service = "tcb"
         algorithm = "TC3-HMAC-SHA256"
@@ -182,8 +182,8 @@ class CloudBaseNoSQLClient:
         """发起腾讯云 API 请求
 
         - 默认（payload 为 dict）：与既有行为一致，JSON 序列化后发送。
-        - 云存储上传（tcb_storage.UploadFile）传 body（multipart 字节）+
-          content_type（含 boundary），跳过 JSON 序列化。
+        - 扩展（备用）：传 body（原始字节）+ content_type 跳过 JSON 序列化，
+          可支持自定义请求体（如历史 tcb UploadFile multipart，已弃用）。
         """
         if body is None:
             body = json.dumps(payload)

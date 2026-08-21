@@ -159,6 +159,18 @@ SHEET_QR_SCAN_PAGE = os.environ.get("SHEET_QR_SCAN_PAGE", "/scan/sheet")
 # 单张渲染超时（秒，任务卡验收：单张 ≤10s）
 RENDER_TIMEOUT_SECONDS = int(os.environ.get("RENDER_TIMEOUT_SECONDS", 10))
 
+# ==================== F4.2 微信云开发 HTTP API 配置（云存储） ====================
+
+# 微信云开发 HTTP API（api.weixin.qq.com/tcb/...）需小程序 access_token，
+# 由 WX_APPID + WX_SECRET 换取（2 小时过期，tcb_storage 模块级缓存自动刷新）。
+# WX_APPID 即小程序 appid（project.config.json 中 appid 字段）；
+# WX_SECRET 在微信公众平台 → 开发管理 → 开发设置 → AppSecret 获取，
+# 生产经云托管环境变量注入，本地开发可写 scholar-admin/.env。
+# 背景：tcb.tencentcloudapi.com 的 UploadFile/GetTempFileURL 为无文档非标准 action
+# （multipart 签名校验失败），云存储统一改走微信 HTTP API（见 tcb_storage.py）。
+WX_APPID = os.environ.get("WX_APPID", "")
+WX_SECRET = os.environ.get("WX_SECRET", "")
+
 # ==================== F4.2 腾讯云 OCR 配置 ====================
 
 # 腾讯云 OCR 密钥：默认复用 CloudRun 注入的 TENCENTCLOUD_SECRETID/SECRETKEY
