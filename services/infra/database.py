@@ -83,8 +83,19 @@ class CloudBaseNoSQLClient:
             return [CloudBaseNoSQLClient._normalize_types(item) for item in obj]
         return obj
 
-    def _sign_tc3(self, action: str, payload: dict) -> dict:
-        """腾讯云 API v3 签名"""
+    def _build_tc3_headers(self, action: str, body: bytes, content_type: str) -> dict:
+        """腾讯云 API v3 签名（TC3-HMAC-SHA256）
+
+        Args:
+            action: TCB action 名（如 RunCommands / UploadFile）
+            body: 实际发送的请求体字节（签名 HashedRequestPayload 基于它）
+            content_type: 实际发送的 Content-Type 头值（含 boundary 则一并参与签名，
+                如 "multipart/form-data; boundary=..."）
+
+        说明：数据库类 action 用 application/json；云存储 UploadFile 要求
+        multipart/form-data（见 tcb_storage.py），二者都经此签名，保证
+        签名与实际发送字节/头完全一致。
+        """
         service = "tcb"
         algorithm = "TC3-HMAC-SHA256"
         timestamp = int(time.time())
@@ -94,13 +105,12 @@ class CloudBaseNoSQLClient:
         http_request_method = "POST"
         canonical_uri = "/"
         canonical_querystring = ""
-        ct = "application/json"  # 与官方 SDK 完全一致（不带 charset，否则 AuthFailure.SignatureFailure）
-        payload_str = json.dumps(payload)
+        ct = content_type  # 与官方 SDK 完全一致（不带 charset，否则 AuthFailure.SignatureFailure）
         # 对齐腾讯云官方 SDK（tencentcloud-sdk-python sign.py）：仅 content-type;host 参与签名，
         # X-TC-Action 等仅作普通请求头，不写入 canonical/signed headers，否则 AuthFailure.SignatureFailure
         canonical_headers = f"content-type:{ct}\nhost:{TCB_API_HOST}\n"
         signed_headers = "content-type;host"
-        hashed_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+        hashed_payload = hashlib.sha256(body).hexdigest()
         canonical_request = "\n".join(
             [
                 http_request_method,
@@ -152,14 +162,37 @@ class CloudBaseNoSQLClient:
 
         return headers
 
-    async def _request(self, action: str, payload: dict) -> dict:
-        """发起腾讯云 API 请求"""
-        headers = self._sign_tc3(action, payload)
-        # 重要：签名基于 json.dumps(payload)（默认带空格，201 字节）；
+    def _sign_tc3(self, action: str, payload: dict) -> dict:
+        """腾讯云 API v3 签名（JSON 请求体，兼容既有调用/测试）
+
+        等价于 _build_tc3_headers(action, json.dumps(payload).encode(), "application/json")。
+        """
+        return self._build_tc3_headers(
+            action, json.dumps(payload).encode("utf-8"), "application/json"
+        )
+
+    async def _request(
+        self,
+        action: str,
+        payload: dict | None = None,
+        *,
+        body: bytes | str | None = None,
+        content_type: str = "application/json",
+    ) -> dict:
+        """发起腾讯云 API 请求
+
+        - 默认（payload 为 dict）：与既有行为一致，JSON 序列化后发送。
+        - 云存储上传（tcb_storage.UploadFile）传 body（multipart 字节）+
+          content_type（含 boundary），跳过 JSON 序列化。
+        """
+        if body is None:
+            body = json.dumps(payload)
+        # 重要：签名基于实际发送的字节（json.dumps 默认带空格，201 字节）；
         # httpx 的 json= 参数会以紧凑格式(无空格,193 字节)重新序列化，导致服务端
         # 按收到的 body 重算 sha256 与签名不符 → AuthFailure.SignatureFailure。
         # 因此必须用 content= 发送与签名完全一致的预序列化字节。
-        body = json.dumps(payload)
+        sign_body = body.encode("utf-8") if isinstance(body, str) else body
+        headers = self._build_tc3_headers(action, sign_body, content_type)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(

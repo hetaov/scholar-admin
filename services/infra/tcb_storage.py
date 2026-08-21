@@ -7,16 +7,64 @@ SESSION_TOKEN/REGION/ENV_ID），无需新增任何依赖：
 - UploadFile：上传文件到云存储，返回 fileID（cloud://env/xxx）
 - GetTempFileURL：fileID → 临时 HTTPS 访问 URL（供小程序即时预览）
 
+注意：UploadFile 接口要求 multipart/form-data（Content-Type: application/json
+会返回 UnsupportedProtocol「this action does not support Content-Type=...」），
+因此不能像数据库 action 那样发 JSON body，须按 _build_multipart_upload 构造
+multipart 字节，并把含 boundary 的 Content-Type 一并参与 TC3 签名。
+
 契约：api-contract.md §3.10（F4 上传接口，image_url 出参）。
 """
 from __future__ import annotations
 
-import base64
 import logging
+import os
+import uuid
 
 from services.database import CloudBaseNoSQLClient
 
 logger = logging.getLogger("scholar-admin.tcb_storage")
+
+
+def _build_multipart_upload(
+    fields: dict,
+    file_field: str,
+    file_bytes: bytes,
+    filename: str,
+) -> tuple[bytes, str]:
+    """构造 multipart/form-data 请求体
+
+    Args:
+        fields: 普通表单字段（如 EnvId / FilePath / CloudPath）
+        file_field: 文件字段名（TCB UploadFile 为 FileContent）
+        file_bytes: 文件原始二进制
+        filename: 上传文件名（进入 Content-Disposition）
+
+    Returns:
+        (body, content_type)；content_type 含 boundary，必须随 body
+        一同交给 _request 参与 TC3 签名（_build_tc3_headers 按实际发送
+        Content-Type 计算 canonical headers）。
+    """
+    boundary = "----TCBFormBoundary" + uuid.uuid4().hex
+    parts: list[bytes] = []
+    for key, value in fields.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+    )
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 class CloudBaseStorageClient(CloudBaseNoSQLClient):
@@ -35,13 +83,21 @@ class CloudBaseStorageClient(CloudBaseNoSQLClient):
         Raises:
             Exception: TCB API 错误（由 _request 抛出）
         """
-        payload = {
-            "EnvId": self.env_id,
-            "FilePath": cloud_path,
-            "CloudPath": cloud_path,
-            "FileContent": base64.b64encode(data).decode("ascii"),
-        }
-        resp = await self._request("UploadFile", payload)
+        # UploadFile 要求 multipart/form-data；body 与含 boundary 的 Content-Type
+        # 同时参与 TC3 签名，避免服务端重算 sha256 失配（AuthFailure.SignatureFailure）。
+        body, content_type = _build_multipart_upload(
+            {
+                "EnvId": self.env_id,
+                "FilePath": cloud_path,
+                "CloudPath": cloud_path,
+            },
+            file_field="FileContent",
+            file_bytes=data,
+            filename=os.path.basename(cloud_path) or "upload.jpg",
+        )
+        resp = await self._request(
+            "UploadFile", None, body=body, content_type=content_type
+        )
         file_id = resp.get("FileId") or f"cloud://{self.env_id}/{cloud_path}"
         logger.info(f"[storage] UploadFile ok cloud_path={cloud_path} file_id={file_id}")
         return {"file_id": file_id, "cloud_path": cloud_path}
