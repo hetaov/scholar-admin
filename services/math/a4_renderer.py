@@ -8,7 +8,7 @@
 - ADR-0010 A-13：二维码 ≥20×20mm，内容 {sheet_id, signature, expires_at}
 
 说明：
-- 渲染引擎：playwright（Headless Chromium）。依赖**延迟导入**：未安装 / Chromium 缺失时
+- 渲染引擎：WeasyPrint（HTML/CSS → PDF）+ Pillow（PDF → PNG）。依赖**延迟导入**：未安装时
   渲染任务置 failed（error_code=dependency_missing），不影响主链路（生成接口正常返回）。
 - 状态机：queued → rendering → success / failed / degraded；retries 上限 1 次，
   失败先降级为纯文本模板重试，仍失败才置 failed（A-14）。
@@ -315,57 +315,66 @@ pre {{ white-space: pre-wrap; font-family: inherit; }}
 
 
 # ---------------------------------------------------------------------------
-# playwright 渲染（延迟导入）
+# WeasyPrint 渲染（延迟导入）
 # ---------------------------------------------------------------------------
 
 
-def _playwright_available() -> bool:
-    """检查 playwright + Chromium 是否可用（不抛异常）"""
+def _renderer_available() -> bool:
+    """检查 WeasyPrint 是否可用（不抛异常）"""
     try:
-        import playwright  # noqa: F401, WPS433
+        import weasyprint  # noqa: F401, WPS433
     except ImportError:
         return False
     return True
 
 
-async def _render_artifacts(html: str, sheet_dir: Path) -> None:
-    """Headless Chromium 渲染 HTML → sheet.pdf + sheet.png + preview.png
+# 向后兼容别名
+_playwright_available = _renderer_available
 
-    依赖延迟导入：未安装 playwright 抛 RendererUnavailableError（调用方降级为 failed）。
+
+async def _render_artifacts(html: str, sheet_dir: Path) -> None:
+    """WeasyPrint 渲染 HTML → sheet.pdf + sheet.png + preview.png
+
+    依赖延迟导入：未安装 weasyprint 抛 RendererUnavailableError（调用方降级为 failed）。
     """
     try:
-        from playwright.async_api import async_playwright
+        from weasyprint import HTML
     except ImportError as e:
-        raise RendererUnavailableError("playwright 未安装，无法渲染练习纸") from e
+        raise RendererUnavailableError("weasyprint 未安装，无法渲染练习纸") from e
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--force-color-profile=srgb",
-                ]
-            )
-            page = await browser.new_page(
-                viewport={"width": 794, "height": 1123}  # A4 @96dpi 近似
-            )
-            await page.set_content(html, wait_until="load")
-            pdf_path = str(sheet_dir / PDF_FILENAME)
-            await page.pdf(
-                path=pdf_path,
-                format="A4",
-                print_background=True,
-                margin={"top": f"{PAGE_MARGIN_MM}mm", "bottom": f"{PAGE_MARGIN_MM}mm",
-                        "left": f"{PAGE_MARGIN_MM}mm", "right": f"{PAGE_MARGIN_MM}mm"},
-            )
+        # 1. HTML → PDF（WeasyPrint 原生 A4 + 页边距 + 背景色 + 中文字体）
+        pdf_path = str(sheet_dir / PDF_FILENAME)
+        HTML(string=html).write_pdf(
+            pdf_path,
+            stylesheets=None,
+            presentational_hints=True,
+        )
+
+        # 2. PDF → PNG（全页 + 预览，用 Pillow 渲染 PDF 第一页）
+        try:
+            from PIL import Image
+            import io as _io
+
+            # WeasyPrint 可通过 write_png 直接生成 PNG（全页）
             png_path = str(sheet_dir / PNG_FILENAME)
-            await page.screenshot(path=png_path, full_page=True)
+            HTML(string=html).write_png(png_path, resolution=96)
+
+            # 预览图：截取 PNG 顶部区域（A4 预览比例约 1:1.4）
             preview_path = str(sheet_dir / PREVIEW_FILENAME)
-            await page.screenshot(path=preview_path, full_page=False)
-            await browser.close()
+            img = Image.open(png_path)
+            w, h = img.size
+            preview_h = min(h, int(w * 1.4))
+            preview = img.crop((0, 0, w, preview_h))
+            preview.save(preview_path, "PNG")
+        except ImportError:
+            # Pillow 未安装 → 只生成 PDF，跳过 PNG
+            logger.warning("[render] Pillow 未安装，跳过 PNG 生成")
+        except Exception as png_err:  # noqa: BLE001
+            logger.warning("[render] PNG 生成失败（PDF 已生成）: %s", png_err)
+
     except Exception as e:  # noqa: BLE001
-        raise RenderError(f"Headless Chromium 渲染失败: {e}") from e
+        raise RenderError(f"WeasyPrint 渲染失败: {e}") from e
 
 
 # ---------------------------------------------------------------------------

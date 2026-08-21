@@ -229,7 +229,7 @@ async def test_dependency_missing() -> None:
     db = MockDB(jobs=[queued_job("ps_test_001")])
 
     async def _fake_unavailable(html, sheet_dir):
-        raise a4_renderer.RendererUnavailableError("playwright 未安装")
+        raise a4_renderer.RendererUnavailableError("weasyprint 未安装")
 
     a4_renderer._render_artifacts = _fake_unavailable
     job = await a4_renderer.renderSheetJob(db, "ps_test_001")
