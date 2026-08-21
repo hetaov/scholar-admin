@@ -227,9 +227,27 @@ async def _persist_description(
 
 
 async def get_description(db, node_type: str, node_id: str) -> dict:
-    """GET 当前描述：description + description_version + description_history"""
+    """GET 当前描述：description + description_version + description_history + ai_summary"""
     node = await _get_node(db, node_id)
     node_type = node.get("node_type") or node_type
+
+    # 提取 ai_summary 摘要（供前端展示知识点状态）
+    ai_summary_raw = node.get("ai_summary")
+    ai_summary_out = None
+    if ai_summary_raw and isinstance(ai_summary_raw, dict):
+        kps = ai_summary_raw.get("knowledge_points") or []
+        eps = ai_summary_raw.get("extended_points") or []
+        ai_summary_out = {
+            "status": ai_summary_raw.get("status") or "not_generated",
+            "knowledge_points": kps,
+            "knowledge_points_count": len(kps),
+            "extended_points": eps,
+            "extended_points_count": len(eps),
+            "generated_at": ai_summary_raw.get("generated_at"),
+            "model": ai_summary_raw.get("model") or "",
+            "quality_score": ai_summary_raw.get("quality_score", -1),
+            "manual_edited": ai_summary_raw.get("manual_edited", False),
+        }
 
     # 非描述节点返回 description=null（契约口径），仍返回节点元信息
     if node_type not in DESCRIPTION_NODE_TYPES:
@@ -240,6 +258,7 @@ async def get_description(db, node_type: str, node_id: str) -> dict:
             "description_version": node.get("description_version") or 0,
             "description_source": node.get("description_source") or "",
             "description_history": [],
+            "ai_summary": ai_summary_out,
         }
 
     return {
@@ -249,6 +268,7 @@ async def get_description(db, node_type: str, node_id: str) -> dict:
         "description_version": node.get("description_version") or 0,
         "description_source": node.get("description_source") or "",
         "description_history": node.get("description_history") or [],
+        "ai_summary": ai_summary_out,
     }
 
 

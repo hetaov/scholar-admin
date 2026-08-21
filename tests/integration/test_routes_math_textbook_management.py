@@ -231,12 +231,12 @@ class TestTextbookOverview:
         base = {"textbook_id": TB_ID_01, "grade": "七年级", "semester": "up"}
         fake_db.add("curriculum_node", dict(base, node_id="u1", node_type="unit", title="U1", description="d", ai_summary=None))
         fake_db.add("curriculum_node", dict(base, node_id="u2", node_type="unit", title="U2", description=None, ai_summary=None))
-        fake_db.add("curriculum_node", dict(base, node_id="u3", node_type="unit", title="U3", description="d", ai_summary={"status": "generated"}))
+        fake_db.add("curriculum_node", dict(base, node_id="u3", node_type="unit", title="U3", description="d", ai_summary={"status": "success"}))
         fake_db.add("curriculum_node", dict(base, node_id="l1", node_type="lesson", title="L1", description="d", ai_summary=None))
         fake_db.add("curriculum_node", dict(base, node_id="l2", node_type="lesson", title="L2", description=None, ai_summary=None))
-        fake_db.add("curriculum_node", dict(base, node_id="k1", node_type="knowledge_point", title="K1", description="d", ai_summary={"status": "generated", "manual_edited": False}))
+        fake_db.add("curriculum_node", dict(base, node_id="k1", node_type="knowledge_point", title="K1", description="d", ai_summary={"status": "success", "manual_edited": False}))
         fake_db.add("curriculum_node", dict(base, node_id="k2", node_type="knowledge_point", title="K2", description="d", ai_summary=None))
-        fake_db.add("curriculum_node", dict(base, node_id="k3", node_type="knowledge_point", title="K3", description="d", ai_summary={"status": "generated", "manual_edited": True}))
+        fake_db.add("curriculum_node", dict(base, node_id="k3", node_type="knowledge_point", title="K3", description="d", ai_summary={"status": "success", "manual_edited": True}))
         fake_db.add("curriculum_node", dict(base, node_id="k4", node_type="knowledge_point", title="K4", description=None, ai_summary=None, needs_review=True))
 
     def test_overview_6_stats_fields_and_textbook_basic(self, make_client, fake_db):
@@ -255,7 +255,7 @@ class TestTextbookOverview:
         assert stats["kp_count"] == 4
         # described 计数：node_id ∈ {u1,u3,l1,k1,k2,k3} description=真值 → 6（k4 没有）
         assert stats["described_count"] == 6
-        # summarized = ai_summary.status=generated（u3, k1, k3）→ 3
+        # summarized = ai_summary.status=success（u3, k1, k3）→ 3
         assert stats["summarized_count"] == 3
         # needs_review_count = True（k4）→ 1
         assert stats["needs_review_count"] == 1
@@ -346,7 +346,7 @@ class TestTextbookDeleteCleanup:
         base = {"textbook_id": TB_ID_01, "grade": "七年级", "semester": "up"}
         fake_db.add("curriculum_node", dict(base, node_id="u1", node_type="unit", title="U1",
                                             description={"summary": "旧内容"},
-                                            ai_summary={"status": "generated", "version": 1}))
+                                            ai_summary={"status": "success", "version": 1}))
         fake_db.add("curriculum_node", dict(base, node_id="k1", node_type="knowledge_point", title="K1",
                                             description={"summary": "kp 描述"},
                                             ai_summary=None))

@@ -313,7 +313,7 @@ async def get_textbook_overview(db, *, textbook_id: str) -> dict:
         s = n.get("ai_summary")
         if not s or not isinstance(s, dict):
             return False
-        return s.get("status") == "generated" or s.get("manual_edited") in (True, False) and "status" in s
+        return s.get("status") == "success" or s.get("manual_edited") in (True, False) and "status" in s
 
     unit_count = sum(1 for n in nodes if n.get("node_type") == "unit")
     lesson_count = sum(1 for n in nodes if n.get("node_type") == "lesson")

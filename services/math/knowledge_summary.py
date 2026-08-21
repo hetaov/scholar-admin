@@ -24,7 +24,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from config import LLM_SUMMARY_MODEL, VOLCANO_API_KEY, VOLCANO_BASE_URL
+from config import LLM_SUMMARY_MODEL, USE_LANGGRAPH_SUMMARY, VOLCANO_API_KEY, VOLCANO_BASE_URL
 from services.audit import (
     AUDIT_ACTION_GENERATE_KNOWLEDGE_SUMMARY,
     AUDIT_RESULT_FAILED,
@@ -317,11 +317,22 @@ async def _persist_ai_summary(
         "extended_points": extended_points,
         "idempotency_key": idempotency_key,
     }
-    await db.update(
+    result = await db.update(
         CURRICULUM_NODE_COLLECTION,
         where={"node_id": node_id},
         data={"$set": {"ai_summary": ai_summary, "updated_at": now}},
     )
+    # 检查 matched_count：node_id 未匹配时回退按 _id 更新
+    matched = result.get("matched_count", 0) if isinstance(result, dict) else 0
+    if matched == 0:
+        logger.warning(
+            f"[_persist_ai_summary] node_id={node_id} 未匹配，回退 _id 更新"
+        )
+        await db.update(
+            CURRICULUM_NODE_COLLECTION,
+            where={"_id": node_id},
+            data={"$set": {"ai_summary": ai_summary, "updated_at": now}},
+        )
     return ai_summary
 
 
@@ -348,6 +359,18 @@ async def generateKnowledgeSummary(
     幂等：ai_summary.idempotency_key 相同 → 直接返回已有结果（不调用 LLM）。
     状态机：pending → generating → success / failed。
     """
+    # feature flag：USE_LANGGRAPH_SUMMARY=true → 走 LangGraph 图编排（2026-08-21 SOP ⑤ K4）
+    if USE_LANGGRAPH_SUMMARY:
+        from services.math.summary_graph import _run_summary_graph
+
+        return await _run_summary_graph(
+            db,
+            curriculum_node_id=curriculum_node_id,
+            force_regenerate=force_regenerate,
+            include_extended_points=include_extended_points,
+        )
+
+    # 以下为原直接调用路径（USE_LANGGRAPH_SUMMARY=false 时回退）
     node = await _get_node(db, curriculum_node_id)
     node_type = node.get("node_type") or ""
     _require_summary_node(node_type)

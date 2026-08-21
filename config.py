@@ -176,3 +176,23 @@ TENCENT_OCR_ENGINE = os.environ.get("TENCENT_OCR_ENGINE", "general_accurate")
 
 # 单次 OCR 调用超时（秒，超时进入重试/降级，不阻断上传链路）
 TENCENT_OCR_TIMEOUT_SECONDS = int(os.environ.get("TENCENT_OCR_TIMEOUT_SECONDS", 10))
+
+# ==================== F1 知识总结 LangGraph 图编排配置（2026-08-21 SOP ⑤） ====================
+
+# LangGraph 知识总结图开关：默认开启（true）；置 false 回退原直接调用路径
+USE_LANGGRAPH_SUMMARY = os.environ.get("USE_LANGGRAPH_SUMMARY", "true").lower() == "true"
+
+# 混元模型评估配置（混元走腾讯云 OpenAPI，独立鉴权）
+HUNYUAN_APP_ID = os.environ.get("HUNYUAN_APP_ID", "")
+HUNYUAN_SECRET_ID = os.environ.get("HUNYUAN_SECRET_ID", "") or SECRET_ID
+HUNYUAN_SECRET_KEY = os.environ.get("HUNYUAN_SECRET_KEY", "") or SECRET_KEY
+HUNYUAN_EVAL_MODEL = os.environ.get("HUNYUAN_EVAL_MODEL", "hunyuan-pro")
+HUNYUAN_BASE_URL = os.environ.get(
+    "HUNYUAN_BASE_URL", "https://hunyuan.tencentcloudapi.com"
+)
+# 混元评估调用超时（秒，超时降级跳过不阻塞）
+HUNYUAN_TIMEOUT_SECONDS = int(os.environ.get("HUNYUAN_TIMEOUT_SECONDS", 15))
+# 评估通过阈值（score ≥ 此值直接落盘，否则重试 ≤ 2 次）
+HUNYUAN_EVAL_PASS_THRESHOLD = float(os.environ.get("HUNYUAN_EVAL_PASS_THRESHOLD", 0.7))
+# 评估最大重试次数（不达标时回到生成节点重试）
+HUNYUAN_EVAL_MAX_RETRIES = int(os.environ.get("HUNYUAN_EVAL_MAX_RETRIES", 2))

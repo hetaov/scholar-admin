@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from services.auth import get_request_openid
-from services.database import CloudBaseNoSQLClient
+from services.database import CURRICULUM_NODE_COLLECTION, CloudBaseNoSQLClient
 from services.dependencies import get_db
 from services.math.curriculum_description import (
     DescriptionError,
@@ -929,3 +929,61 @@ async def math_curriculum_node_manual_edit_summary(
         Exception,
     ) as e:
         raise _batch_summary_error_to_http(e) from e
+
+
+# ===========================================================================
+# 接口 26：GET /math/textbook/{textbook_id}/knowledge-points（2026-08-21 SOP ⑤ K5）
+# 按教材聚合全部节点的 ai_summary 知识点，返回扁平知识点列表（小程序知识点列表页消费）
+# 契约：api-contract.md §3.10 接口 26
+# ===========================================================================
+
+
+@router.get("/textbook/{textbook_id}/knowledge-points")
+async def math_get_textbook_knowledge_points(
+    textbook_id: str,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET /math/textbook/{textbook_id}/knowledge-points — 按教材聚合知识点列表（接口 26）"""
+    from services.math.textbook_management import _get_math_textbook_or_404
+
+    # 1. 校验教材存在且为 math
+    tb = await _get_math_textbook_or_404(db, textbook_id)
+    tb_title = tb.get("title") or ""
+
+    # 2. 查该教材所有 curriculum_node（含 ai_summary）
+    query = await db.query(
+        CURRICULUM_NODE_COLLECTION,
+        where={"textbook_id": textbook_id},
+        limit=1000,
+    )
+    nodes = query.get("records", [])
+
+    # 3. 扁平化：遍历节点 → 展开 ai_summary.knowledge_points[]
+    kps: list[dict] = []
+    for node in nodes:
+        ai = node.get("ai_summary") or {}
+        if ai.get("status") != "success":
+            continue
+        node_id = node.get("node_id") or ""
+        node_title = node.get("title") or ""
+        quality_score = ai.get("quality_score", -1)
+        extended_points = ai.get("extended_points") or []
+
+        for kp in ai.get("knowledge_points") or []:
+            kps.append({
+                "node_id": node_id,
+                "node_title": node_title,
+                **kp,
+                "quality_score": quality_score,
+                "extended_points": extended_points,
+            })
+
+    return {
+        "success": True,
+        "data": {
+            "textbook_id": textbook_id,
+            "title": tb_title,
+            "knowledge_points": kps,
+            "total": len(kps),
+        },
+    }
