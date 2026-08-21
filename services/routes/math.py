@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from services.auth import get_request_openid
-from services.database import CURRICULUM_NODE_COLLECTION, CloudBaseNoSQLClient
+from services.database import (
+    CURRICULUM_NODE_COLLECTION,
+    ERROR_RECORD_COLLECTION,
+    CloudBaseNoSQLClient,
+)
 from services.dependencies import get_db
 from services.math.curriculum_description import (
     DescriptionError,
@@ -689,6 +693,62 @@ async def math_scan_correct(
         return {"success": True, "data": data}
     except (ScanCorrectError, ScanNotFoundError) as e:
         raise _scan_correct_error_to_http(e) from e
+
+
+# ===========================================================================
+# F4.6 学者错题列表（契约 api-contract.md §3.10 接口 25 · MVP 原始列表版）
+# ===========================================================================
+
+
+@router.get("/error-stats")
+async def math_error_stats(
+    scholar_id: str = Query("", description="学者 id（必）"),
+    limit: int = Query(100, ge=1, le=500, description="最多返回条数，按 created_at 倒序"),
+    knowledge_point_name: str | None = Query(
+        None, description="按知识点名过滤（可选）"
+    ),
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET 学者历史错题列表（接口 25 · MVP 简单列表版）
+
+    后端直接查 error_record，不做聚合；前端在 JS 层聚合统计。
+    MVP 出参：{ success, data: { items: [{ error_record_id, knowledge_point_name,
+      error_type, source, created_at }], total } }
+    字段映射：record_id → error_record_id，primary_error → error_type；
+    knowledge_point_name 为识别/修正落库的冗余字段（缺失时回退 node_code）。
+    """
+    if not scholar_id:
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+
+    where: dict = {"scholar_id": scholar_id}
+    if knowledge_point_name:
+        where["knowledge_point_name"] = knowledge_point_name
+
+    res = await db.query(
+        ERROR_RECORD_COLLECTION,
+        where=where,
+        order=[{"field": "created_at", "direction": "desc"}],
+        limit=limit,
+    )
+    records = res.get("records") or []
+    items = [
+        {
+            "error_record_id": r.get("record_id") or "",
+            "knowledge_point_name": (
+                r.get("knowledge_point_name") or r.get("node_code") or ""
+            ),
+            "error_type": r.get("primary_error") or "",
+            "source": r.get("source") or "",
+            "created_at": r.get("created_at") or 0,
+        }
+        for r in records
+    ]
+    # total 取全量计数（不受 limit 截断影响）
+    try:
+        total = await db.count(ERROR_RECORD_COLLECTION, where=where) or len(items)
+    except Exception:
+        total = len(items)
+    return {"success": True, "data": {"items": items, "total": total}}
 
 
 # ===========================================================================

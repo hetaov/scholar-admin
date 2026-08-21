@@ -616,8 +616,12 @@ async def _write_error_record(
     matched: dict[str, Any],
     error_type: str,
     confidence: float,
+    knowledge_point_name: str = "",
 ) -> str:
     """写一条 error_record（契约 §4.12.2 + §4.12.9(b) 扩展字段）
+
+    knowledge_point_name：识别命中/人工修正时的知识点名（冗余落库，
+    供错题列表直接展示，免 join；与 node_code 并存）。
 
     返回 record_id（= _id）。
     """
@@ -628,6 +632,7 @@ async def _write_error_record(
         "scholar_id": scholar_id,
         "attempt_ref": "",  # F4 扫描错题无 learning_attempt 关联
         "node_code": matched.get("node_code") or "",
+        "knowledge_point_name": knowledge_point_name,
         "primary_error": error_type,
         "secondary_error": None,
         "stuck_step": None,
@@ -780,6 +785,7 @@ async def classify_scan_upload(
                 matched=matched,
                 error_type=error_type,
                 confidence=confidence,
+                knowledge_point_name=kp_name,
             )
             public_items.append(
                 {
@@ -977,6 +983,7 @@ async def correct_scan_classify(
             }
             if kp_name:
                 update_data["node_code"] = node_code
+                update_data["knowledge_point_name"] = kp_name
             if error_type:
                 update_data["primary_error"] = error_type
             if raw_text_corrected:
@@ -1005,6 +1012,7 @@ async def correct_scan_classify(
                 "scholar_id": scholar_id,
                 "attempt_ref": "",
                 "node_code": node_code,
+                "knowledge_point_name": kp_name,
                 "primary_error": error_type,
                 "secondary_error": None,
                 "stuck_step": None,

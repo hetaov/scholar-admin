@@ -1,6 +1,6 @@
 {
   "envId": "knowlege-graph-env-d7cwud346b70b",
   "cloudrun": {
-    "name": "nosql-api"
+    "name": "scholar-admin-server"
   }
 }
