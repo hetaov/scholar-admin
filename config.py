@@ -199,9 +199,13 @@ LLM_JUDGE_CANDIDATE_LIMIT = int(os.environ.get("LLM_JUDGE_CANDIDATE_LIMIT", 40))
 # OCR 全文送入 Judge 的最大字符数（超出截断，控制 token）
 LLM_JUDGE_OCR_TEXT_MAX = int(os.environ.get("LLM_JUDGE_OCR_TEXT_MAX", 4000))
 # 推理模型（doubao-seed-2-1-pro 等带 reasoning_content）默认禁用 thinking：
-# 推理过程会占用 max_tokens 且耗时极长（真实规模 >120s），导致 Judge 超时。
-# 设为 0 保留推理（仅适用于 Judge 模型为非推理模型时忽略该参数）。
-LLM_JUDGE_DISABLE_THINKING = os.environ.get("LLM_JUDGE_DISABLE_THINKING", "1") != "0"
+# 推理过程会占用 max_tokens 且耗时极长（真实规模 >120s），导致 LLM 调用超时。
+# 设为 0 保留推理（仅适用于模型为非推理模型时忽略该参数）。
+# 通用开关（F1/F2/Judge 共用）；LLM_JUDGE_DISABLE_THINKING 为 Judge 独立开关，默认跟随通用开关。
+LLM_DISABLE_THINKING = os.environ.get("LLM_DISABLE_THINKING", "1") != "0"
+LLM_JUDGE_DISABLE_THINKING = os.environ.get(
+    "LLM_JUDGE_DISABLE_THINKING", "1" if LLM_DISABLE_THINKING else "0"
+) != "0"
 
 # ==================== F1 知识总结 LangGraph 图编排配置（2026-08-21 SOP ⑤） ====================
 

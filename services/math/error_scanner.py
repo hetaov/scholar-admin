@@ -483,9 +483,9 @@ OCR 全文：
 
 要求：
 1. 识别 OCR 文本中的每道错题（按题号或独立题干切分），每道题输出一项。
-2. knowledge_point_name：从候选集中选最匹配的知识点 name；无法定位时填空字符串 ""。
+2. knowledge_point_name：优先从候选集中选最匹配的知识点 name；候选集无匹配项时，按 OCR 内容给出最贴近的知识点名称（不要填空字符串，尽量具体，如"大数加减法""两位数乘两位数"）。
 3. error_type：错因四分类，取值 concept（概念错）/ method（方法错）/ computation（计算错）/ reading（审题错）。
-4. confidence：本道题归类置信度 0~1（知识点无法定位或错因不明时 ≤0.5）。
+4. confidence：本道题归类置信度 0~1（知识点在候选集内且匹配明确时 ≥0.6；候选集无匹配或错因不明时 ≤0.5）。
 5. ocr_block_id：本道题在 OCR 检测块中对应的 block_id（取题干所在块，无则填空字符串 ""）。
 
 输出 JSON 结构：
@@ -501,7 +501,7 @@ def _format_candidates(
 ) -> str:
     """格式化候选集为 prompt 文本（限制条目数控制 token）"""
     if not candidates:
-        return "（候选集为空，请尽量按 OCR 内容推断知识点并降低 confidence）"
+        return "（候选集为空，请按 OCR 内容自行推断每道题的知识点名称）"
     lines: list[str] = []
     for c in candidates[:limit]:
         lines.append(

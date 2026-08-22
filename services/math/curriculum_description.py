@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from openai import OpenAI
 
-from config import LLM_SUMMARY_MODEL, VOLCANO_API_KEY, VOLCANO_BASE_URL
+from config import LLM_DISABLE_THINKING, LLM_SUMMARY_MODEL, VOLCANO_API_KEY, VOLCANO_BASE_URL
 from services.audit import (
     AUDIT_ACTION_ADOPT_DESCRIPTION,
     AUDIT_ACTION_DRAFT_DESCRIPTION,
@@ -468,17 +468,24 @@ _DRAFT_USER_TEMPLATE = """请为以下数学教材节点生成教材描述。
 
 
 def _call_chat_sync(client: OpenAI, model: str, prompt: str) -> str:
-    """同步 chat 调用（在线程池中执行）"""
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
+    """同步 chat 调用（在线程池中执行）
+
+    推理模型默认禁用 thinking（LLM_DISABLE_THINKING），否则真实规模下
+    推理耗时 >120s 会触发超时（同 Judge，见 error_scanner._call_judge_sync）。
+    """
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": _DRAFT_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.3,
-        max_tokens=4096,
-        response_format={"type": "json_object"},
-    )
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+    }
+    if LLM_DISABLE_THINKING:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    resp = client.chat.completions.create(**kwargs)
     return (resp.choices[0].message.content or "").strip()
 
 
