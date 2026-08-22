@@ -713,9 +713,11 @@ async def classify_scan_upload(
 
     # 2. OCR 完成性校验
     if scan.get("ocr_status") != OCR_STATUS_SUCCESS:
-        raise OcrNotReadyError(
-            f"OCR 未完成（status={scan.get('ocr_status')}），无法归类"
-        )
+        detail = f"OCR 未完成（status={scan.get('ocr_status')}），无法归类"
+        ocr_error = (scan.get("ocr_error") or "").strip()
+        if ocr_error:
+            detail += f"：{ocr_error[:200]}"
+        raise OcrNotReadyError(detail)
 
     scholar_id = scan.get("scholar_id") or ""
     ocr_text = scan.get("ocr_text") or ""

@@ -41,6 +41,29 @@ def _fake_resp(texts):
     return resp
 
 
+def _fake_resp_sdk_objects(texts):
+    """真实腾讯云 SDK 响应形态：TextDetection / Coord 为模型对象（属性访问）。
+
+    回归：_parse 曾用 item.get()（dict 写法），对 SDK 对象抛
+    AttributeError: 'TextDetection' object has no attribute 'get'。
+    """
+    resp = type("FakeResp", (), {})()
+
+    def _obj(name, **fields):
+        return type(name, (), fields)()
+
+    resp.TextDetections = []
+    for i, text in enumerate(texts):
+        polygon = [
+            _obj("Coord", X=0.0, Y=float(i)),
+            _obj("Coord", X=1.0, Y=float(i)),
+        ]
+        resp.TextDetections.append(
+            _obj("TextDetection", DetectedText=text, Polygon=polygon)
+        )
+    return resp
+
+
 def _make_provider(monkeypatch, secret_id="ak", secret_key="sk", client=None):
     monkeypatch.setattr(config, "TENCENT_OCR_SECRET_ID", secret_id)
     monkeypatch.setattr(config, "TENCENT_OCR_SECRET_KEY", secret_key)
@@ -106,6 +129,24 @@ async def test_recognize_success_builds_text_and_blocks(monkeypatch):
     assert result.blocks[0]["bbox"] == [[0.0, 0.0], [1.0, 0.0]]
     assert result.blocks[0]["image_url_crop"] is None
     assert result.blocks[1]["block_id"] == "blk_0002"
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_recognize_success_with_sdk_object_detections(monkeypatch):
+    """真实 SDK 响应（模型对象，属性访问）也能正常解析。
+
+    回归：'TextDetection' object has no attribute 'get'（真机 OCR 失败根因）。
+    """
+    client = _FakeClient([_fake_resp_sdk_objects(["第 1 题", "x+1=2"])])
+    provider = _make_provider(monkeypatch, client=client)
+
+    result = await provider.recognize(b"img")
+
+    assert result.text == "第 1 题\nx+1=2"
+    assert len(result.blocks) == 2
+    assert result.blocks[0]["block_id"] == "blk_0001"
+    assert result.blocks[0]["bbox"] == [[0.0, 0.0], [1.0, 0.0]]
     assert client.calls == 1
 
 

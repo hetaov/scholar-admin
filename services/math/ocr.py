@@ -35,6 +35,17 @@ _OCR_ENGINES = {
 }
 
 
+def _get_field(obj: Any, name: str, default: Any = None) -> Any:
+    """兼容两种响应形态的字段读取：
+    - 腾讯云 SDK 模型对象（TextDetection/Coord，属性访问 obj.DetectedText）
+    - dict（测试/降级路径，键访问 obj["DetectedText"]）
+    真实 SDK 返回模型对象，无 .get() 方法，dict 写法会抛 AttributeError。
+    """
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
 class OcrError(Exception):
     """OCR 调用失败（网络/超时/服务端错误），调用方应降级 ocr_status=failed。"""
 
@@ -142,18 +153,25 @@ class TencentGeneralOcrProvider(OcrProvider):
 
     @staticmethod
     def _parse(resp: Any) -> OcrResult:
-        """解析 TextDetections -> OcrResult（文本行 + 检测块）。"""
+        """解析 TextDetections -> OcrResult（文本行 + 检测块）。
+
+        TextDetections 元素为腾讯云 SDK 的 TextDetection 模型对象（属性访问），
+        统一经 _get_field 读取（同时兼容 dict 形态，见测试双覆盖）。
+        """
         detections = getattr(resp, "TextDetections", None) or []
         lines: list[str] = []
         blocks: list[dict[str, Any]] = []
         for index, item in enumerate(detections, start=1):
-            text = (item.get("DetectedText") or "").strip()
+            text = (_get_field(item, "DetectedText") or "").strip()
             if not text:
                 continue
             lines.append(text)
             bbox = [
-                [float(point.get("X", 0)), float(point.get("Y", 0))]
-                for point in (item.get("Polygon") or [])
+                [
+                    float(_get_field(point, "X", 0)),
+                    float(_get_field(point, "Y", 0)),
+                ]
+                for point in (_get_field(item, "Polygon") or [])
             ]
             blocks.append(
                 {
