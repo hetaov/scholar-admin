@@ -25,6 +25,7 @@ from typing import Any, Optional
 from config import (
     EVAL_CONFIDENCE_THRESHOLD,
     LLM_JUDGE_CANDIDATE_LIMIT,
+    LLM_JUDGE_DISABLE_THINKING,
     LLM_JUDGE_MODEL,
     LLM_JUDGE_OCR_TEXT_MAX,
     LLM_JUDGE_TIMEOUT_SECONDS,
@@ -514,17 +515,25 @@ def _format_candidates(
 def _call_judge_sync(
     client: Any, model: str, system: str, prompt: str
 ) -> str:
-    """同步 chat 调用（在线程池中执行）"""
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
+    """同步 chat 调用（在线线程池中执行）
+
+    推理模型（doubao-seed-2-1-pro 等）默认开启深度推理，真实规模下
+    推理耗时 >120s 远超超时限制且占用 max_tokens；默认禁用 thinking，
+    实测真实规模从 >120s 降到 ~3s（LLM_JUDGE_DISABLE_THINKING=0 可保留推理）。
+    """
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.0,
-        max_tokens=4096,
-        response_format={"type": "json_object"},
-    )
+        "temperature": 0.0,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+    }
+    if LLM_JUDGE_DISABLE_THINKING:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    resp = client.chat.completions.create(**kwargs)
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -549,6 +558,11 @@ async def _call_classify_judge(
     )
     client = _get_judge_client()
     last_err: Exception | None = None
+    logger.info(
+        f"[scan] Judge 调用开始 model={LLM_JUDGE_MODEL} "
+        f"候选集={len(candidates)} 条 OCR文本={len(ocr_text)} 字 prompt={len(prompt)} 字符"
+    )
+    t0 = time.time()
     for attempt in (1, 2):  # 首次 + 重试 1 次
         try:
             response = await asyncio.to_thread(
@@ -557,11 +571,15 @@ async def _call_classify_judge(
             )
             result = _parse_json_response(response)
             _validate_classify_result(result)
+            logger.info(
+                f"[scan] Judge 调用成功 耗时={time.time() - t0:.1f}s "
+                f"items={len(result.get('items') or [])} 条（第 {attempt} 次）"
+            )
             return result
         except Exception as e:  # noqa: BLE001 — 统一重试后仍失败抛 JudgeResponseError
             last_err = e
             logger.warning(
-                f"[scan] 归类 Judge 调用失败（第 {attempt} 次）: "
+                f"[scan] 归类 Judge 调用失败（第 {attempt} 次）耗时={time.time() - t0:.1f}s: "
                 f"{type(e).__name__}: {e}"
             )
     raise JudgeResponseError(f"扫描归类 Judge 调用失败: {last_err}")
@@ -710,6 +728,7 @@ async def classify_scan_upload(
         raise ScanNotFoundError("缺少 scan_id")
 
     # 1. 读取 scan 记录
+    logger.info(f"[scan] classify 入口 scan_id={scan_id} force_reclassify={force_reclassify}")
     res = await db.query(
         MATH_SCAN_UPLOAD_COLLECTION, where={"scan_id": scan_id}, limit=1
     )
@@ -724,6 +743,11 @@ async def classify_scan_upload(
         ocr_error = (scan.get("ocr_error") or "").strip()
         if ocr_error:
             detail += f"：{ocr_error[:200]}"
+        logger.warning(
+            f"[scan] classify 被 OCR 阻塞 scan_id={scan_id} "
+            f"ocr_status={scan.get('ocr_status')} ocr_error={(ocr_error or '')[:200]} "
+            f"classify_status={scan.get('classify_status')}"
+        )
         raise OcrNotReadyError(detail)
 
     scholar_id = scan.get("scholar_id") or ""
@@ -755,6 +779,7 @@ async def classify_scan_upload(
         where={"scan_id": scan_id},
         data={"$set": {"classify_status": CLASSIFY_STATUS_CLASSIFYING}},
     )
+    logger.info(f"[scan] classify 标记 classifying scan_id={scan_id}，开始调 Judge")
 
     # 5. 加载知识点候选 + 调用 Judge
     try:
@@ -762,6 +787,9 @@ async def classify_scan_upload(
         judge_result = await _call_classify_judge(ocr_text, candidates)
     except (JudgeNotConfiguredError, JudgeResponseError) as e:
         # Judge 不可用/解析失败 → classify_status=failed + 失败审计
+        logger.warning(
+            f"[scan] Judge 不可用，classify_status=failed scan_id={scan_id}: {type(e).__name__}"
+        )
         await db.update(
             MATH_SCAN_UPLOAD_COLLECTION,
             where={"scan_id": scan_id},
@@ -838,6 +866,10 @@ async def classify_scan_upload(
                 "completed_at": int(time.time() * 1000),
             }
         },
+    )
+    logger.info(
+        f"[scan] 归类落库 scan_id={scan_id} status={final_status} "
+        f"items={len(public_items)} 全部高置信={all_confident} 候选集={len(candidates)}"
     )
 
     # 8. 写审计 scan_classify（必审）
