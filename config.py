@@ -189,6 +189,16 @@ TENCENT_OCR_ENGINE = os.environ.get("TENCENT_OCR_ENGINE", "general_accurate")
 # 单次 OCR 调用超时（秒，超时进入重试/降级，不阻断上传链路）
 TENCENT_OCR_TIMEOUT_SECONDS = int(os.environ.get("TENCENT_OCR_TIMEOUT_SECONDS", 10))
 
+# ==================== F4.3 扫描归类 Judge 配置 ====================
+
+# Judge 单次调用超时（秒）：缩短同步阻塞时长，缓解 callContainer 15s 上限冲突
+# （超时后 classify_status=failed，前端轮询重试会重新触发 Judge）
+LLM_JUDGE_TIMEOUT_SECONDS = int(os.environ.get("LLM_JUDGE_TIMEOUT_SECONDS", 30))
+# 知识点候选集上限（prompt token 控制，减少单次生成时间）
+LLM_JUDGE_CANDIDATE_LIMIT = int(os.environ.get("LLM_JUDGE_CANDIDATE_LIMIT", 40))
+# OCR 全文送入 Judge 的最大字符数（超出截断，控制 token）
+LLM_JUDGE_OCR_TEXT_MAX = int(os.environ.get("LLM_JUDGE_OCR_TEXT_MAX", 4000))
+
 # ==================== F1 知识总结 LangGraph 图编排配置（2026-08-21 SOP ⑤） ====================
 
 # LangGraph 知识总结图开关：默认开启（true）；置 false 回退原直接调用路径

@@ -24,7 +24,10 @@ from typing import Any, Optional
 
 from config import (
     EVAL_CONFIDENCE_THRESHOLD,
+    LLM_JUDGE_CANDIDATE_LIMIT,
     LLM_JUDGE_MODEL,
+    LLM_JUDGE_OCR_TEXT_MAX,
+    LLM_JUDGE_TIMEOUT_SECONDS,
     VOLCANO_API_KEY,
     VOLCANO_BASE_URL,
     VOLCANO_IMAGE_FORMATS,
@@ -332,7 +335,7 @@ _judge_client: Optional[Any] = None
 
 
 def _get_judge_client() -> Any:
-    """获取 Judge 模型客户端（单次调用最长 60 秒；单例）"""
+    """获取 Judge 模型客户端（单次调用最长 LLM_JUDGE_TIMEOUT_SECONDS 秒；单例）"""
     global _judge_client
     if _judge_client is None:
         from openai import OpenAI
@@ -340,7 +343,7 @@ def _get_judge_client() -> Any:
         _judge_client = OpenAI(
             api_key=VOLCANO_API_KEY,
             base_url=VOLCANO_BASE_URL,
-            timeout=60.0,
+            timeout=LLM_JUDGE_TIMEOUT_SECONDS,
         )
     return _judge_client
 
@@ -492,7 +495,9 @@ OCR 全文：
 }}"""
 
 
-def _format_candidates(candidates: list[dict[str, Any]], limit: int = 80) -> str:
+def _format_candidates(
+    candidates: list[dict[str, Any]], limit: int = LLM_JUDGE_CANDIDATE_LIMIT
+) -> str:
     """格式化候选集为 prompt 文本（限制条目数控制 token）"""
     if not candidates:
         return "（候选集为空，请尽量按 OCR 内容推断知识点并降低 confidence）"
@@ -536,6 +541,8 @@ async def _call_classify_judge(
         )
     from services.dialogue import _parse_json_response
 
+    # 截断 OCR 全文控制 token（LLM_JUDGE_OCR_TEXT_MAX 字符）
+    ocr_text = (ocr_text or "")[:LLM_JUDGE_OCR_TEXT_MAX]
     prompt = _CLASSIFY_USER_TEMPLATE.format(
         ocr_text=ocr_text or "（OCR 文本为空）",
         candidates=_format_candidates(candidates),
@@ -735,6 +742,12 @@ async def classify_scan_upload(
             "success" if existing_status == CLASSIFY_STATUS_SUCCESS else "needs_review",
             existing_items,
         )
+
+    # 3.5 处理中：classify_status=classifying → 返回 status=processing（前端轮询语义），
+    # 避免前端轮询期间重复 POST 并发触发多个 Judge 调用（首次请求仍在后端执行）。
+    if existing_status == CLASSIFY_STATUS_CLASSIFYING:
+        logger.info(f"[scan] 归类处理中 scan_id={scan_id}，返回 processing")
+        return _to_public_classify(scan_id, "processing", [])
 
     # 4. 标记 classifying（契约状态机：pending → classifying → success/failed/needs_review）
     await db.update(
