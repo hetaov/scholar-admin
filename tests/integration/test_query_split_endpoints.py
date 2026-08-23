@@ -215,11 +215,12 @@ class TestGetLessonSentences:
         assert resp.status_code == 404
 
     def test_states_query_scoped_to_lesson(self, make_client, fake_db):
-        """性能回归：states 按本课句子 $in 过滤，查询固定 4 次，与学者总状态量解耦。
+        """性能回归：states 按本课句子 $in 过滤，查询固定 5 次，与学者总状态量解耦。
 
         防退化点：skill_state 必须按 sentence_id $in 查询（仅本课句子），
         不允许全量分页拉取该学者全部状态（1100+ 条无关状态会触发 2 次分页）。
-        优化后章节明细查询恒为 4 次：chapter + lesson + sentence_v2 + skill_state。
+        优化后章节明细查询恒为 5 次：chapter + lesson + sentence_v2 +
+        sentence_group（M3 G1.1 组元数据）+ skill_state。
         """
         seed_content(fake_db)
         seed_skill_states(fake_db, SCHOLAR_STATES)
@@ -259,8 +260,9 @@ class TestGetLessonSentences:
         assert len(state_calls) == 1  # 一课 2 句 → $in 一次查回
         assert state_calls[0]["where"]["scholar_id"] == "scholar_1"
         assert set(state_calls[0]["where"]["sentence_id"]["$in"]) == {"s1", "s2"}
-        # 总查询固定：chapter + lesson + sentence_v2 + skill_state = 4
-        assert len(calls) == 4
+        # 总查询固定：chapter + lesson + sentence_v2 + sentence_group(M3) + skill_state = 5
+        assert len(calls) == 5
+        assert len([c for c in calls if c["collection"] == "sentence_group"]) == 1
 
 
 class TestQueryCountOptimization:
@@ -323,3 +325,164 @@ class TestQueryCountOptimization:
         assert resp.status_code == 200
         assert len(resp.json()["data"]["lessons"]) == 6
         assert calls["n"] == 5
+
+
+class TestGetLessonGroups:
+    """M3 G1.1: GET /tracking/textbooks/{textbook_id}/lessons/{lesson_id}/groups — 组视图（读兼容层）"""
+
+    def test_legacy_groups_when_no_groups(self, make_client, fake_db):
+        """无任何 sentence_group → 逐句构造临时组 legacy_{lesson_id}_{sentence_id}，结构逐字一致。"""
+        seed_content(fake_db)
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/groups",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["lesson_id"] == "l1"
+        assert data["lesson_title"] == "L1"
+        groups = data["groups"]
+        assert [g["group_id"] for g in groups] == ["legacy_l1_s1", "legacy_l1_s2"]
+        g0 = groups[0]
+        assert g0["group_type"] == "stand_alone"
+        assert g0["order_in_lesson"] == 0
+        assert g0["group_title"] == "Text s1"
+        assert len(g0["sentences"]) == 1
+        assert g0["sentences"][0]["content"] == "Text s1"
+        # 临时组与真实组字段键一致
+        for g in groups:
+            assert {"group_id", "group_title", "group_type", "order_in_lesson", "sentences"} <= set(g)
+        # summary 含 group_count
+        assert data["summary"]["group_count"] == 2
+        assert data["summary"]["total_sentence_count"] == 2
+
+    def test_real_groups_organized(self, make_client, fake_db):
+        """有 sentence_group → 按组组织返回（含组元数据 + 组内句子）。"""
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
+        fake_db.add("sentence_group", {
+            "_id": "grp_1", "group_id": "grp_1", "lesson_id": "l1",
+            "title": "Yes/No 应答组", "type": "dialogue_pair",
+            "sentence_ids": ["s2", "s1"], "order_in_lesson": 0,
+        })
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/groups",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        groups = data["groups"]
+        assert len(groups) == 1
+        g = groups[0]
+        assert g["group_id"] == "grp_1"
+        assert g["group_title"] == "Yes/No 应答组"
+        assert g["group_type"] == "dialogue_pair"
+        assert [s["sentence_id"] for s in g["sentences"]] == ["s2", "s1"]  # 按 sentence_ids 顺序
+        assert data["summary"]["group_count"] == 1
+
+    def test_status_matches_sentences_interface(self, make_client, fake_db):
+        """组内句子 status/skills 与 /sentences 逐字一致（乐观聚合）。"""
+        seed_content(fake_db)
+        seed_skill_states(fake_db, SCHOLAR_STATES)
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/groups",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        entries = {s["sentence_id"]: s for g in data["groups"] for s in g["sentences"]}
+        s1 = entries["s1"]
+        assert s1["status"] == 2  # learned（乐观）
+        assert s1["skills"] == {"translation": 2, "listening": 1}
+        assert s1["weakest_skill"] == "listening"
+        assert s1["review_count"] == 2
+        assert s1["next_review_at"] is not None
+        assert s1["is_canonical"] is True  # 未去重 → canonical
+        assert s1["canonical_sentence_id"] is None
+        # summary 与 /sentences 口径一致 + group_count
+        summary = data["summary"]
+        assert summary["learned_sentence_count"] == 1
+        assert summary["mastery"] == pytest.approx(0.5)
+
+    def test_missing_scholar_id_400(self, make_client, fake_db):
+        seed_content(fake_db)
+        client = make_client(tracking_router)
+        resp = client.get("/tracking/textbooks/tb_1/lessons/l1/groups")
+        assert resp.status_code == 400
+
+    def test_lesson_not_found_404(self, make_client, fake_db):
+        seed_content(fake_db)
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/nope/groups",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 404
+
+
+class TestGetLessonSentencesM3Fields:
+    """M3 G1.1: /sentences 追加 5 可选字段（group_id/group_title/group_type/is_canonical/canonical_sentence_id）"""
+
+    def test_5_fields_null_without_groups(self, make_client, fake_db):
+        """未分组 → 5 字段全 null（纯新增，不破坏旧调用方）。"""
+        seed_content(fake_db)
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/sentences",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        s1 = resp.json()["data"]["sentences"][0]
+        assert s1["group_id"] is None
+        assert s1["group_title"] is None
+        assert s1["group_type"] is None
+        assert s1["is_canonical"] is None
+        assert s1["canonical_sentence_id"] is None
+        # 既有字段不受影响
+        assert s1["status"] == 0
+        assert s1["content"] == "Text s1"
+
+    def test_5_fields_populated_with_groups(self, make_client, fake_db):
+        """已分组 → group_* 来自 sentence_group，is_canonical 按 canonical_sentence_id 判定。"""
+        seed_content(fake_db)
+        fake_db.add("sentence_group", {
+            "_id": "grp_1", "group_id": "grp_1", "lesson_id": "l1",
+            "title": "Yes/No 应答组", "type": "dialogue_pair",
+            "sentence_ids": ["s1", "s2"], "order_in_lesson": 0,
+        })
+        # s2 为重复句（canonical 指向 s1）
+        rows = fake_db.all("sentence_v2")
+        fake_db.clear("sentence_v2")
+        for r in rows:
+            if r.get("sentence_id") == "s2":
+                r["canonical_sentence_id"] = "s1"
+            if r.get("sentence_id") == "s1":
+                r["group_id"] = "grp_1"
+            if r.get("sentence_id") == "s2":
+                r["group_id"] = "grp_1"
+            fake_db.add("sentence_v2", r)
+
+        client = make_client(tracking_router)
+        resp = client.get(
+            "/tracking/textbooks/tb_1/lessons/l1/sentences",
+            params={"scholar_id": "scholar_1"},
+        )
+        assert resp.status_code == 200
+        sentences = resp.json()["data"]["sentences"]
+        by_id = {s["sentence_id"]: s for s in sentences}
+
+        s1 = by_id["s1"]
+        assert s1["group_id"] == "grp_1"
+        assert s1["group_title"] == "Yes/No 应答组"
+        assert s1["group_type"] == "dialogue_pair"
+        assert s1["is_canonical"] is True  # canonical 为 null/自身
+        assert s1["canonical_sentence_id"] is None
+
+        s2 = by_id["s2"]
+        assert s2["group_id"] == "grp_1"
+        assert s2["group_title"] == "Yes/No 应答组"
+        assert s2["is_canonical"] is False  # 重复句
+        assert s2["canonical_sentence_id"] == "s1"

@@ -1,13 +1,16 @@
 """集成测试:学习状态上报接口 + 查询改走 skill_state（Phase 2）+ 事件写入（Phase 3）
++ M3 G1.2 写兼容层 L1（Lazy dedup）
 
 被测链路:FastAPI TestClient + FakeDB,覆盖:
 - POST /tracking/state        上报单句单能力状态(创建 / 累加 / 参数校验)
 - POST /tracking/state        同时写一条 study_attempt 事件(append-only)
 - GET  /tracking/{scholar_id} 只查 skill_state, 无记录打日志不回退旧表
+- POST /tracking/state        惰性补齐 semantic_key / canonical_sentence_id（M3 G1.2）
 """
 
 from __future__ import annotations
 
+from services.models_content import compute_text_hash
 from services.routes_state import router as state_router
 from services.routes_tracking import router as tracking_router
 
@@ -111,6 +114,70 @@ class TestPostTrackingState:
             json={"scholar_id": "s1", "sentence_id": "sent_1", "attempt_status": "???"},
         )
         assert resp.json()["data"]["attempt"]["status"] == "completed"
+
+
+class TestM3WriteCompatLayer:
+    """M3 G1.2：POST /tracking/state 写兼容层 L1 —— 惰性补齐语义键（不切 skill_state 写入键）。"""
+
+    def test_lazy_backfills_semantic_key(self, make_client, fake_db):
+        fake_db.add("sentence_v2", {
+            "sentence_id": "sent_1", "text": "Hello!", "created_at": 1000,
+        })
+        client = make_client(state_router, tracking_router)
+        resp = client.post(
+            "/tracking/state", json={"scholar_id": "s1", "sentence_id": "sent_1"}
+        )
+        assert resp.status_code == 200
+        stored = fake_db.all("sentence_v2")[0]
+        assert stored["semantic_key"] == compute_text_hash("Hello!")
+        assert stored["canonical_sentence_id"] == "sent_1"  # 自指 = canonical
+        # skill_state 写入键仍为原 sentence_id（M3 不切键）
+        states = fake_db.all("skill_state")
+        assert len(states) == 1
+        assert states[0]["sentence_id"] == "sent_1"
+
+    def test_duplicate_points_to_canonical(self, make_client, fake_db):
+        fake_db.add("sentence_v2", {
+            "sentence_id": "sent_a", "text": "Good morning!", "created_at": 1000,
+        })
+        fake_db.add("sentence_v2", {
+            "sentence_id": "sent_b", "text": "good morning", "created_at": 2000,
+        })
+        client = make_client(state_router, tracking_router)
+        # 上报晚句 → canonical 指向最早者 sent_a
+        resp = client.post(
+            "/tracking/state", json={"scholar_id": "s1", "sentence_id": "sent_b"}
+        )
+        assert resp.status_code == 200
+        by_id = {r["sentence_id"]: r for r in fake_db.all("sentence_v2")}
+        assert by_id["sent_b"]["canonical_sentence_id"] == "sent_a"
+        assert by_id["sent_b"]["semantic_key"] == compute_text_hash("good morning")
+        # sent_a 未被上报 → 未被触碰（惰性）
+        assert by_id["sent_a"].get("semantic_key") is None
+
+    def test_sentence_not_in_content_skips_backfill(self, make_client, fake_db):
+        client = make_client(state_router, tracking_router)
+        resp = client.post(
+            "/tracking/state", json={"scholar_id": "s1", "sentence_id": "no_such_sent"}
+        )
+        # 契约 §3.2：句子不在内容库不阻断上报（错误仅 400/500），跳过补齐继续写状态
+        assert resp.status_code == 200
+        states = fake_db.all("skill_state")
+        assert states and states[0]["sentence_id"] == "no_such_sent"
+        assert fake_db.all("sentence_v2") == []  # 不产生任何 sentence_v2 写入
+
+    def test_repeat_report_idempotent(self, make_client, fake_db):
+        fake_db.add("sentence_v2", {
+            "sentence_id": "sent_1", "text": "Hello", "created_at": 1,
+        })
+        client = make_client(state_router, tracking_router)
+        for _ in range(2):
+            resp = client.post(
+                "/tracking/state", json={"scholar_id": "s1", "sentence_id": "sent_1"}
+            )
+            assert resp.status_code == 200
+        stored = fake_db.all("sentence_v2")[0]
+        assert stored["semantic_key"] == compute_text_hash("Hello")  # 只补一次，幂等
 
 
 class TestGetTrackingByScholarV2:

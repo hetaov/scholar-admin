@@ -17,6 +17,7 @@ from services.models_content import (
     build_textbook_v2_doc,
     get_lessons_by_textbook,
     group_units_into_chapters,
+    normalize_sentence_doc,
     write_content_v2,
 )
 from tests.fakes.fake_db import FakeDB
@@ -222,3 +223,39 @@ class TestWriteContentV2:
         assert [l["lesson_id"] for l in lessons] == ["lesson_1", "lesson_2", "lesson_3"]
         # 无章教材: 不按 chapter_id 过滤也能查到全部课
         assert all(l["chapter_id"] == "" for l in lessons)
+
+
+# ---------------------------------------------------------------------------
+# normalize_sentence_doc — M3 分组/去重 4 字段缺省注入（读兼容层，零迁移）
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeSentenceDocM3Fields:
+    def test_injects_none_for_missing_m3_fields(self):
+        doc = normalize_sentence_doc({"sentence_id": "s1", "text": "Hello"})
+        assert doc["group_id"] is None
+        assert doc["semantic_key"] is None
+        assert doc["canonical_sentence_id"] is None
+        assert doc["role_in_group"] is None
+        # text_hash 照常惰性计算（不回归 E0.1）
+        assert doc["text_hash"]
+
+    def test_keeps_explicit_m3_values(self):
+        doc = normalize_sentence_doc({
+            "sentence_id": "s1",
+            "text": "Hello",
+            "group_id": "grp_1",
+            "semantic_key": "sk_1",
+            "canonical_sentence_id": "s0",
+            "role_in_group": "question",
+        })
+        assert doc["group_id"] == "grp_1"
+        assert doc["semantic_key"] == "sk_1"
+        assert doc["canonical_sentence_id"] == "s0"
+        assert doc["role_in_group"] == "question"
+
+    def test_does_not_mutate_input(self):
+        original = {"sentence_id": "s1", "text": "Hello"}
+        normalize_sentence_doc(original)
+        assert "group_id" not in original
+        assert "role_in_group" not in original

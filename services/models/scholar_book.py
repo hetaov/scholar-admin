@@ -102,6 +102,7 @@ def build_scholar_book_doc(
     textbook_id: str,
     current_chapter_id: str | None = None,
     current_lesson_id: str | None = None,
+    current_group_id: str | None = None,
     status: str = BOOK_STATUS_LEARNING,
     total_time_spent: int | float = 0,
     last_studied_at: int | None = None,
@@ -113,6 +114,8 @@ def build_scholar_book_doc(
     """构建 scholar_book 文档（纯函数，只生成不落库）。
 
     subject_type 缺省 english（与 textbook_v2 对齐）；显式合法值 math/chinese 保留。
+    `current_group_id`（M3 断点续学到 group 级，data-model §4.4）：缺省 None，
+    读侧回退用 `current_lesson_id`。
     """
     now = int(now or time.time())
     _id = scholar_book_id(scholar_id, textbook_id)
@@ -128,6 +131,7 @@ def build_scholar_book_doc(
         "status": status if status in VALID_BOOK_STATUSES else BOOK_STATUS_LEARNING,
         "current_chapter_id": current_chapter_id,
         "current_lesson_id": current_lesson_id,
+        "current_group_id": current_group_id,
         "total_time_spent": int(total_time_spent or 0),
         "last_studied_at": int(last_studied_at) if last_studied_at is not None else now,
         "started_at": int(started_at) if started_at is not None else now,
@@ -169,6 +173,7 @@ async def upsert_scholar_book(
     textbook_id: str,
     current_chapter_id: str | None = None,
     current_lesson_id: str | None = None,
+    current_group_id: str | None = None,
     last_studied_at: int | None = None,
     time_delta_sec: int | float = 0,
     subject_type: str | None = None,
@@ -178,6 +183,8 @@ async def upsert_scholar_book(
 
     参数：
     - `current_chapter_id` / `current_lesson_id`：新断点，传 None 表示不更新。
+    - `current_group_id`（M3 新增，data-model §4.4）：group 级断点，传 None 表示不更新；
+      缺省时读侧回退 `current_lesson_id`。
     - `last_studied_at`：最后学习时间（毫秒）；会话结算时传 ended_at。
     - `time_delta_sec`：本次学习时长增量（秒），累加到 total_time_spent。
     - `subject_type`：学科标识（首次插入时写入；更新时不传则保留原值）。
@@ -197,6 +204,8 @@ async def upsert_scholar_book(
             changes["current_chapter_id"] = current_chapter_id
         if current_lesson_id is not None:
             changes["current_lesson_id"] = current_lesson_id
+        if current_group_id is not None:
+            changes["current_group_id"] = current_group_id
         if last_studied_at is not None:
             changes["last_studied_at"] = int(last_studied_at)
         if time_delta_sec:
@@ -235,6 +244,7 @@ async def upsert_scholar_book(
         textbook_id=textbook_id,
         current_chapter_id=current_chapter_id,
         current_lesson_id=current_lesson_id,
+        current_group_id=current_group_id,
         total_time_spent=int(time_delta_sec or 0),
         last_studied_at=last_studied_at,
         subject_type=subject_type,

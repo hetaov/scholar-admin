@@ -15,6 +15,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from services.dependencies import get_db
+from services.english import SentenceNotFoundError
+from services.english.sentence_management import ensureSentenceSemanticKey
 from services.events import end_session, record_attempt, start_session
 from services.models_learning import DEFAULT_SKILL_CODE, upsert_skill_state
 from services.models_scholar_book import touch_scholar_book, upsert_scholar_book
@@ -65,6 +67,18 @@ async def report_tracking_state(data: dict):
 
     try:
         db = get_db()
+        # M3 G1.2 + M5（service-contract §8.5 + data-model §4.15）：Lazy dedup —
+        # 惰性补齐语义键并落 sentence_semantic_key（registry 成为 canonical/duplicate
+        # 权威源，sentence_v2 字段保持同步）；skill_state 写入键零变化。
+        try:
+            semantic = await ensureSentenceSemanticKey(db, sentence_id=sentence_id)
+            logger.info(
+                f"[tracking/state] 语义键补齐 sentence_id={sentence_id}, "
+                f"canonical={semantic.get('canonical_sentence_id')}"
+            )
+        except SentenceNotFoundError as exc:
+            # 句子不在内容库（契约 §3.2 错误仅 400/500）：跳过补齐，不影响状态写入
+            logger.warning(f"[tracking/state] 跳过语义键补齐（句子不在内容库）: {exc}")
         state = await upsert_skill_state(
             db,
             scholar_id=scholar_id,

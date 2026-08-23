@@ -21,6 +21,7 @@ from services.english import (
     SentencePayloadError,
     TextbookNotFoundError,
 )
+from services.english.structure import load_lesson_entries
 
 logger = logging.getLogger("scholar-admin.english.validation")
 
@@ -88,12 +89,18 @@ def _iter_lesson_entries(textbook: dict):
         yield "", "未分章", ls
 
 
-def _build_lesson_index(textbook: dict) -> dict[str, dict]:
-    """lesson_id → {chapter_id, title} 索引（orphan/chapter_mismatch 校验用）。"""
+def _build_lesson_index(entries: list[dict]) -> dict[str, dict]:
+    """lesson_id → {chapter_id, title} 索引（orphan/chapter_mismatch 校验用）。
+
+    Args:
+        entries: load_lesson_entries 返回的课时条目列表
+        （[{"chapter_id", "chapter_title", "lesson"}, ...]，含独立集合回退形态）。
+    """
     index: dict[str, dict] = {}
-    for ch_id, _ch_title, ls in _iter_lesson_entries(textbook):
+    for e in entries:
+        ls = e["lesson"]
         index[ls.get("lesson_id") or ""] = {
-            "chapter_id": ch_id,
+            "chapter_id": e["chapter_id"],
             "title": ls.get("title") or "",
         }
     return index
@@ -142,14 +149,23 @@ async def list_english_textbook_stats(db, *, grade: str | None = None) -> dict:
             continue
         sq = await db.query(SENTENCE_V2, where={"textbook_id": tbid}, limit=5000)
         rows = sq["records"]
+        # 内嵌为空（标准管线只写计数，章节/课时在独立集合）→ 回退计数字段
+        embedded_chapters = tb.get("chapters") or []
+        embedded_lesson_count = sum(1 for _ in _iter_lesson_entries(tb))
+        if embedded_chapters or embedded_lesson_count:
+            chapter_count = len(embedded_chapters)
+            lesson_count = embedded_lesson_count
+        else:
+            chapter_count = int(tb.get("chapter_count") or 0)
+            lesson_count = int(tb.get("lesson_count") or 0)
         textbooks.append(
             {
                 "textbook_id": tbid,
                 "title": tb.get("title") or "",
                 "grade": tb.get("grade") or "",
                 "level": tb.get("level"),
-                "chapter_count": len(tb.get("chapters") or []),
-                "lesson_count": sum(1 for _ in _iter_lesson_entries(tb)),
+                "chapter_count": chapter_count,
+                "lesson_count": lesson_count,
                 "sentence_count": len(rows),
                 "duplicate_count": _duplicate_instance_count(rows),
                 "validation_status": _read_cached_status(tbid, "full", None, None),
@@ -195,24 +211,21 @@ async def get_english_chapter_tree(db, *, textbook_id: str) -> dict:
         }
 
     chapters: list[dict] = []
-    for ch in tb.get("chapters") or []:
-        chapters.append(
-            {
-                "chapter_id": ch.get("chapter_id") or "",
-                "title": ch.get("title") or "",
-                "lessons": [_lesson_entry(ls) for ls in ch.get("lessons") or []],
+    # 统一从 load_lesson_entries 取课时条目（兼容内嵌结构 + 独立集合回退）
+    entries = await load_lesson_entries(db, tb)
+    chapter_map: dict[str, dict] = {}
+    chapter_order: list[str] = []
+    for e in entries:
+        cid = e["chapter_id"]
+        if cid not in chapter_map:
+            chapter_map[cid] = {
+                "chapter_id": cid,
+                "title": e["chapter_title"],
+                "lessons": [],
             }
-        )
-    # 无章教材（textbook.lessons[] 直接挂 book 下）→ 聚合为「未分章」伪章节
-    direct_lessons = tb.get("lessons") or []
-    if direct_lessons:
-        chapters.append(
-            {
-                "chapter_id": "",
-                "title": "未分章",
-                "lessons": [_lesson_entry(ls) for ls in direct_lessons],
-            }
-        )
+            chapter_order.append(cid)
+        chapter_map[cid]["lessons"].append(_lesson_entry(e["lesson"]))
+    chapters = [chapter_map[cid] for cid in chapter_order]
 
     return {
         "textbook_id": textbook_id,
@@ -280,7 +293,8 @@ async def validate_english_sentences(
 
     # 5) 各维度校验
     issues: dict[str, list[dict]] = {t: [] for t in _DEFAULT_CHECK_TYPES}
-    lesson_index = _build_lesson_index(tb)
+    entries = await load_lesson_entries(db, tb)
+    lesson_index = _build_lesson_index(entries)
 
     # orphan_lesson：lesson_id 不在教材 lesson 集合
     if "orphan_lesson" in types:

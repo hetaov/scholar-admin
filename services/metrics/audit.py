@@ -4,7 +4,7 @@ audit_log 集合：
 - **append-only**：只插入，不可修改 / 删除；保留 ≥6 个月，到期归档
 - 字段：log_id、action、object_ref、actor、occurred_at、result、context
 
-action 枚举（以契约 DM-3 必审清单 6 分组为准，5+3+1+3+5+3=20 类）：
+action 枚举（以契约 DM-4 必审清单 7 分组为准，5+3+1+3+5+3+3=23 类）：
 ① 既有 5 类（ADR-0011，F3 练习纸）：
   generate / share / download / return / modify
 ② F2 描述 3 类：
@@ -18,6 +18,10 @@ action 枚举（以契约 DM-3 必审清单 6 分组为准，5+3+1+3+5+3=20 类�
   import_math_nodes / manual_edit_summary
 ⑥ E 英语语句管理 3 类（E0.2 新增，SOP §4.12.10(b) 定稿）：
   create_english_sentences / edit_english_sentence / delete_english_sentence
+⑦ SG 语句组管理 3 类（M3 G0.2 新增，service-contract §8.5 定稿）：
+  create_sentence_group / edit_sentence_group / delete_sentence_group
+⑧ ED 英语批量去重 1 类（E-API-12 新增，service-contract §8.1 定稿）：
+  deduplicate_english_sentences
 """
 from __future__ import annotations
 
@@ -56,7 +60,15 @@ AUDIT_ACTION_CREATE_ENGLISH_SENTENCES = "create_english_sentences"  # E1.1 批�
 AUDIT_ACTION_EDIT_ENGLISH_SENTENCE = "edit_english_sentence"        # E1.1 编辑英语语句
 AUDIT_ACTION_DELETE_ENGLISH_SENTENCE = "delete_english_sentence"    # E1.1 删除语句 + 级联清理
 
-# 必审动作全集（DM-3 定稿：5+3+1+3+5+3 = 20 类）
+# —— M3 G0.2 新增：SG 语句组管理 3 类（契约 DM-4 必审清单第 ⑦ 组，20 → 23 类） —— #
+AUDIT_ACTION_CREATE_SENTENCE_GROUP = "create_sentence_group"  # E-API-9 管理端建组
+AUDIT_ACTION_EDIT_SENTENCE_GROUP = "edit_sentence_group"      # E-API-10 管理端改组
+AUDIT_ACTION_DELETE_SENTENCE_GROUP = "delete_sentence_group"  # E-API-11 管理端删组
+
+# —— E-API-12 新增：ED 英语批量去重 1 类（契约 DM-4 必审清单第 ⑧ 组，23 → 24 类） —— #
+AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES = "deduplicate_english_sentences"  # E-API-12 批量去重
+
+# 必审动作全集（DM-4 定稿：5+3+1+3+5+3+3+1 = 24 类）
 # — 命名约定：双常量等价，REQUIRED_AUDIT_ACTIONS 为契约对外命名；MUST_AUDIT_ACTIONS 为历史命名（向后兼容）
 MUST_AUDIT_ACTIONS = frozenset(
     {
@@ -86,6 +98,12 @@ MUST_AUDIT_ACTIONS = frozenset(
         AUDIT_ACTION_CREATE_ENGLISH_SENTENCES,
         AUDIT_ACTION_EDIT_ENGLISH_SENTENCE,
         AUDIT_ACTION_DELETE_ENGLISH_SENTENCE,
+        # ⑦ SG 语句组管理（M3 G0.2 新增，3 类）
+        AUDIT_ACTION_CREATE_SENTENCE_GROUP,
+        AUDIT_ACTION_EDIT_SENTENCE_GROUP,
+        AUDIT_ACTION_DELETE_SENTENCE_GROUP,
+        # ⑧ ED 英语批量去重（E-API-12 新增，1 类）
+        AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES,
     }
 )
 REQUIRED_AUDIT_ACTIONS = MUST_AUDIT_ACTIONS  # 契约命名别名（DM-4 REQUIRED_AUDIT_ACTIONS）

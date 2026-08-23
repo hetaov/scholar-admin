@@ -1,32 +1,32 @@
-"""E0.2 单元测试 — audit 必审动作 17 → 20 类扩展（SOP DM-3）
+"""M3 G0.2 单元测试 — audit 必审动作 20 → 23 类扩展（SOP ⑤ G0.2 任务卡）
 
-覆盖 SOP E0.2 验收标准 + 契约 §4.12.10(b) 必审清单第 ⑥ 组：
+覆盖 M3 验收标准 + service-contract §8.5 必审清单第 ⑦ 组：
 
-  - create_english_sentences / edit_english_sentence / delete_english_sentence
+  - create_sentence_group / edit_sentence_group / delete_sentence_group
 
 核心断言：
-  1. REQUIRED_AUDIT_ACTIONS 可 import， len == 20
+  1. REQUIRED_AUDIT_ACTIONS 可 import， len == 23
   2. MUST_AUDIT_ACTIONS 别名仍可 import（向后兼容），且 == REQUIRED_AUDIT_ACTIONS
-  3. 3 个新增 AUDIT_ACTION_* 常量存在，取值与契约 DM-3 分组 ⑥ 完全一致
+  3. 3 个新增 AUDIT_ACTION_* 常量存在，取值与契约 ⑦ 组完全一致
   4. 3 个新增值均在必审集合中
-  5. 原 17 类必审动作仍在集合中（零破坏）
-  6. 原 17 个 AUDIT_ACTION_* 常量值完全不变（零破坏）
+  5. 原 20 类必审动作仍在集合中（零破坏）
+  6. 原 20 个 AUDIT_ACTION_* 常量值完全不变（零破坏）
 """
 from __future__ import annotations
 
 
 # ===========================================================================
-# 1. REQUIRED_AUDIT_ACTIONS 别名 + 长度（契约 DM-3 计数：20 类）
+# 1. REQUIRED_AUDIT_ACTIONS 别名 + 长度（契约 DM-4 计数：23 类）
 # ===========================================================================
 
 
 class TestRequiredAuditActionsLength:
-    def test_required_audit_actions_import_and_len_20(self):
-        """契约 DM-3：17 → 20 类基线已达成（>=20；M3 后续扩展至 23，由 test_audit_m3_actions 精确断言）。"""
+    def test_required_audit_actions_import_and_len_23(self):
+        """契约 DM-4：20 → 23 类，必审动作全集大小 = 23。"""
         from services.audit import REQUIRED_AUDIT_ACTIONS
 
         assert REQUIRED_AUDIT_ACTIONS is not None
-        assert len(REQUIRED_AUDIT_ACTIONS) >= 20
+        assert len(REQUIRED_AUDIT_ACTIONS) == 23
 
     def test_must_audit_actions_alias_still_works_and_equals_required(self):
         """向后兼容：原有 MUST_AUDIT_ACTIONS 常量仍可 import（零破坏既有调用处），且内容等价于 REQUIRED。"""
@@ -37,19 +37,19 @@ class TestRequiredAuditActionsLength:
 
 
 # ===========================================================================
-# 2. 3 个新增 ACTION 常量 — 名称 / 取值（契约 §4.12.10(b) 第 ⑥ 组）
+# 2. 3 个新增 ACTION 常量 — 名称 / 取值（service-contract §8.5 第 ⑦ 组）
 # ===========================================================================
 
 
-class TestNewActionConstantsForEnglishManagement:
+class TestNewActionConstantsForSentenceGroup:
     EXPECTED = {
-        "AUDIT_ACTION_CREATE_ENGLISH_SENTENCES": "create_english_sentences",
-        "AUDIT_ACTION_EDIT_ENGLISH_SENTENCE": "edit_english_sentence",
-        "AUDIT_ACTION_DELETE_ENGLISH_SENTENCE": "delete_english_sentence",
+        "AUDIT_ACTION_CREATE_SENTENCE_GROUP": "create_sentence_group",
+        "AUDIT_ACTION_EDIT_SENTENCE_GROUP": "edit_sentence_group",
+        "AUDIT_ACTION_DELETE_SENTENCE_GROUP": "delete_sentence_group",
     }
 
     def test_all_3_constants_are_importable_with_correct_values(self):
-        """3 个常量都存在且值严格等于契约分组 ⑥ 的命名：snake_case 动词_对象，前缀对齐既有 ACTION_* 命名。"""
+        """3 个常量都存在且值严格等于契约分组 ⑦ 的命名：snake_case 动词_对象，前缀对齐既有 ACTION_* 命名。"""
         import services.audit as audit
 
         for const_name, expected_value in self.EXPECTED.items():
@@ -71,12 +71,12 @@ class TestNewActionConstantsForEnglishManagement:
 
 
 # ===========================================================================
-# 3. 向后兼容：原有 17 类动作 + 17 个常量值完全不变（零破坏）
+# 3. 向后兼容：原有 20 类动作 + 20 个常量值完全不变（零破坏）
 # ===========================================================================
 
 
 class TestExistingActionsNotBroken:
-    # 原有 17 个动作全集：ADR-0011 5 + F2 3 + F1 1 + F4 3 + G0.2 5
+    # 原有 20 个动作全集：ADR-0011 5 + F2 3 + F1 1 + F4 3 + G0.2 5 + E0.2 3
     EXISTING_VALUES = {
         # ① ADR-0011 原生 5 类（F3 练习纸）
         "generate",
@@ -100,8 +100,12 @@ class TestExistingActionsNotBroken:
         "delete_math_textbook",
         "import_math_nodes",
         "manual_edit_summary",
+        # ⑥ E 英语语句管理 3 类（E0.2 新增）
+        "create_english_sentences",
+        "edit_english_sentence",
+        "delete_english_sentence",
     }
-    # 原有 17 个 AUDIT_ACTION_* 常量名 → 值
+    # 原有 20 个 AUDIT_ACTION_* 常量名 → 值
     EXISTING_CONST_MAP = {
         "AUDIT_ACTION_GENERATE": "generate",
         "AUDIT_ACTION_SHARE": "share",
@@ -120,10 +124,13 @@ class TestExistingActionsNotBroken:
         "AUDIT_ACTION_DELETE_MATH_TEXTBOOK": "delete_math_textbook",
         "AUDIT_ACTION_IMPORT_MATH_NODES": "import_math_nodes",
         "AUDIT_ACTION_MANUAL_EDIT_SUMMARY": "manual_edit_summary",
+        "AUDIT_ACTION_CREATE_ENGLISH_SENTENCES": "create_english_sentences",
+        "AUDIT_ACTION_EDIT_ENGLISH_SENTENCE": "edit_english_sentence",
+        "AUDIT_ACTION_DELETE_ENGLISH_SENTENCE": "delete_english_sentence",
     }
 
-    def test_existing_17_values_are_all_still_in_required(self):
-        """新增 3 类不应替换或移除原有 17 类 — 必审全集仍包含所有历史值。"""
+    def test_existing_20_values_are_all_still_in_required(self):
+        """新增 3 类不应替换或移除原有 20 类 — 必审全集仍包含所有历史值。"""
         from services.audit import REQUIRED_AUDIT_ACTIONS
 
         missing = self.EXISTING_VALUES - set(REQUIRED_AUDIT_ACTIONS)
@@ -131,8 +138,8 @@ class TestExistingActionsNotBroken:
             f"原有必审动作丢失！未出现在 REQUIRED_AUDIT_ACTIONS 中：{missing}"
         )
 
-    def test_existing_17_constants_values_unchanged(self):
-        """原有 17 个常量（AUDIT_ACTION_*）的值严格不变，避免破坏 audit.write_audit 已有调用。"""
+    def test_existing_20_constants_values_unchanged(self):
+        """原有 20 个常量（AUDIT_ACTION_*）的值严格不变，避免破坏 audit.write_audit 已有调用。"""
         import services.audit as audit
 
         for const_name, expected_value in self.EXISTING_CONST_MAP.items():

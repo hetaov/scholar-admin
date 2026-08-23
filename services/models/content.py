@@ -22,6 +22,8 @@ TEXTBOOK_V2 = "textbook_v2"
 CHAPTER = "chapter"
 LESSON = "lesson"
 SENTENCE_V2 = "sentence_v2"
+SENTENCE_GROUP = "sentence_group"                # M3 语句组（data-model-contract §4.14）
+SENTENCE_SEMANTIC_KEY = "sentence_semantic_key"  # M5 语义去重表（data-model-contract §4.15，M3 不落库）
 
 DEFAULT_UNITS_PER_CHAPTER = 8
 
@@ -104,21 +106,228 @@ def compute_text_hash(text: str | None) -> str:
 
 
 def normalize_sentence_doc(doc: dict) -> dict:
-    """读取 sentence_v2 记录后的 getter 兼容层（契约 §4.3 DM-1）。
+    """读取 sentence_v2 记录后的 getter 兼容层（契约 §4.3 DM-1 + M3 DM-G3）。
 
-    **存量记录无 `text_hash` 字段时，读侧惰性计算注入（不写回 DB，零迁移）**。
+    **存量记录无 `text_hash` 字段时，读侧惰性计算注入（不写回 DB，零迁移）**；
+    **M3 分组/去重 4 字段缺失时注入 None（= 未分组 / 未参与去重，读兼容层统一消费）**。
 
     实现原则（避免副作用，与 normalize_textbook_doc 一致）：
     - 返回新字典，不修改传入 doc；
     - `text_hash` 缺失 / None / 空串 → 按 `text` 惰性计算注入；
     - `text_hash` 有值（非空）→ 保留原值不覆盖；
-    - `text` 缺失或空串 → `text_hash = ''`（不计算 hash）。
+    - `text` 缺失或空串 → `text_hash = ''`（不计算 hash）；
+    - `group_id` / `semantic_key` / `canonical_sentence_id` / `role_in_group`
+      缺失 → 注入 None（M3 新增可选字段，缺省 null = 未分组 / 未参与去重）。
     """
     out = dict(doc)  # shallow copy 够了，调用方不依赖引用
     th = out.get("text_hash")
     if not th:  # None / "" / missing → 惰性计算
         out["text_hash"] = compute_text_hash(out.get("text", "") or "")
+    # M3 分组/去重字段（缺省 None，零迁移；有值保留原值不覆盖）
+    out.setdefault("group_id", None)
+    out.setdefault("semantic_key", None)
+    out.setdefault("canonical_sentence_id", None)
+    out.setdefault("role_in_group", None)
     return out
+
+
+# ---------------------------------------------------------------------------
+# M3 G0.1 — sentence_group 集合模型（data-model-contract §4.14，2026-08-23 SOP ④ DM-G1）
+# ---------------------------------------------------------------------------
+
+
+# 组类型枚举（契约 §4.14：dialogue_pair / grammar_family / vocab_family / stand_alone）
+VALID_SENTENCE_GROUP_TYPES = frozenset({
+    "dialogue_pair",
+    "grammar_family",
+    "vocab_family",
+    "stand_alone",
+})
+# 句内角色枚举（契约 §4.3：role_in_group）
+VALID_SENTENCE_ROLE_IN_GROUP = frozenset({
+    "question",
+    "answer_A",
+    "answer_B",
+    "statement",
+})
+
+
+def build_sentence_group_id(
+    textbook_id: str,
+    lesson_id: str,
+    now: int | None = None,
+) -> str:
+    """sentence_group 主键生成（契约 §4.14）：`grp_{textbook_id}_{lesson_id}_{short_hash}`。
+
+    short_hash = sha256(`{textbook_id}|{lesson_id}|{now}`)[:8]，
+    同 lesson 同毫秒窗口内唯一（服务层建组循环可用 `now + i` 规避）。
+    """
+    now = int(now or time.time())
+    seed = f"{textbook_id}|{lesson_id}|{now}"
+    short = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+    return f"grp_{textbook_id}_{lesson_id}_{short}"
+
+
+def build_sentence_group_doc(
+    *,
+    group_id: str,
+    textbook_id: str,
+    lesson_id: str,
+    title: str,
+    type_: str,
+    sentence_ids: list[str],
+    order_in_lesson: int,
+    chapter_id: str | None = None,
+    difficulty: int | None = None,
+    focus_grammar: str | None = None,
+    focus_vocab: list[str] | None = None,
+    build_version: str | None = None,
+    now: int | None = None,
+) -> dict:
+    """构建 sentence_group 文档（纯函数，字段与契约 §4.14 表逐字对齐）。
+
+    `type` 非法值 → 抛 `ValueError`（写侧合法性由服务层前置把关，分组类型
+    决定学习编排分支，非法值直接抛错比静默兜底更安全）。
+
+    Returns:
+        dict：`_id` + `group_id` + textbook/chapter/lesson 归属 + title +
+        type + 有序 sentence_ids + order_in_lesson + 可选元数据 + 时间戳。
+    """
+    if type_ not in VALID_SENTENCE_GROUP_TYPES:
+        raise ValueError(
+            f"INVALID_SENTENCE_GROUP_TYPE: type={type_!r} "
+            f"仅限 {sorted(VALID_SENTENCE_GROUP_TYPES)}"
+        )
+    now = int(now or time.time())
+    return {
+        "_id": group_id,
+        "group_id": group_id,
+        "textbook_id": textbook_id,
+        "chapter_id": chapter_id or "",
+        "lesson_id": lesson_id,
+        "title": title,
+        "type": type_,
+        "sentence_ids": list(sentence_ids),
+        "order_in_lesson": int(order_in_lesson),
+        "difficulty": difficulty,
+        "focus_grammar": focus_grammar,
+        "focus_vocab": list(focus_vocab) if focus_vocab else None,
+        "build_version": build_version,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def normalize_sentence_group_doc(doc: dict) -> dict:
+    """读取 sentence_group 记录后的 getter 兼容层（契约 §4.14）。
+
+    可选字段缺失 → 注入 None（difficulty / focus_grammar / focus_vocab /
+    build_version），保证输出结构完整；必填字段缺失时保持原样（由服务层校验）。
+    """
+    out = dict(doc)  # shallow copy 够了，调用方不依赖引用
+    for field in ("difficulty", "focus_grammar", "focus_vocab", "build_version"):
+        out.setdefault(field, None)
+    return out
+
+
+async def get_sentence_group(db, group_id: str) -> dict | None:
+    """按主键查 sentence_group，不存在返回 None（读侧经 normalize getter）。"""
+    result = await db.query(collection=SENTENCE_GROUP, where={"_id": group_id}, limit=1)
+    records = result.get("records", [])
+    return normalize_sentence_group_doc(records[0]) if records else None
+
+
+async def get_sentence_groups_by_lesson(
+    db,
+    lesson_id: str,
+    limit: int = 200,
+) -> list[dict]:
+    """按课查全部组（按 order_in_lesson 升序，读侧经 normalize getter）。
+
+    组视图接口（G1.1）与管理端分组列表（E-API-8）复用。
+    """
+    result = await db.query(
+        collection=SENTENCE_GROUP,
+        where={"lesson_id": lesson_id},
+        order=[{"field": "order_in_lesson", "direction": "asc"}],
+        limit=limit,
+    )
+    return [normalize_sentence_group_doc(r) for r in result.get("records", [])]
+
+
+# ---------------------------------------------------------------------------
+# M5 — sentence_semantic_key 集合模型（data-model-contract §4.15，2026-08-23 SOP ④ DM-G2）
+# ---------------------------------------------------------------------------
+
+
+def build_sentence_semantic_key_doc(
+    *,
+    semantic_key: str,
+    canonical_sentence_id: str,
+    duplicate_sentence_ids: list[str] | None = None,
+    text_hash: str | None = None,
+    similarity_score: float | None = None,
+    build_version: str | None = None,
+    now: int | None = None,
+) -> dict:
+    """构建 sentence_semantic_key 文档（纯函数，字段与契约 §4.15 表逐字对齐）。
+
+    `_id` = `semantic_key`（M3 L1 = `sha256(normalize(canonical text))`，天然唯一）；
+    `text_hash` 缺省 = `semantic_key`（L1 同源；L2 embedding 聚类时两者分离）。
+    `similarity_score` / `build_version` 仅 L2/M4 时写入（缺省 None）。
+    """
+    now = int(now or time.time())
+    return {
+        "_id": semantic_key,
+        "semantic_key": semantic_key,
+        "canonical_sentence_id": canonical_sentence_id,
+        "duplicate_sentence_ids": list(duplicate_sentence_ids or []),
+        "text_hash": text_hash or semantic_key,
+        "similarity_score": similarity_score,
+        "build_version": build_version,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def normalize_sentence_semantic_key_doc(doc: dict) -> dict:
+    """读取 sentence_semantic_key 记录后的 getter 兼容层（契约 §4.15）。
+
+    可选字段缺失 → 注入缺省（duplicate_sentence_ids=[] / text_hash=semantic_key /
+    similarity_score=None / build_version=None），保证输出结构完整。
+    """
+    out = dict(doc)  # shallow copy 够了，调用方不依赖引用
+    out.setdefault("duplicate_sentence_ids", [])
+    if not out.get("text_hash"):
+        out["text_hash"] = out.get("semantic_key")
+    out.setdefault("similarity_score", None)
+    out.setdefault("build_version", None)
+    return out
+
+
+async def get_sentence_semantic_key(db, semantic_key: str) -> dict | None:
+    """按主键（= semantic_key）查语义去重簇，不存在返回 None（读侧经 normalize getter）。
+
+    索引 `text_hash`（唯一）用于 L1 命中；`_id` 即 semantic_key，等值查询天然唯一。
+    """
+    if not semantic_key:
+        return None
+    result = await db.query(
+        collection=SENTENCE_SEMANTIC_KEY, where={"_id": semantic_key}, limit=1
+    )
+    records = result.get("records", [])
+    return normalize_sentence_semantic_key_doc(records[0]) if records else None
+
+
+async def get_sentence_semantic_key_by_text_hash(db, text_hash: str) -> dict | None:
+    """按 text_hash 唯一索引查语义去重簇（M3 L1 命中用），不存在返回 None。"""
+    if not text_hash:
+        return None
+    result = await db.query(
+        collection=SENTENCE_SEMANTIC_KEY, where={"text_hash": text_hash}, limit=1
+    )
+    records = result.get("records", [])
+    return normalize_sentence_semantic_key_doc(records[0]) if records else None
 
 
 # ---------------------------------------------------------------------------

@@ -64,6 +64,22 @@ class TestBuildDoc:
         assert doc["current_chapter_id"] is None
         assert doc["current_lesson_id"] is None
 
+    def test_current_group_id_field_present_when_provided(self):
+        """M3 断点续学到 group 级（data-model §4.4）：显式传 current_group_id 时落库字段。"""
+        doc = build_scholar_book_doc(
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_lesson_id="l1",
+            current_group_id="grp_tb_1_l1_abcd1234",
+            now=2000,
+        )
+        assert doc["current_group_id"] == "grp_tb_1_l1_abcd1234"
+
+    def test_current_group_id_defaults_none(self):
+        """缺省 current_group_id=None（未分组场景，读侧回退 current_lesson_id）。"""
+        doc = build_scholar_book_doc(scholar_id="s1", textbook_id="tb_1", now=3000)
+        assert doc["current_group_id"] is None
+
 
 class TestUpsert:
     @pytest.mark.asyncio
@@ -138,6 +154,66 @@ class TestUpsert:
             fake_db, scholar_id="s2", textbook_id="tb_1", now=1000
         )
         assert len(fake_db.all(SCHOLAR_BOOK)) == 2
+
+
+class TestUpsertCurrentGroup:
+    """M3 断点续学 group 级（data-model §4.4）：current_group_id 的 INSERT/UPDATE 语义。"""
+
+    @pytest.mark.asyncio
+    async def test_first_insert_persists_current_group_id(self, fake_db):
+        doc = await upsert_scholar_book(
+            fake_db,
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_lesson_id="l1",
+            current_group_id="grp_1",
+            now=1000,
+        )
+        assert doc["current_group_id"] == "grp_1"
+        assert fake_db.all(SCHOLAR_BOOK)[0]["current_group_id"] == "grp_1"
+
+    @pytest.mark.asyncio
+    async def test_update_refreshes_current_group_id(self, fake_db):
+        await upsert_scholar_book(
+            fake_db,
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_lesson_id="l1",
+            current_group_id="grp_1",
+            now=1000,
+        )
+        await upsert_scholar_book(
+            fake_db,
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_lesson_id="l1",
+            current_group_id="grp_2",
+            now=2000,
+        )
+        records = fake_db.all(SCHOLAR_BOOK)
+        assert len(records) == 1  # 不产生第二条记录
+        assert records[0]["current_group_id"] == "grp_2"
+
+    @pytest.mark.asyncio
+    async def test_update_without_group_keeps_existing(self, fake_db):
+        """更新时不传 current_group_id → 保留原值（None 不覆盖已有分组）。"""
+        await upsert_scholar_book(
+            fake_db,
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_group_id="grp_1",
+            now=1000,
+        )
+        await upsert_scholar_book(
+            fake_db,
+            scholar_id="s1",
+            textbook_id="tb_1",
+            current_lesson_id="l2",
+            now=2000,
+        )
+        records = fake_db.all(SCHOLAR_BOOK)
+        assert len(records) == 1
+        assert records[0]["current_group_id"] == "grp_1"
 
 
 class TestListAndTouch:

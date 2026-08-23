@@ -5,6 +5,7 @@
 - PUT /scholar/{scholar_id}/books/{textbook_id}/position — 更新断点:
   首次加入 / 断点更新 / 重复加入幂等(同一 学者×教材 仅一条)
 - 断点更新后重新获取列表能取回 current_lesson_id(验收标准)
+- M3 G1.3 断点续学到 group 级:current_group_id 路由透传(新增/更新/列表回读/未分组 null)
 - 会话结算回写:end 后 scholar_book 的 last_studied_at 与 total_time_spent 更新
 - 参数校验(缺参 / 至少一个字段)
 """
@@ -74,6 +75,72 @@ class TestPutPosition:
         resp = client.put("/scholar/s1/books/tb_1/position", json={})
         assert resp.status_code == 400
         assert "current_chapter_id" in resp.json()["detail"]
+
+
+class TestPutPositionCurrentGroup:
+    """M3 G1.3 断点续学到 group 级（data-model §4.4）：current_group_id 路由透传。"""
+
+    def test_first_join_with_group_persists(self, make_client, fake_db):
+        client = make_client(tracking_router)
+        resp = client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_lesson_id": "l1", "current_group_id": "grp_tb_1_l1_abcd1234"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["current_lesson_id"] == "l1"
+        assert data["current_group_id"] == "grp_tb_1_l1_abcd1234"
+        stored = fake_db.all(SCHOLAR_BOOK)[0]
+        assert stored["current_group_id"] == "grp_tb_1_l1_abcd1234"
+
+    def test_update_refreshes_group(self, make_client, fake_db):
+        client = make_client(tracking_router)
+        client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_lesson_id": "l1", "current_group_id": "grp_1"},
+        )
+        resp = client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_group_id": "grp_2"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["current_group_id"] == "grp_2"
+        assert resp.json()["data"]["current_lesson_id"] == "l1"  # 未传不覆盖
+        assert len(fake_db.all(SCHOLAR_BOOK)) == 1
+
+    def test_only_current_group_id_allowed(self, make_client, fake_db):
+        client = make_client(tracking_router)
+        resp = client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_group_id": "grp_only"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["current_group_id"] == "grp_only"
+
+    def test_group_returned_in_books_list(self, make_client, fake_db):
+        """验收：断点更新后重新获取列表能取回 current_group_id。"""
+        client = make_client(tracking_router)
+        client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_chapter_id": "c1", "current_lesson_id": "l1",
+                  "current_group_id": "grp_l1_g1"},
+        )
+        resp = client.get("/scholar/s1/books")
+        book = resp.json()["data"]["books"][0]
+        assert book["current_chapter_id"] == "c1"
+        assert book["current_lesson_id"] == "l1"
+        assert book["current_group_id"] == "grp_l1_g1"
+
+    def test_group_null_without_grouping(self, make_client, fake_db):
+        """未分组场景：books 列表 current_group_id 为 null（读兼容，不报错）。"""
+        client = make_client(tracking_router)
+        client.put(
+            "/scholar/s1/books/tb_1/position",
+            json={"current_chapter_id": "c1", "current_lesson_id": "l1"},
+        )
+        resp = client.get("/scholar/s1/books")
+        book = resp.json()["data"]["books"][0]
+        assert book["current_group_id"] is None
 
 
 class TestGetBooks:

@@ -11,6 +11,8 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 
 from services.dependencies import get_db
+from services.english import LessonNotFoundError
+from services.english.group_view import getLessonSentenceGroups
 from services.events import STUDY_ATTEMPT
 from services.models_learning import (
     SKILL_STATE,
@@ -27,6 +29,7 @@ from services.models_content import (
     get_sentences_by_ids,
     get_sentences_by_lesson,
     get_sentences_by_lesson_ids,
+    get_sentence_groups_by_lesson,
     query_all_pages,
 )
 from services.models_scholar_book import (
@@ -255,6 +258,7 @@ async def get_scholar_books(
             "title": "教材名称",
             "current_chapter_id": "...",
             "current_lesson_id": "...",
+            "current_group_id": "...",   // M3 G1.3：group 级断点（未分组时 null）
             "last_studied_at": 123,
             "total_time_spent": 60,
             "status": "learning",
@@ -362,9 +366,10 @@ async def get_scholar_books(
                 {
                     "textbook_id": textbook_id,
                     "title": titles.get(textbook_id),
-                    "current_chapter_id": book.get("current_chapter_id"),
-                    "current_lesson_id": book.get("current_lesson_id"),
-                    "last_studied_at": book.get("last_studied_at"),
+            "current_chapter_id": book.get("current_chapter_id"),
+            "current_lesson_id": book.get("current_lesson_id"),
+            "current_group_id": book.get("current_group_id"),
+            "last_studied_at": book.get("last_studied_at"),
                     "total_time_spent": book.get("total_time_spent"),
                     "status": book.get("status"),
                     "subject_type": book.get("subject_type"),
@@ -638,6 +643,13 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
         sentences = await get_sentences_by_lesson(db, lesson_id)
         sentence_ids = [s.get("sentence_id") for s in sentences if s.get("sentence_id")]
 
+        # 2.1 M3 G1.1：组元数据（group_id → {title, type}，供 sentences[] 追加 5 可选字段）
+        group_meta = {
+            g.get("group_id"): g
+            for g in await get_sentence_groups_by_lesson(db, lesson_id)
+            if g.get("group_id")
+        }
+
         # 3. 该课句子的 skill_state：按 sentence_id $in 分批查询（每批 200），
         #    仅拉取必要数据，替代原「该学者全部状态」全量分页拉取，
         #    查询次数与本课句子数挂钩、与学者总学习量解耦
@@ -682,6 +694,10 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
             }
             if picked and picked.get("status") in (STATUS_LEARNED, STATUS_MASTERED):
                 learned += 1
+            # M3 G1.1：5 可选字段（缺省 null，纯新增无破坏；is_canonical = 无 canonical 或自身）
+            gid = s.get("group_id")
+            gmeta = group_meta.get(gid) if gid else None
+            csid = s.get("canonical_sentence_id")
             sentence_list.append({
                 "sentence_id": sid,
                 "content": s.get("text", ""),
@@ -691,6 +707,11 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
                 "weakest_skill": min(skills, key=skills.get) if skills else None,
                 "review_count": int(picked.get("attempt_count") or 0) if picked else 0,
                 "next_review_at": _to_iso(picked.get("next_review_at")) if picked else None,
+                "group_id": gid,
+                "group_title": (gmeta or {}).get("title") if gid else None,
+                "group_type": (gmeta or {}).get("type") if gid else None,
+                "is_canonical": (not csid or csid == sid) if gid else None,
+                "canonical_sentence_id": csid,
             })
 
         # 5. summary：乐观聚合后的分布 + 各能力掌握度
@@ -729,6 +750,65 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
         raise HTTPException(status_code=500, detail=f"章节句子明细失败: {str(e)}")
 
 
+@router.get("/tracking/textbooks/{textbook_id}/lessons/{lesson_id}/groups")
+async def get_lesson_groups(
+    textbook_id: str,
+    lesson_id: str,
+    scholar_id: str | None = None,
+):
+    """课时分组视图（M3 G1.1）— 契约 §3.1（读兼容层）。
+
+    入参：`scholar_id`（查询参数，必填，缺失 → 400）
+    出参：
+    {
+      "success": true,
+      "data": {
+        "lesson_id": "...",
+        "lesson_title": "...",
+        "summary": {mastery, skills, learned_sentence_count,
+                    total_sentence_count, group_count},
+        "groups": [
+          {
+            "group_id": "...",
+            "group_title": "...",
+            "group_type": "dialogue_pair | ... | stand_alone",
+            "order_in_lesson": 0,
+            "sentences": [{sentence_id, content, translation, status, skills,
+                           weakest_skill, review_count, next_review_at,
+                           is_canonical, canonical_sentence_id}]
+          }
+        ]
+      }
+    }
+
+    读兼容层：lesson 下无任何 sentence_group 时逐句构造临时组
+    `legacy_{lesson_id}_{sentence_id}`（组标题 = 语句 content 前 20 字），
+    返回结构逐字一致，调用方零改动。
+    """
+    if not scholar_id:
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+    try:
+        db = get_db()
+        data = await getLessonSentenceGroups(
+            db,
+            textbook_id=textbook_id,
+            lesson_id=lesson_id,
+            scholar_id=scholar_id,
+        )
+        logger.info(
+            f"[tracking/textbooks/{textbook_id}/lessons/{lesson_id}/groups] "
+            f"scholar_id={scholar_id}, groups={len(data.get('groups', []))}"
+        )
+        return {"success": True, "data": data}
+    except LessonNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[tracking/.../lessons/.../groups] 组视图失败: {e}")
+        raise HTTPException(status_code=500, detail=f"组视图失败: {str(e)}")
+
+
 @router.put("/scholar/{scholar_id}/books/{textbook_id}/position")
 async def update_book_position(
     scholar_id: str,
@@ -741,25 +821,28 @@ async def update_book_position(
     {
       "current_chapter_id": "chapter_xxx",
       "current_lesson_id": "lesson_xxx",
+      "current_group_id": "grp_xxx",       // 可选（M3 G1.3，断点续学到 group 级）
       "last_studied_at": 1234567890,
       "subject_type": "english"  // 可选，首次加入时写入学科标识
     }
 
-    返回最新 scholar_book 文档（含 subject_type）。
+    返回最新 scholar_book 文档（含 subject_type / current_group_id）。
     """
     current_chapter_id = data.get("current_chapter_id")
     current_lesson_id = data.get("current_lesson_id")
+    current_group_id = data.get("current_group_id")
     last_studied_at = data.get("last_studied_at")
     subject_type = data.get("subject_type")
     if (
         current_chapter_id is None
         and current_lesson_id is None
+        and current_group_id is None
         and last_studied_at is None
         and subject_type is None
     ):
         raise HTTPException(
             status_code=400,
-            detail="至少提供一个字段: current_chapter_id / current_lesson_id / last_studied_at / subject_type",
+            detail="至少提供一个字段: current_chapter_id / current_lesson_id / current_group_id / last_studied_at / subject_type",
         )
     try:
         db = get_db()
@@ -769,13 +852,14 @@ async def update_book_position(
             textbook_id=textbook_id,
             current_chapter_id=current_chapter_id,
             current_lesson_id=current_lesson_id,
+            current_group_id=current_group_id,
             last_studied_at=last_studied_at,
             subject_type=subject_type,
         )
         logger.info(
             f"[scholar/{scholar_id}/books/{textbook_id}/position] "
             f"chapter={current_chapter_id}, lesson={current_lesson_id}, "
-            f"last_studied_at={last_studied_at}"
+            f"group={current_group_id}, last_studied_at={last_studied_at}"
         )
         return {"success": True, "data": book}
     except HTTPException:
