@@ -31,6 +31,7 @@ SHEET_TEMPLATE_COLLECTION = "sheet_template"       # 练习纸版式模板（F3.
 SHEET_RENDER_JOB_COLLECTION = "sheet_render_job"   # 练习纸异步渲染任务（F3.1）
 ERROR_RECORD_COLLECTION = "error_record"           # 错题错因记录（F4 写入，F3.1 消费）
 TEXTBOOK_V2 = "textbook_v2"                        # G0 多学科扩展：英语/数学/语文共用的教材集合（契约 §4.1）
+SENTENCE_V2 = "sentence_v2"                        # E0.1 句子集合（契约 §4.3 text_hash 惰性计算 getter 兼容）
 
 
 class CloudBaseNoSQLClient:
@@ -420,6 +421,22 @@ class CloudBaseNoSQLClient:
             except Exception as exc:  # pragma: no cover - 防御性日志，不应中断查询
                 logger.warning(
                     f"[db.query] step7 textbook_v2 normalize 失败，保持原记录。错误: {exc!r}",
+                    exc_info=True,
+                )
+
+        # 2026-08-22 SOP E0.1：GETTER 兼容层（sentence_v2 集合，不触网不写回 DB）
+        # 存量记录无 text_hash → 按 text 惰性计算 sha256 注入，见 data-model-contract §4.3 DM-1。
+        if collection == SENTENCE_V2:
+            try:
+                from services.models_content import normalize_sentence_doc
+                before_count = len(records)
+                records = [normalize_sentence_doc(r) for r in records]
+                logger.debug(
+                    f"[db.query] step8 sentence_v2 getter 兼容 text_hash 惰性注入: records={before_count}"
+                )
+            except Exception as exc:  # pragma: no cover - 防御性日志，不应中断查询
+                logger.warning(
+                    f"[db.query] step8 sentence_v2 normalize 失败，保持原记录。错误: {exc!r}",
                     exc_info=True,
                 )
 

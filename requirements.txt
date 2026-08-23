@@ -18,6 +18,9 @@ tencentcloud-sdk-python-ocr>=3.1.101
 # 唯一第三方依赖：websocket-client（readme 建议 0.48，实测后锁版本）
 websocket-client>=0.48
 
+# E1.2 英语语句校验内存缓存（services/english/validation.py TTLCache，TTL 1h）
+cachetools>=5.0.0
+
 # F3.2 A4 练习纸渲染（ADR-0010：HTML/CSS → PDF+PNG）
 # WeasyPrint 纯 Python HTML→PDF 引擎；Pillow 用于 PDF→PNG 截图
 weasyprint>=60.0

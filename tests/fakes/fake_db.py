@@ -145,6 +145,15 @@ class FakeDB:
                 page = [normalize_textbook_doc(r) for r in page]
             except Exception:  # pragma: no cover - 防御性
                 pass
+        # 2026-08-22 SOP E0.1：与真实 database.py 同步的 GETTER 兼容层
+        # 对 sentence_v2 集合的返回记录惰性注入 text_hash（存量兼容），
+        # 保证 integration 测试 GET /english/sentences 行为与生产完全一致。
+        if collection == "sentence_v2":
+            try:
+                from services.models_content import normalize_sentence_doc
+                page = [normalize_sentence_doc(r) for r in page]
+            except Exception:  # pragma: no cover - 防御性
+                pass
         return {"records": page, "total": total, "offset": offset, "limit": limit}
 
     # ---------------- 写操作 ----------------

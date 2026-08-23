@@ -4,7 +4,7 @@ audit_log 集合：
 - **append-only**：只插入，不可修改 / 删除；保留 ≥6 个月，到期归档
 - 字段：log_id、action、object_ref、actor、occurred_at、result、context
 
-action 枚举（以契约 DM-4 必审清单 5 分组为准，5+7+5=17 类）：
+action 枚举（以契约 DM-3 必审清单 6 分组为准，5+3+1+3+5+3=20 类）：
 ① 既有 5 类（ADR-0011，F3 练习纸）：
   generate / share / download / return / modify
 ② F2 描述 3 类：
@@ -16,6 +16,8 @@ action 枚举（以契约 DM-4 必审清单 5 分组为准，5+7+5=17 类）：
 ⑤ G 管理端 5 类（G0.2 新增，SOP §4.12.10(b) 定稿）：
   create_math_textbook / update_math_textbook / delete_math_textbook
   import_math_nodes / manual_edit_summary
+⑥ E 英语语句管理 3 类（E0.2 新增，SOP §4.12.10(b) 定稿）：
+  create_english_sentences / edit_english_sentence / delete_english_sentence
 """
 from __future__ import annotations
 
@@ -49,7 +51,12 @@ AUDIT_ACTION_DELETE_MATH_TEXTBOOK = "delete_math_textbook"    # G1.3 数学生�
 AUDIT_ACTION_IMPORT_MATH_NODES = "import_math_nodes"          # G2 知识点/目录导入生效
 AUDIT_ACTION_MANUAL_EDIT_SUMMARY = "manual_edit_summary"      # G5.3/G5.6 人工修正总结结果
 
-# 必审动作全集（DM-4 定稿：5+7+5 = 17 类）
+# —— E0.2 新增：E 英语语句管理 3 类（契约 DM-3 必审清单第 ⑥ 组） —— #
+AUDIT_ACTION_CREATE_ENGLISH_SENTENCES = "create_english_sentences"  # E1.1 批量新增英语语句
+AUDIT_ACTION_EDIT_ENGLISH_SENTENCE = "edit_english_sentence"        # E1.1 编辑英语语句
+AUDIT_ACTION_DELETE_ENGLISH_SENTENCE = "delete_english_sentence"    # E1.1 删除语句 + 级联清理
+
+# 必审动作全集（DM-3 定稿：5+3+1+3+5+3 = 20 类）
 # — 命名约定：双常量等价，REQUIRED_AUDIT_ACTIONS 为契约对外命名；MUST_AUDIT_ACTIONS 为历史命名（向后兼容）
 MUST_AUDIT_ACTIONS = frozenset(
     {
@@ -75,6 +82,10 @@ MUST_AUDIT_ACTIONS = frozenset(
         AUDIT_ACTION_DELETE_MATH_TEXTBOOK,
         AUDIT_ACTION_IMPORT_MATH_NODES,
         AUDIT_ACTION_MANUAL_EDIT_SUMMARY,
+        # ⑥ E 英语语句管理（E0.2 新增，3 类）
+        AUDIT_ACTION_CREATE_ENGLISH_SENTENCES,
+        AUDIT_ACTION_EDIT_ENGLISH_SENTENCE,
+        AUDIT_ACTION_DELETE_ENGLISH_SENTENCE,
     }
 )
 REQUIRED_AUDIT_ACTIONS = MUST_AUDIT_ACTIONS  # 契约命名别名（DM-4 REQUIRED_AUDIT_ACTIONS）

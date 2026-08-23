@@ -12,6 +12,7 @@ Phase 1 目标:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 import uuid
@@ -64,6 +65,59 @@ def normalize_textbook_doc(doc: dict) -> dict:
     st = out.get("subject_type")
     if not st or st not in _VALID_SUBJECT_TYPES_SET:
         out["subject_type"] = _DEFAULT_SUBJECT_TYPE
+    return out
+
+
+# ---------------------------------------------------------------------------
+# E0.1 — sentence_v2 text_hash 惰性计算（读侧 getter 兼容，2026-08-22 SOP ④ DM-1）
+# ---------------------------------------------------------------------------
+
+# 句子文本归一化时移除的中英文标点（全角 + 半角）
+_SENTENCE_PUNCT_CHARS = "！？。，、!?,."
+_SENTENCE_PUNCT_TABLE = {ord(c): None for c in _SENTENCE_PUNCT_CHARS}
+
+
+def normalize_sentence_text(text: str | None) -> str:
+    """句子文本归一化（契约 §4.3 DM-1）。
+
+    规则：strip + toLowerCase + 移除中英文标点(！？。，、!?,.) + 压缩连续空白为单空格。
+
+    用于 L1 hash 重复检测：标点/大小写/空白差异的句子归一为同一指纹。
+    """
+    if not text:
+        return ""
+    s = text.strip().lower()
+    s = s.translate(_SENTENCE_PUNCT_TABLE)
+    s = " ".join(s.split())  # 压缩连续空白（含 tab/newline）为单空格
+    return s
+
+
+def compute_text_hash(text: str | None) -> str:
+    """计算句子文本的 sha256 指纹（契约 §4.3 DM-1）。
+
+    `text_hash = sha256(normalize_sentence_text(text).encode('utf-8')).hexdigest()`（64 字符 hex）。
+    空文本 → 返回 ''（不计算 hash，避免空字符串误判重复）。
+    """
+    if not text:
+        return ""
+    return hashlib.sha256(normalize_sentence_text(text).encode("utf-8")).hexdigest()
+
+
+def normalize_sentence_doc(doc: dict) -> dict:
+    """读取 sentence_v2 记录后的 getter 兼容层（契约 §4.3 DM-1）。
+
+    **存量记录无 `text_hash` 字段时，读侧惰性计算注入（不写回 DB，零迁移）**。
+
+    实现原则（避免副作用，与 normalize_textbook_doc 一致）：
+    - 返回新字典，不修改传入 doc；
+    - `text_hash` 缺失 / None / 空串 → 按 `text` 惰性计算注入；
+    - `text_hash` 有值（非空）→ 保留原值不覆盖；
+    - `text` 缺失或空串 → `text_hash = ''`（不计算 hash）。
+    """
+    out = dict(doc)  # shallow copy 够了，调用方不依赖引用
+    th = out.get("text_hash")
+    if not th:  # None / "" / missing → 惰性计算
+        out["text_hash"] = compute_text_hash(out.get("text", "") or "")
     return out
 
 

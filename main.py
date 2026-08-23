@@ -39,6 +39,7 @@ from services.routes_training import router as training_router
 from services.routes_tts import router as tts_router
 from services.routes_planner import router as planner_router
 from services.routes_math import router as math_router
+from services.routes_english import router as english_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -95,6 +96,7 @@ _PAID_ROUTERS = [
     tts_router,
     planner_router,
     math_router,
+    english_router,
 ]
 
 for _router in _FREE_ROUTERS:
