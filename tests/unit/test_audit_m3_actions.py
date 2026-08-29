@@ -1,14 +1,15 @@
-"""M3 G0.2 单元测试 — audit 必审动作 20 → 23 类扩展（SOP ⑤ G0.2 任务卡）
+"""M3 G0.2 单元测试 — audit 必审动作 20 → 23 → 24 类扩展（SOP ⑤ G0.2 任务卡 + E-API-12）
 
-覆盖 M3 验收标准 + service-contract §8.5 必审清单第 ⑦ 组：
+覆盖 M3 验收标准 + service-contract §8.5 必审清单第 ⑦/⑧ 组：
 
-  - create_sentence_group / edit_sentence_group / delete_sentence_group
+  - create_sentence_group / edit_sentence_group / delete_sentence_group（⑦ 组）
+  - deduplicate_english_sentences（⑧ 组，E-API-12 批量去重）
 
 核心断言：
-  1. REQUIRED_AUDIT_ACTIONS 可 import， len == 23
+  1. REQUIRED_AUDIT_ACTIONS 可 import， len == 24（20 → 23 → 24 类）
   2. MUST_AUDIT_ACTIONS 别名仍可 import（向后兼容），且 == REQUIRED_AUDIT_ACTIONS
-  3. 3 个新增 AUDIT_ACTION_* 常量存在，取值与契约 ⑦ 组完全一致
-  4. 3 个新增值均在必审集合中
+  3. 新增 AUDIT_ACTION_* 常量存在，取值与契约 ⑦/⑧ 组完全一致
+  4. 新增值均在必审集合中
   5. 原 20 类必审动作仍在集合中（零破坏）
   6. 原 20 个 AUDIT_ACTION_* 常量值完全不变（零破坏）
 """
@@ -21,12 +22,12 @@ from __future__ import annotations
 
 
 class TestRequiredAuditActionsLength:
-    def test_required_audit_actions_import_and_len_23(self):
-        """契约 DM-4：20 → 23 类，必审动作全集大小 = 23。"""
+    def test_required_audit_actions_import_and_len_24(self):
+        """契约 DM-4：20 → 23 → 24 类（E-API-12 ⑧ 组），必审动作全集大小 = 24。"""
         from services.audit import REQUIRED_AUDIT_ACTIONS
 
         assert REQUIRED_AUDIT_ACTIONS is not None
-        assert len(REQUIRED_AUDIT_ACTIONS) == 23
+        assert len(REQUIRED_AUDIT_ACTIONS) == 24
 
     def test_must_audit_actions_alias_still_works_and_equals_required(self):
         """向后兼容：原有 MUST_AUDIT_ACTIONS 常量仍可 import（零破坏既有调用处），且内容等价于 REQUIRED。"""
@@ -68,6 +69,31 @@ class TestNewActionConstantsForSentenceGroup:
             assert expected_value in REQUIRED_AUDIT_ACTIONS, (
                 f"新增动作 {expected_value!r} 未加入 REQUIRED_AUDIT_ACTIONS 必审全集"
             )
+
+
+# ===========================================================================
+# 2b. 第 ⑧ 组：E-API-12 英语批量去重 1 类（契约 DM-4，23 → 24 类）
+# ===========================================================================
+
+
+class TestNewActionConstantForDedup:
+    EXPECTED = {
+        "AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES": "deduplicate_english_sentences",
+    }
+
+    def test_dedup_constant_importable_with_correct_value(self):
+        """E-API-12 常量存在且值严格等于契约：deduplicate_english_sentences。"""
+        import services.audit as audit
+
+        actual = getattr(audit, "AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES", "<NOT_FOUND>")
+        assert actual != "<NOT_FOUND>", "常量缺失：AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES"
+        assert actual == "deduplicate_english_sentences"
+
+    def test_dedup_value_is_in_required_audit_actions(self):
+        """⑧ 组值必须包含在 REQUIRED_AUDIT_ACTIONS 必审全集里。"""
+        from services.audit import REQUIRED_AUDIT_ACTIONS
+
+        assert "deduplicate_english_sentences" in REQUIRED_AUDIT_ACTIONS
 
 
 # ===========================================================================

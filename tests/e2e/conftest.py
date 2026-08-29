@@ -63,8 +63,13 @@ def no_external_calls(monkeypatch):
     覆盖：
     - services.evaluation_engine._call_judge（LLM Judge，评估回落 L1 规则）
     - services.evaluator._call_volcano（火山方舟大模型）
+    - services.translation_eval._call_translation_llm（翻译评估 v2 LLM 调用，
+      返回 None → 任务 failed + EVAL_UNAVAILABLE，不触真实火山）
     """
     monkeypatch.setattr(
         "services.evaluation_engine._call_judge", lambda *a, **k: None
     )
     monkeypatch.setattr("services.evaluator._call_volcano", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "services.translation_eval._call_translation_llm", lambda *a, **k: None
+    )

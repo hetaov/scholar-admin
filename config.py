@@ -226,3 +226,13 @@ HUNYUAN_TIMEOUT_SECONDS = int(os.environ.get("HUNYUAN_TIMEOUT_SECONDS", 15))
 HUNYUAN_EVAL_PASS_THRESHOLD = float(os.environ.get("HUNYUAN_EVAL_PASS_THRESHOLD", 0.7))
 # 评估最大重试次数（不达标时回到生成节点重试）
 HUNYUAN_EVAL_MAX_RETRIES = int(os.environ.get("HUNYUAN_EVAL_MAX_RETRIES", 2))
+
+# ==================== 翻译评估 v2 配置（ADR-0022 决策 B） ====================
+
+# LLM 单次调用超时上限（秒，默认 300s = 5 分钟，可配置）：
+# LLM 一直不返回（挂起 / 慢响应 / 网络黑洞）→ 达到上限强制取消 → 任务 failed + LLM_TIMEOUT。
+# 本次生效值随失败记录落库（translation_task.error / evaluation.llm_timeout_seconds），便于审计。
+# 注意：前端轮询上限（5s×12=60s）小于该值是有意设计（前端尽早提示，后台继续执行至超时上限）。
+TRANSLATION_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("TRANSLATION_LLM_TIMEOUT_SECONDS", 300)
+)

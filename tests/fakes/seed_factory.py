@@ -138,6 +138,37 @@ def seed_task(fake_db, **overrides) -> dict:
     return doc
 
 
+def seed_translation_task(fake_db, **overrides) -> dict:
+    """写入一条 translation_task（默认 pending），返回写入的文档。
+
+    覆盖 overrides 中的任意字段；未提供时 expires_at 按默认 TTL 24h 计算。
+    默认 ec（英译中）文字路径：original_text=英文原句，user_input=中文译文。
+    """
+    from services.translation_task import TASK_TTL_MS  # 延迟导入避免循环依赖
+
+    now = int(time.time() * 1000)
+    doc = {
+        "task_id": "tr_test",
+        "scholar_id": None,
+        "sentence_id": None,
+        "original_text": "It is a watch.",
+        "user_input": "它是一块手表。",
+        "audio_base64": None,
+        "voice_format": "mp3",
+        "input_mode": "text",
+        "mode": "ec",
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + TASK_TTL_MS,
+    }
+    doc.update(overrides)
+    fake_db.add("translation_task", doc)
+    return doc
+
+
 def speech_payload(**overrides) -> dict:
     """语音评测请求 payload，支持按字段覆盖。"""
     payload = dict(SPEECH_PAYLOAD_DEFAULTS)
