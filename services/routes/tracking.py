@@ -51,6 +51,11 @@ from services.gamification import (
     build_leaderboard,
     evaluate_badges,
 )
+from services.learning.immersive_progress import (
+    clear_progress as clear_immersive_progress,
+    get_progress as get_immersive_progress,
+    save_progress as save_immersive_progress,
+)
 
 logger = logging.getLogger("scholar-admin.routes.tracking")
 router = APIRouter(tags=["追踪 & 教材"])
@@ -1303,3 +1308,135 @@ async def get_wrong_book(
     except Exception as e:
         logger.error(f"[tracking/{scholar_id}/wrong-book] 错题本失败: {e}")
         raise HTTPException(status_code=500, detail=f"错题本失败: {str(e)}")
+
+
+# ==================== 沉浸式五步进度持久化（2026-08-29 兼容扩展） ====================
+#
+# 契约：docs_v2/03-change/proposals/2026-08-29-沉浸式五步进度持久化后端接口.md
+# 路径：/scholar/{scholar_id}/textbooks/{textbook_id}/groups/{group_id}/immersive-progress
+# - GET    读五步进度明细（无记录 → 200 + data:null，不返回 404）
+# - PUT    覆盖式 upsert（last-write-wins，页面防抖写）
+# - DELETE 幂等清除（完成 / 取消 / 失效时调用；不存在也返回成功）
+# 设计：payload 视为不透明 JSON 原样存取（仅校验 version 与主键存在性），
+#       与 skill_state（POST /tracking/state）互不混存，既有接口/集合零改动。
+
+_IMMERSIVE_PROGRESS_PATH = (
+    "/scholar/{scholar_id}/textbooks/{textbook_id}/groups/{group_id}/immersive-progress"
+)
+
+
+def _require_progress_path_params(scholar_id: str, textbook_id: str, group_id: str) -> None:
+    if not (scholar_id and textbook_id and group_id):
+        raise HTTPException(
+            status_code=400,
+            detail="缺少路径参数 scholar_id / textbook_id / group_id",
+        )
+
+
+@router.get(_IMMERSIVE_PROGRESS_PATH)
+async def get_immersive_progress_record(
+    scholar_id: str,
+    textbook_id: str,
+    group_id: str,
+):
+    """读沉浸式五步进度明细（契约 §3.2.1）。
+
+    出参 200：有记录 → `{ success, data: { _id, scholar_id, textbook_id, group_id,
+    sentence_id, version, challenge_active, saved_at, payload, created_at, updated_at } }`；
+    无记录 → `{ success, data: null }`（不返回 404，避免与「资源不存在」语义混淆）。
+    """
+    _require_progress_path_params(scholar_id, textbook_id, group_id)
+    try:
+        db = get_db()
+        doc = await get_immersive_progress(
+            db, scholar_id=scholar_id, textbook_id=textbook_id, group_id=group_id
+        )
+        logger.info(
+            f"[immersive-progress] GET → scholar_id={scholar_id}, "
+            f"textbook_id={textbook_id}, group_id={group_id}, found={doc is not None}"
+        )
+        return {"success": True, "data": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[immersive-progress] GET 失败: {e}")
+        raise HTTPException(status_code=500, detail=f"读取沉浸式进度失败: {str(e)}")
+
+
+@router.put(_IMMERSIVE_PROGRESS_PATH)
+async def put_immersive_progress_record(
+    scholar_id: str,
+    textbook_id: str,
+    group_id: str,
+    data: dict,
+):
+    """保存沉浸式五步进度明细 — 覆盖式 upsert（契约 §3.2.2）。
+
+    入参（JSON body）：`{ version(必,=1), scholar_id/textbook_id/group_id(必,与路径冗余校验),
+    sentence_id(必), challenge_active(必, bool), saved_at(必, int ms), payload(必, 不透明对象) }`。
+    出参 200：`{ success, data: {...最新文档...} }`。
+    错误：`400`（主键/version/字段非法，payload > 5KB）、`500`。
+    """
+    _require_progress_path_params(scholar_id, textbook_id, group_id)
+    try:
+        db = get_db()
+        # 主键冗余校验：body 内主键与路径一致（契约 §3.2.2）
+        for key in ("scholar_id", "textbook_id", "group_id"):
+            body_val = data.get(key)
+            path_val = {"scholar_id": scholar_id, "textbook_id": textbook_id, "group_id": group_id}[key]
+            if body_val is not None and str(body_val) != path_val:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"body.{key}（{body_val}）与路径参数（{path_val}）不一致",
+                )
+        doc = await save_immersive_progress(
+            db,
+            {
+                **data,
+                "scholar_id": scholar_id,
+                "textbook_id": textbook_id,
+                "group_id": group_id,
+            },
+        )
+        logger.info(
+            f"[immersive-progress] PUT → scholar_id={scholar_id}, "
+            f"textbook_id={textbook_id}, group_id={group_id}, "
+            f"sentence_id={doc.get('sentence_id')}"
+        )
+        return {"success": True, "data": doc}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"[immersive-progress] PUT 校验失败: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[immersive-progress] PUT 失败: {e}")
+        raise HTTPException(status_code=500, detail=f"保存沉浸式进度失败: {str(e)}")
+
+
+@router.delete(_IMMERSIVE_PROGRESS_PATH)
+async def delete_immersive_progress_record(
+    scholar_id: str,
+    textbook_id: str,
+    group_id: str,
+):
+    """清除沉浸式五步进度明细 — 幂等（契约 §3.2.3）。
+
+    出参 200：`{ success, data: { deleted: boolean } }`；不存在也返回成功（deleted=false）。
+    """
+    _require_progress_path_params(scholar_id, textbook_id, group_id)
+    try:
+        db = get_db()
+        deleted = await clear_immersive_progress(
+            db, scholar_id=scholar_id, textbook_id=textbook_id, group_id=group_id
+        )
+        logger.info(
+            f"[immersive-progress] DELETE → scholar_id={scholar_id}, "
+            f"textbook_id={textbook_id}, group_id={group_id}, deleted={deleted}"
+        )
+        return {"success": True, "data": {"deleted": deleted}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[immersive-progress] DELETE 失败: {e}")
+        raise HTTPException(status_code=500, detail=f"清除沉浸式进度失败: {str(e)}")
