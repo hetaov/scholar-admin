@@ -15,7 +15,8 @@ POST /eval/translate/v2 — 翻译评估异步提交（2026-08-29，ADR-0022 / d
 
 GET /eval/translate/v2/task/{task_id} — 查询异步翻译评估结果。
 - 状态枚举 pending/processing/success/failed；TTL 24h 过期 → 404；
-- 卡死自愈：processing 超时 → 查询定点置 failed；巡检由提交接口概率触发（1/50）。
+- 卡死自愈：processing 超时 → 查询定点置 failed；
+  全集合巡检（recover_stale_tasks + cleanup_expired）由后台定时任务执行（services/background_tasks.py）。
 
 POST /eval/speech — SOE-N 句级口语评测（F2/2.3，契约 api-contract §3.4.2）。
 - 仅评测不落 skill 状态（评审 R5：Shadowing 的 speaking 上报仍走 /tracking/state）
@@ -29,7 +30,6 @@ import asyncio
 import base64
 import binascii
 import logging
-import random
 import time
 from typing import Optional
 
@@ -44,10 +44,8 @@ from services.database import CloudBaseNoSQLClient
 from services.evaluator import evaluate
 from services.learning.translation_task import (
     STATUS_FAILED,
-    cleanup_expired,
     create_translation_task,
     get_task,
-    recover_stale_tasks,
     recover_task_if_stale,
     run_translation_task,
 )
@@ -65,8 +63,8 @@ router = APIRouter(tags=["eval"])
 
 # v2 后台任务强引用集合：防止 create_task 的协程被 GC 回收导致任务中途取消（同 dialogue.py）
 _background_tasks: set[asyncio.Task] = set()
-# 全集合 TTL/卡死巡检概率（每次提交触发一次 1/50），避免查询热路径全表扫描（同 dialogue.py）
-_CLEANUP_PROB = 0.02
+# 全集合 TTL/卡死巡检（recover_stale_tasks + cleanup_expired）已移出提交热路径，
+# 由后台定时任务执行（services/background_tasks.py，lifespan 启动，每 60s）。
 
 # F1-3 定标：16k / 单声道 / mp3|wav / ≤60s。16k mp3 60s 上限约 5MB，
 # 作为 P0 时长近似校验（精确时长解析依赖音频解码，留 F6 真机走查；SOE-N 服务端最终兜底超长）
@@ -271,14 +269,8 @@ async def eval_translate_v2(
     _background_tasks.add(bg)
     bg.add_done_callback(_background_tasks.discard)
 
-    # 4. 概率性全集合巡检（1/50）：恢复卡死任务 + 清理过期任务（移出查询热路径）
-    try:
-        if random.random() < _CLEANUP_PROB:
-            await recover_stale_tasks(db)
-            await cleanup_expired(db)
-    except Exception:  # noqa: BLE001 — 巡检失败不影响提交返回
-        logger.warning("[eval] v2 巡检异常（忽略）", exc_info=True)
-
+    # 4. 全集合巡检（恢复卡死 + 清理过期）由后台定时任务执行（services/background_tasks.py），
+    #    提交热路径不承担任何全表扫描，保证毫秒级返回稳定。
     logger.info(f"[eval] v2 任务已提交 → task_id={task['task_id']}, mode={mode}, input_mode={input_mode}")
     return EvalTranslateResponse(
         success=True,

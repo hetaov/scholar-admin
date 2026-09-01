@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -395,16 +396,22 @@ async def run_translation_task(
             "llm_timeout_seconds": TRANSLATION_LLM_TIMEOUT_SECONDS,
             "raw": None,
         }
-    await finish_task(db, task_id, result=result, error=error)
-    await _write_evaluation(
-        db,
-        task_id=task_id,
-        scholar_id=scholar_id,
-        sentence_id=sentence_id,
-        original_text=original_text,
-        input_mode=input_mode,
-        mode=mode,
-        user_input=transcription or user_input,
-        result=result,
-        error=error,
+    # 终态双写并行：finish_task（translation_task 状态）与 _write_evaluation（evaluation 证据）
+    # 相互独立无依赖，asyncio.gather 并行省一次 DB 往返（实测单次 DB RTT 400-500ms）。
+    # _write_evaluation 内部自带 try/except 不抛异常；finish_task 异常仍会向上传播。
+    # 并行下即使 finish_task 失败，evaluation 证据也会尽力写盘，符合「终态无条件留痕」契约。
+    await asyncio.gather(
+        finish_task(db, task_id, result=result, error=error),
+        _write_evaluation(
+            db,
+            task_id=task_id,
+            scholar_id=scholar_id,
+            sentence_id=sentence_id,
+            original_text=original_text,
+            input_mode=input_mode,
+            mode=mode,
+            user_input=transcription or user_input,
+            result=result,
+            error=error,
+        ),
     )

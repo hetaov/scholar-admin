@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -24,6 +25,11 @@ from fastapi.staticfiles import StaticFiles
 
 from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX
 from services.auth import require_paid_user
+from services.background_tasks import (
+    start_dialogue_cleanup_loop,
+    start_translation_cleanup_loop,
+    stop_all_loops,
+)
 from services.routes_system import router as system_router
 from services.routes_crud import router as crud_router
 from services.routes_tracking import router as tracking_router
@@ -55,10 +61,23 @@ logger = logging.getLogger("scholar-admin")
 # App
 # ---------------------------------------------------------------------------
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """应用生命周期：启动后台定时巡检（翻译/对话任务卡死恢复 + TTL 清理），关闭时取消。"""
+    start_translation_cleanup_loop()
+    start_dialogue_cleanup_loop()
+    try:
+        yield
+    finally:
+        await stop_all_loops()
+
+
 app = FastAPI(
     title="Scholar Admin API",
     description="学者管理后台 — 数据库 CRUD + AI 教材识别 + 对话匹配",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

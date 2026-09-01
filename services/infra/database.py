@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -19,6 +20,28 @@ import httpx
 from config import ENV_ID, REGION, SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_API_HOST
 
 logger = logging.getLogger("scholar-admin.db")
+
+# 模块级共享 HTTP 客户端（连接复用）：
+# - 每次 _request 新建 httpx.AsyncClient 会重复承担 DNS/TCP/TLS 握手（实测单次 400-500ms 的
+#   DB RTT 中，握手占比可观），共享单实例复用连接池可省每操作数十~上百 ms；
+# - httpx.AsyncClient 支持单事件循环内多协程并发（FastAPI/uvicorn 场景安全）；
+# - 懒创建、进程生命周期内复用；进程退出由 OS 回收连接，无需显式关闭。
+# - 绑定创建时的事件循环：AsyncClient 的连接/传输与 loop 绑定，若检测到当前运行 loop
+#   与创建时不同（如测试多次 asyncio.run、多 loop 场景），丢弃重建，避免
+#   `Event loop is closed` 崩溃。
+_HTTP_CLIENT: httpx.AsyncClient | None = None
+_HTTP_CLIENT_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """获取模块级共享 AsyncClient（懒创建，按事件循环绑定重建）。"""
+    global _HTTP_CLIENT, _HTTP_CLIENT_LOOP
+    loop = asyncio.get_running_loop()
+    if _HTTP_CLIENT is None or _HTTP_CLIENT_LOOP is not loop:
+        _HTTP_CLIENT = httpx.AsyncClient(timeout=30.0)
+        _HTTP_CLIENT_LOOP = loop
+    return _HTTP_CLIENT
+
 
 # ---------------------------------------------------------------------------
 # 集合名常量（数学学科 F1~F4 + G0 管理端多学科扩展，契约 data-model-contract）
@@ -195,15 +218,14 @@ class CloudBaseNoSQLClient:
         sign_body = body.encode("utf-8") if isinstance(body, str) else body
         headers = self._build_tc3_headers(action, sign_body, content_type)
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    self.endpoint,
-                    content=body,
-                    headers=headers,
-                )
-                raw_result = resp.json()
-                logger.debug(f"[DB] {action} 原始响应类型={type(raw_result).__name__}, "
-                             f"内容={json.dumps(raw_result, ensure_ascii=False)[:500]}")
+            resp = await _get_http_client().post(
+                self.endpoint,
+                content=body,
+                headers=headers,
+            )
+            raw_result = resp.json()
+            logger.debug(f"[DB] {action} 原始响应类型={type(raw_result).__name__}, "
+                         f"内容={json.dumps(raw_result, ensure_ascii=False)[:500]}")
         except httpx.TimeoutException as e:
             logger.error(f"[DB] {action} 请求超时(30s): {e}", exc_info=True)
             raise

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -13,10 +12,8 @@ from services.dependencies import get_db
 from services.dialogue import load_learned_sentences, match_dialogue
 from services.dialogue_task import (
     STATUS_FAILED,
-    cleanup_expired,
     create_task,
     get_task,
-    recover_stale_tasks,
     recover_task_if_stale,
     run_dialogue_task,
 )
@@ -26,8 +23,8 @@ router = APIRouter(tags=["对话匹配"])
 
 # 后台任务强引用集合：防止 create_task 的协程被 GC 回收导致任务中途取消
 _background_tasks: set[asyncio.Task] = set()
-# 全集合 TTL 巡检概率（每次提交触发一次 1/50），避免查询热路径全表扫描
-_CLEANUP_PROB = 0.02
+# 全集合 TTL/卡死巡检（recover_stale_tasks + cleanup_expired）已移出提交热路径，
+# 由后台定时任务执行（services/background_tasks.py，lifespan 启动，每 60s）。
 
 
 @router.post("/match/dialogue")
@@ -137,12 +134,8 @@ async def create_match_dialogue_task(data: dict):
         _background_tasks.add(bg)
         bg.add_done_callback(_background_tasks.discard)
 
-        # 概率性全集合 TTL 巡检（1/50）：恢复卡死任务 + 清理过期任务。
-        # 刻意移出查询热路径——无索引时条件 update/delete 全表扫描会拖慢轮询。
-        if random.random() < _CLEANUP_PROB:
-            await recover_stale_tasks(db)
-            await cleanup_expired(db)
-
+        # 全集合巡检（恢复卡死 + 清理过期）由后台定时任务执行（services/background_tasks.py），
+        # 提交热路径不承担任何全表扫描，保证毫秒级返回稳定。
         logger.info(
             f"[match] 异步任务已提交 → task_id={task['task_id']}, scholar={scholar_id}"
         )
@@ -188,7 +181,7 @@ async def get_match_dialogue_task(task_id: str):
         # 只做单点更新，不做全集合巡检，保证轮询热路径毫秒级返回。
         if await recover_task_if_stale(db, task):
             task = {**task, "status": STATUS_FAILED, "error": "执行超时"}
-        # TTL 过滤：expires_at 已过期的按不存在处理（物理清理由提交接口概率巡检执行）
+        # TTL 过滤：expires_at 已过期的按不存在处理（物理清理由后台定时任务执行）
         now_ms = int(time.time() * 1000)
         if task.get("expires_at", 0) <= now_ms:
             raise HTTPException(status_code=404, detail="任务已过期")
