@@ -174,3 +174,66 @@ def speech_payload(**overrides) -> dict:
     payload = dict(SPEECH_PAYLOAD_DEFAULTS)
     payload.update(overrides)
     return payload
+
+
+def seed_ai_session(fake_db, **overrides) -> dict:
+    """写入一条 ai_session（沉浸式 AI 会话 v2，§4.19），返回写入的文档。
+
+    默认 scholar_id=scholar_1 / 空 history / 空闲在途位 / expires_at 24h 后。
+    覆盖 overrides 中的任意字段。
+    """
+    from services.learning.session_state import SESSION_TTL_MS  # 延迟导入避免循环依赖
+
+    now = int(time.time() * 1000)
+    doc = {
+        "session_id": "s_test",
+        "scholar_id": "scholar_1",
+        "scenario": {"scene": "At the airport"},
+        "roles": {
+            "ai_role": {"name": "Airport Staff", "style": "kind"},
+            "learner_role": {"name": "Passenger"},
+        },
+        "materials": [
+            {
+                "kind": "new",
+                "sentences": [{"sentence_id": "sid_1", "content": "I'd like to check in."}],
+            }
+        ],
+        "history": [],
+        "assisted_count": 0,
+        "pending_task": None,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + SESSION_TTL_MS,
+    }
+    doc.update(overrides)
+    fake_db.add("ai_session", doc)
+    return doc
+
+
+def seed_ai_session_task(fake_db, **overrides) -> dict:
+    """写入一条 ai_session_task（默认 pending，§4.18），返回写入的文档。
+
+    覆盖 overrides 中的任意字段；未提供时 expires_at 按默认 TTL 24h 计算。
+    """
+    from services.learning.session_task import TASK_TTL_MS  # 延迟导入避免循环依赖
+
+    now = int(time.time() * 1000)
+    doc = {
+        "task_id": "st_test",
+        "scholar_id": "scholar_1",
+        "session_id": "s_test",
+        "mode": "start",
+        "preferred_type": "auto",
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "context": {"mode": "start", "scenario": {}, "roles": {}, "materials": [], "history": []},
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + TASK_TTL_MS,
+    }
+    doc.update(overrides)
+    fake_db.add("ai_session_task", doc)
+    return doc

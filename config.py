@@ -236,3 +236,13 @@ HUNYUAN_EVAL_MAX_RETRIES = int(os.environ.get("HUNYUAN_EVAL_MAX_RETRIES", 2))
 TRANSLATION_LLM_TIMEOUT_SECONDS = int(
     os.environ.get("TRANSLATION_LLM_TIMEOUT_SECONDS", 300)
 )
+
+# ==================== 沉浸式 AI 会话 v2 配置（proposal 2026-09-02 / api-contract §3.12） ====================
+
+# LLM 单次调用超时上限（秒，默认 300s = 5 分钟，可配置）：
+# 会话生成（dialogue/fill + hint L1~L3）单次调用火山方舟（VOLCANO_CHAT_MODEL），
+# 达到上限强制取消 → 任务 failed + error_code=LLM_TIMEOUT（同 TRANSLATION_LLM_TIMEOUT_SECONDS 语义）。
+# 注意：卡死判定（recover 巡检）默认阈值取本常量，保证合法长调用（≤300s）不被巡检误杀。
+SESSION_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("SESSION_LLM_TIMEOUT_SECONDS", 300)
+)

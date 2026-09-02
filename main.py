@@ -10,6 +10,7 @@
 - 教材构建   → services/routes_build.py
 - 管理       → services/routes_admin.py
 - 评估       → services/routes_eval.py
+- AI 会话   → services/routes_ai.py（沉浸式会话 v2 异步生成）
 - 语音合成   → services/routes_tts.py
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX
 from services.auth import require_paid_user
 from services.background_tasks import (
     start_dialogue_cleanup_loop,
+    start_session_cleanup_loop,
     start_translation_cleanup_loop,
     stop_all_loops,
 )
@@ -40,6 +42,7 @@ from services.routes_build import router as build_router
 from services.routes_admin import router as admin_router
 from services.routes_conversation import router as conversation_router
 from services.routes_eval import router as eval_router
+from services.routes_ai import router as ai_router
 from services.routes_evaluation import router as evaluation_router
 from services.routes_training import router as training_router
 from services.routes_tts import router as tts_router
@@ -67,6 +70,7 @@ async def lifespan(_: FastAPI):
     """应用生命周期：启动后台定时巡检（翻译/对话任务卡死恢复 + TTL 清理），关闭时取消。"""
     start_translation_cleanup_loop()
     start_dialogue_cleanup_loop()
+    start_session_cleanup_loop()
     try:
         yield
     finally:
@@ -116,6 +120,7 @@ _PAID_ROUTERS = [
     planner_router,
     math_router,
     english_router,
+    ai_router,
 ]
 
 for _router in _FREE_ROUTERS:
