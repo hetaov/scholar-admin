@@ -518,3 +518,155 @@ class TestRunTranslationTask:
         assert calls["llm"] == 0
         stored = fake_db.all("translation_task")[0]
         assert stored["status"] == "processing"
+
+
+class TestEvalTranslateV2ZhSubmit:
+    """POST /eval/translate/v2/zh — 中文语音识别版（2026-09-02，英译中语音作答专用）。
+
+    与 POST /eval/translate/v2 唯一差异 = 语音路径 ASR 固定中文引擎 16k_zh
+    （任务落库 asr_engine=16k_zh，执行器据此取中文引擎转写）。
+    入参/校验/状态机/TTL/失败留痕与 v2 同构；查询复用 GET /eval/translate/v2/task/{task_id}。
+    """
+
+    def test_zh_text_submit_ok_records_asr_engine(
+        self, make_client, monkeypatch, fake_db
+    ):
+        """文字路径：200 + pending + 任务记 asr_engine=16k_zh（文字路径无 ASR，行为同 v2）。"""
+        called = {}
+
+        async def fake_run(task_id, **kwargs):
+            called["task_id"] = task_id
+            called.update(kwargs)
+
+        monkeypatch.setattr("services.routes_eval.run_translation_task", fake_run)
+        client = _client(make_client, monkeypatch=monkeypatch)
+
+        resp = client.post(
+            "/eval/translate/v2/zh",
+            json={
+                "original_text": "It is a watch.",  # 英译中：英文原句
+                "user_input": "它是一块手表。",  # 中文译文（文字路径）
+                "scholar_id": "s1",
+                "sentence_id": "sent_1",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        data = body["data"]
+        assert data["task_id"].startswith("tr_")
+        assert data["status"] == "pending"
+
+        # 后台执行器已调度：mode=ec（英文原句），唯一差异 asr_engine=16k_zh
+        assert called["task_id"] == data["task_id"]
+        assert called["mode"] == "ec"
+        assert called["input_mode"] == "text"
+        assert called["original_text"] == "It is a watch."
+        assert called["user_input"] == "它是一块手表。"
+        assert called["asr_engine"] == "16k_zh"
+
+        # 任务落库记录中文引擎
+        stored = fake_db.all("translation_task")
+        assert len(stored) == 1
+        assert stored[0]["status"] == "pending"
+        assert stored[0]["mode"] == "ec"
+        assert stored[0]["asr_engine"] == "16k_zh"
+
+    def test_zh_voice_submit_passes_audio_with_zh_engine(
+        self, make_client, monkeypatch, fake_db
+    ):
+        """语音路径：audio_base64 仅透传 worker（不落库），asr_engine=16k_zh 即本接口语义。"""
+        called = {}
+
+        async def fake_run(task_id, **kwargs):
+            called.update(kwargs)
+
+        monkeypatch.setattr("services.routes_eval.run_translation_task", fake_run)
+        client = _client(make_client, monkeypatch=monkeypatch)
+
+        resp = client.post(
+            "/eval/translate/v2/zh",
+            json={
+                "original_text": "It is a watch.",
+                "audio_base64": FAKE_AUDIO,
+                "voice_format": "mp3",
+            },
+        )
+        assert resp.status_code == 200
+        assert called["mode"] == "ec"
+        assert called["input_mode"] == "voice"
+        assert called["audio_base64"] == FAKE_AUDIO  # 仅透传 worker，不落库
+        assert called["asr_engine"] == "16k_zh"
+        stored = fake_db.all("translation_task")[0]
+        assert stored["audio_base64"] is None
+        assert stored["asr_engine"] == "16k_zh"
+
+    def test_zh_voice_worker_transcribes_chinese(
+        self, make_client, monkeypatch, fake_db
+    ):
+        """执行器闭环：asr_engine=16k_zh → 取中文引擎服务 → 转写为正确中文 → LLM 评分 → 双写。"""
+        monkeypatch.setattr(
+            "services.translation_eval._call_translation_llm",
+            lambda *a, **k: '{"status": 5, "feedback": "翻译准确"}',
+        )
+        zh_asr = FakeAsrService(result="它是一块手表。")  # 中文引擎替身
+        monkeypatch.setattr(
+            "services.translation_task.get_asr_service_for",
+            lambda engine: zh_asr,
+            raising=False,
+        )
+        task = seed_translation_task(fake_db, input_mode="voice", mode="ec")
+        _run(
+            run_translation_task(
+                task["task_id"],
+                original_text="It is a watch.",
+                mode="ec",
+                input_mode="voice",
+                audio_base64=FAKE_AUDIO,
+                voice_format="mp3",
+                scholar_id="s1",
+                asr_engine="16k_zh",
+            )
+        )
+        stored = fake_db.all("translation_task")[0]
+        assert stored["status"] == "success"
+        # 与 16k_en 分支的差异核心：transcription 为正确中文（不再被英文引擎转写为错文本）
+        assert stored["result"]["transcription"] == "它是一块手表。"
+        assert stored["result"]["status"] == 5
+        assert zh_asr.call_count == 1
+
+        # 终态双写 evaluation（type=translation, succeeded=true, user_input=中文转写）
+        evals = fake_db.all("evaluation")
+        assert len(evals) == 1
+        assert evals[0]["succeeded"] is True
+        assert evals[0]["mode"] == "ec"
+        assert evals[0]["user_input"] == "它是一块手表。"
+
+    def test_zh_voice_worker_asr_unavailable_fails_with_trace(
+        self, make_client, monkeypatch, fake_db
+    ):
+        """zh 语音路径 ASR 不可用 → failed + ASR_UNAVAILABLE + 失败留痕（与 v2 同构）。"""
+        monkeypatch.setattr(
+            "services.translation_task.get_asr_service_for",
+            lambda engine: FakeAsrService.unavailable(),
+            raising=False,
+        )
+        task = seed_translation_task(fake_db, input_mode="voice", mode="ec")
+        _run(
+            run_translation_task(
+                task["task_id"],
+                original_text="It is a watch.",
+                mode="ec",
+                input_mode="voice",
+                audio_base64=FAKE_AUDIO,
+                voice_format="mp3",
+                asr_engine="16k_zh",
+            )
+        )
+        stored = fake_db.all("translation_task")[0]
+        assert stored["status"] == "failed"
+        assert stored["error"]["error_code"] == "ASR_UNAVAILABLE"
+        assert stored["error"]["failure_stage"] == "asr"
+        evals = fake_db.all("evaluation")
+        assert evals[0]["succeeded"] is False
+        assert evals[0]["error_code"] == "ASR_UNAVAILABLE"

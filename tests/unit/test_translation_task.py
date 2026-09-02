@@ -74,6 +74,7 @@ def test_create_translation_task_fields_and_unique_id():
     assert doc1["result"] is None
     assert doc1["error"] is None
     assert doc1["expires_at"] - doc1["created_at"] == TASK_TTL_MS
+    assert doc1["asr_engine"] == "16k_en"  # 2026-09-02：默认英语引擎（ce/存量任务语义不变）
 
     # 语音路径：audio_base64 不落库（None 占位），scholar_id/sentence_id 透传
     assert doc2["audio_base64"] is None
@@ -81,11 +82,30 @@ def test_create_translation_task_fields_and_unique_id():
     assert doc2["input_mode"] == "voice"
     assert doc2["scholar_id"] == "s1"
     assert doc2["sentence_id"] == "sent_1"
+    assert doc2["asr_engine"] == "16k_en"
 
     # 两条均已落库
     stored = db.all(COLLECTION)
     assert len(stored) == 2
     assert {d["task_id"] for d in stored} == {doc1["task_id"], doc2["task_id"]}
+
+
+def test_create_translation_task_records_zh_asr_engine():
+    """英译中语音作答任务记录中文引擎 16k_zh（POST /eval/translate/v2/zh 提交语义）。"""
+    db = FakeDB()
+    doc = _run(
+        create_translation_task(
+            db,
+            original_text="It is a watch.",
+            input_mode="voice",
+            mode="ec",
+            audio_base64="ZmFrZS1tcDM=",
+            asr_engine="16k_zh",
+        )
+    )
+    assert doc["asr_engine"] == "16k_zh"
+    stored = db.all(COLLECTION)
+    assert stored[0]["asr_engine"] == "16k_zh"
 
 
 # ---------------------------------------------------------------------------

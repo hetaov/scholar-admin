@@ -34,7 +34,12 @@ import uuid
 from typing import Any
 
 from config import TRANSLATION_LLM_TIMEOUT_SECONDS
-from services.asr import get_asr_service
+from services.asr import (
+    ASR_SERVICE_TYPE,
+    ASR_SERVICE_TYPE_ZH,
+    get_asr_service,
+    get_asr_service_for,
+)
 from services.dependencies import get_db
 from services.providers.evaluation_engine import EVALUATION_COLLECTION
 from services.providers.translation_eval import (
@@ -80,6 +85,7 @@ async def create_translation_task(
     user_input: str | None = None,
     audio_base64: str | None = None,
     voice_format: str = "mp3",
+    asr_engine: str = ASR_SERVICE_TYPE,
 ) -> dict:
     """创建 pending 任务并落库，返回任务文档。
 
@@ -87,6 +93,9 @@ async def create_translation_task(
 
     字段对齐 data-model-contract §4.16；`audio_base64` 不落库
     （CloudBase 单文档 1MB 上限，5MB 音频 base64 超限），以 None 占位。
+    `asr_engine`（2026-09-02 新增，默认 `16k_en`）：语音转写引擎；
+    `POST /eval/translate/v2/zh` 提交传 `16k_zh`（英译中语音作答中文识别），
+    文字路径任务不涉及 ASR，仍按提交值记录（无实际影响）。
     """
     now = _now_ms()
     task_doc: dict[str, Any] = {
@@ -99,6 +108,7 @@ async def create_translation_task(
         "voice_format": voice_format,
         "input_mode": input_mode,
         "mode": mode,
+        "asr_engine": asr_engine,
         "status": STATUS_PENDING,
         "result": None,
         "error": None,
@@ -337,6 +347,7 @@ async def run_translation_task(
     voice_format: str = "mp3",
     scholar_id: str | None = None,
     sentence_id: str | None = None,
+    asr_engine: str = ASR_SERVICE_TYPE,
 ) -> None:
     """后台执行翻译评估任务并写回结果（ADR-0022 决策 A/B/C/D）。
 
@@ -364,7 +375,14 @@ async def run_translation_task(
                 )
             if not audio_bytes:
                 raise TranslationEvalError("ASR_UNAVAILABLE", "asr", "音频内容为空")
-            asr = get_asr_service()
+            # 引擎选择（2026-09-02）：默认英语 `16k_en`（ce 语音 / 存量任务）；
+            # `POST /eval/translate/v2/zh` 提交的任务为 `16k_zh`（英译中语音作答中文识别）。
+            # 默认引擎走 get_asr_service()（保持既有测试 patch 姿势），非默认走 get_asr_service_for。
+            asr = (
+                get_asr_service_for(ASR_SERVICE_TYPE_ZH)
+                if asr_engine == ASR_SERVICE_TYPE_ZH
+                else get_asr_service()
+            )
             if not asr.available:
                 raise TranslationEvalError(
                     "ASR_UNAVAILABLE", "asr", "ASR 服务未配置凭据"

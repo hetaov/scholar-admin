@@ -38,7 +38,12 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from config import SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_APPID
-from services.asr import get_asr_service, ASRService
+from services.asr import (
+    ASR_SERVICE_TYPE,
+    ASR_SERVICE_TYPE_ZH,
+    ASRService,
+    get_asr_service,
+)
 from services.dependencies import get_db
 from services.database import CloudBaseNoSQLClient
 from services.evaluator import evaluate
@@ -191,8 +196,39 @@ async def eval_translate_v2(
 ) -> EvalTranslateResponse:
     """提交异步翻译评估 — 毫秒级返回 task_id，评分在后台执行（不做任何 LLM/ASR 调用）。
 
+    语音路径 ASR 默认英语引擎（`16k_en`，中译英语音作答）；英译中语音作答（中文识别）
+    走 `POST /eval/translate/v2/zh`（2026-09-02，ASR 固定 `16k_zh`）。
+
     返回：{ success: true, data: { task_id: "tr_xxx", status: "pending" } }
     """
+    return await _submit_translation_v2(body, db, asr_engine=ASR_SERVICE_TYPE)
+
+
+@router.post("/eval/translate/v2/zh", response_model=EvalTranslateResponse)
+async def eval_translate_v2_zh(
+    body: EvalTranslateV2Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+) -> EvalTranslateResponse:
+    """翻译评估异步提交 · 中文语音识别版（2026-09-02，英译中语音作答专用）。
+
+    与 `POST /eval/translate/v2` **唯一区别**：语音路径 ASR 固定中文引擎 `16k_zh`
+    （英译中场景用户口述中文译文，避免英文引擎把中文按英文音素转写为错文本）。
+    入参/校验/响应/状态机/TTL/失败留痕与 v2 完全同构；查询沿用
+    `GET /eval/translate/v2/task/{task_id}`（同 `translation_task` 集合）。
+    文字路径不涉及 ASR，行为与 v2 完全一致。不降级（ADR-0022 决策 D）。
+
+    返回：{ success: true, data: { task_id: "tr_xxx", status: "pending" } }
+    """
+    return await _submit_translation_v2(body, db, asr_engine=ASR_SERVICE_TYPE_ZH)
+
+
+async def _submit_translation_v2(
+    body: EvalTranslateV2Request,
+    db: CloudBaseNoSQLClient,
+    *,
+    asr_engine: str,
+) -> EvalTranslateResponse:
+    """v2/v2.zh 共用提交逻辑：参数校验 → 创建 pending 任务 → 后台调度执行。"""
     # 1. 参数校验（业务失败 200 + success=false，对齐契约 §3.4）
     if not body.original_text or not body.original_text.strip():
         return EvalTranslateResponse(
@@ -246,6 +282,7 @@ async def eval_translate_v2(
             user_input=user_input,
             audio_base64=body.audio_base64 if has_audio else None,
             voice_format=body.voice_format or "mp3",
+            asr_engine=asr_engine,
         )
     except Exception as e:  # noqa: BLE001
         logger.error(f"[eval] v2 任务创建异常: {e}", exc_info=True)
@@ -264,6 +301,7 @@ async def eval_translate_v2(
             voice_format=body.voice_format or "mp3",
             scholar_id=body.scholar_id,
             sentence_id=body.sentence_id,
+            asr_engine=asr_engine,
         )
     )
     _background_tasks.add(bg)
@@ -271,7 +309,10 @@ async def eval_translate_v2(
 
     # 4. 全集合巡检（恢复卡死 + 清理过期）由后台定时任务执行（services/background_tasks.py），
     #    提交热路径不承担任何全表扫描，保证毫秒级返回稳定。
-    logger.info(f"[eval] v2 任务已提交 → task_id={task['task_id']}, mode={mode}, input_mode={input_mode}")
+    logger.info(
+        f"[eval] v2 任务已提交 → task_id={task['task_id']}, mode={mode}, "
+        f"input_mode={input_mode}, asr_engine={asr_engine}"
+    )
     return EvalTranslateResponse(
         success=True,
         data={

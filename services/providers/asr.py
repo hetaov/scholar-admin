@@ -23,6 +23,8 @@ logger = logging.getLogger("scholar-admin.asr")
 
 # 一句话识别（英语 16k，与云函数参数保持一致）
 ASR_SERVICE_TYPE = "16k_en"
+# 中文 16k（2026-09-02：英译中语音作答中文识别，POST /eval/translate/v2/zh 专用）
+ASR_SERVICE_TYPE_ZH = "16k_zh"
 ASR_REGION = "ap-guangzhou"
 ASR_VERSION = "2019-06-14"
 # 微信小程序录音默认格式（由前端 recorderManager.format 指定）
@@ -101,12 +103,21 @@ class ASRService:
             return None
 
 
-# 模块级单例（与 volcano.py / dialogue.py 的 _get_client 风格一致）
-_asr_service: ASRService | None = None
+# 模块级单例缓存（按引擎各存一份，与 volcano.py / dialogue.py 的 _get_client 风格一致）
+_asr_services: dict[str, "ASRService"] = {}
 
 
-def get_asr_service() -> ASRService:
-    global _asr_service
-    if _asr_service is None:
-        _asr_service = ASRService()
-    return _asr_service
+def get_asr_service() -> "ASRService":
+    """默认引擎（英语 `16k_en`）单例。
+
+    保持无参签名兼容既有 `Depends(get_asr_service)` 依赖注入
+    （services/routes/eval.py / speech_eval.py 等）与 worker 直接调用。
+    """
+    return get_asr_service_for(ASR_SERVICE_TYPE)
+
+
+def get_asr_service_for(engine_type: str) -> "ASRService":
+    """按引擎取 ASR 服务单例（`16k_en` / `16k_zh` 各自缓存实例，互不影响）。"""
+    if engine_type not in _asr_services:
+        _asr_services[engine_type] = ASRService(engine_type=engine_type)
+    return _asr_services[engine_type]
