@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+from services.learning.immersive_progress import PROGRESS_VERSION
 from services.routes_tracking import router as tracking_router
 
 PATH = "/scholar/scholar_1/textbooks/tb_1/groups/g_1/immersive-progress"
@@ -20,7 +21,7 @@ PATH = "/scholar/scholar_1/textbooks/tb_1/groups/g_1/immersive-progress"
 
 def _mk_body(overrides: dict | None = None) -> dict:
     body = {
-        "version": 1,
+        "version": PROGRESS_VERSION,
         "scholar_id": "scholar_1",
         "textbook_id": "tb_1",
         "group_id": "g_1",
@@ -46,7 +47,7 @@ class TestPutGetRoundtrip:
         assert put.status_code == 200
         put_data = put.json()["data"]
         assert put_data["sentence_id"] == "sent_1"
-        assert put_data["version"] == 1
+        assert put_data["version"] == PROGRESS_VERSION
         assert put_data["challenge_active"] is True
 
         get = client.get(PATH)

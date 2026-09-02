@@ -26,7 +26,8 @@ COLLECTION = "immersive_progress"
 
 # 当前契约版本（与小程序 services/task/immersive-progress.js PROGRESS_VERSION 对齐；
 # 结构变更时前后端同步 +1，deserialize 以版本校验拒绝旧数据）
-PROGRESS_VERSION = 1
+# 2026-09-01 v2：小程序移除「听写」技能（五步 → 四步），旧 v1 断点（含 dictation 步骤）一律失效不恢复
+PROGRESS_VERSION = 2
 
 # 单条 payload 上限（契约 §3.2.4：< 5KB）
 MAX_PAYLOAD_BYTES = 5 * 1024
