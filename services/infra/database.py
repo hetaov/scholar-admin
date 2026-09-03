@@ -532,20 +532,28 @@ class CloudBaseNoSQLClient:
             f"[db.update] after json.loads → type={type(result).__name__} "
             f"value={repr(result)[:300]}"
         )
-        # CloudBase 某些版本将 update 结果包在单元素列表中
+        # CloudBase 将 update 结果包在单元素 list 中；元素本身是 Extended JSON 文本字符串
+        # （如 '["{\\"n\\":{\\"$numberInt\\":\\"1\\"},...}"]'），需逐层解码：
+        # loads → list unwrap → 元素 str 再 loads → Extended JSON 归一化（与 query 一致）
         if isinstance(result, list):
             logger.debug(f"[db.update] result is list(len={len(result)}), unwrap")
             result = result[0] if result else {}
-        # 兜底：CloudBase 可能直接返回纯字符串（如 "ok"）
         if isinstance(result, str):
-            logger.warning(
-                f"[db.update] result is str '{result}', treating as success"
-            )
-            return {
-                "matched_count": 1,
-                "modified_count": 1,
-                "upserted_id": None,
-            }
+            logger.debug(f"[db.update] element is str → json.loads")
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    f"[db.update] 元素解码失败，按成功处理 raw={repr(result[:200])}"
+                )
+                return {
+                    "matched_count": 1,
+                    "modified_count": 1,
+                    "upserted_id": None,
+                }
+        # 归一化 Extended JSON（{"$numberInt":"0"} → 0），保证 n/nModified 为原生整数
+        if isinstance(result, dict):
+            result = self._normalize_types(result)
         if not isinstance(result, dict):
             logger.error(
                 f"[db.update] unexpected type={type(result).__name__}, "
@@ -557,8 +565,8 @@ class CloudBaseNoSQLClient:
                 "upserted_id": None,
             }
         return {
-            "matched_count": result.get("n", 0),
-            "modified_count": result.get("nModified", 0),
+            "matched_count": int(result.get("n", 0) or 0),
+            "modified_count": int(result.get("nModified", 0) or 0),
             "upserted_id": str(result.get("upserted", [{}])[0].get("_id", "")) if result.get("upserted") else None,
         }
 
@@ -586,21 +594,32 @@ class CloudBaseNoSQLClient:
             f"[db.delete] after json.loads → type={type(result).__name__} "
             f"value={repr(result)[:300]}"
         )
+        # CloudBase 将 delete 结果包在单元素 list 中；元素本身是 Extended JSON 文本字符串
+        # （raw 形如 '["{\\"n\\":{\\"$numberInt\\":\\"0\\"},...}"]'）。若只解一层就取 n，
+        # 会因元素是字符串导致误判；"n" 需归一化后才是真实删除数，
+        # 否则二次幂等删除会被误判为已删除（K10 失败根因）。
         if isinstance(result, list):
             logger.debug(f"[db.delete] result is list(len={len(result)}), unwrap")
             result = result[0] if result else {}
         if isinstance(result, str):
-            logger.warning(
-                f"[db.delete] result is str '{result}', treating as success"
-            )
-            return {"deleted_count": 1}
+            logger.debug(f"[db.delete] element is str → json.loads")
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    f"[db.delete] 元素解码失败，按 0 条处理 raw={repr(result[:200])}"
+                )
+                return {"deleted_count": 0}
+        # 归一化 Extended JSON（{"$numberInt":"0"} → 0）
+        if isinstance(result, dict):
+            result = self._normalize_types(result)
         if not isinstance(result, dict):
             logger.error(
                 f"[db.delete] unexpected type={type(result).__name__}, "
                 f"value={repr(result)[:300]}"
             )
             return {"deleted_count": 0}
-        return {"deleted_count": result.get("n", 0)}
+        return {"deleted_count": int(result.get("n", 0) or 0)}
 
     # ==================== 文档统计 ====================
 
