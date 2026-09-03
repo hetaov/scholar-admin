@@ -55,6 +55,11 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("[ERROR] 缺少 httpx，请先安装依赖：pip install httpx")
 
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover
+    sys.exit("[ERROR] 缺少 openai，请先安装依赖：pip install openai")
+
 # 保证 `python scripts/xxx.py` 与 `python -m scripts.xxx` 均可运行（项目根入 sys.path）
 HERE = Path(__file__).resolve().parent.parent
 if str(HERE) not in sys.path:
@@ -182,6 +187,13 @@ TARGET_SENTENCE = (
     "We are willing to consider a discount if the order volume is substantial."
 )
 REVIEW_SENTENCE = "We need to clarify the payment terms."
+
+# 同步生成类接口的客户端超时（秒）：/conversation/turn、/conversation/history
+# （可能触发 end_session_with_summary LLM 小结）、/match/dialogue 后端为实时
+# LLM 生成，真实耗时可达 1–4 分钟（2026-09-03 实测 ~3–4 分钟）；
+# 客户端超时若小于生成耗时将被判 REQUEST_FAIL timed out。
+# 异步提交/轮询类提交超时仍为 15s，终态等待上限见 --max-wait（默认 300）。
+SYNC_LLM_CALL_TIMEOUT = 300.0
 
 # ---------------------------------------------------------------------------
 # 通用工具
@@ -641,7 +653,9 @@ def run_match_dialogue_flow(
     t0 = time.perf_counter()
     try:
         path = "/match/dialogue/task" if use_async else "/match/dialogue"
-        resp = client.post(f"{base_url}{path}", json=payload, timeout=15)
+        # 异步任务仅提交（毫秒级，15s 充裕）；同步接口要等后端 LLM 实时生成（分钟级）
+        timeout = 15 if use_async else SYNC_LLM_CALL_TIMEOUT
+        resp = client.post(f"{base_url}{path}", json=payload, timeout=timeout)
     except Exception as e:  # noqa: BLE001
         return {"case": name, "status": "REQUEST_FAIL", "error": str(e)}
     submit_ms = (time.perf_counter() - t0) * 1000
@@ -696,7 +710,7 @@ def run_conversation_flow(
             "scholar_id": scholar_id,
             "scenario": "business_negotiation",
             "topic": "Product pricing negotiation",
-        }, timeout=15)
+        }, timeout=120)  # 开场含 pre_assess + 图初始化 + 开场白 LLM 生成，首次 DB 访问可能较慢
     except Exception as e:  # noqa: BLE001
         return [{"case": "C3_scenario", "status": "REQUEST_FAIL", "error": str(e)}]
     scenario_ms = (time.perf_counter() - t0) * 1000
@@ -707,10 +721,12 @@ def run_conversation_flow(
     data = body["data"]
     session_id = data["session_id"]
     print(f"    [开场] 耗时={ms(scenario_ms / 1000)} session_id={session_id} "
-          f"difficulty={data.get('difficulty')}")
+          f"difficulty={data.get('difficulty')} "
+          f"reply={str(data.get('reply') or '')[:60]!r}")
     out.append({"case": "C3_scenario", "status": "success", "submit_ms": scenario_ms,
                 "result": {k: data.get(k) for k in
-                           ("session_id", "difficulty", "pre_assessment", "cold_start")}})
+                           ("session_id", "difficulty", "pre_assessment", "cold_start",
+                            "reply", "state")}})
 
     # 两轮 turn：第一轮正常表达；第二轮弱答（触发 hint/rephrase 递进，C4）
     turns = [
@@ -724,7 +740,7 @@ def run_conversation_flow(
                 "session_id": session_id,
                 "utterance": utterance,
                 "mode": "text",
-            }, timeout=20)
+            }, timeout=SYNC_LLM_CALL_TIMEOUT)  # 后端实时生成 AI 回复（分钟级）
         except Exception as e:  # noqa: BLE001
             out.append({"case": case_id, "status": "REQUEST_FAIL", "error": str(e)})
             continue
@@ -750,7 +766,8 @@ def run_conversation_flow(
     # 历史
     try:
         resp = client.get(f"{base_url}/conversation/history",
-                          params={"session_id": session_id}, timeout=15)
+                          params={"session_id": session_id},
+                          timeout=SYNC_LLM_CALL_TIMEOUT)  # 未结束会话首查会生成 LLM 小结
         hbody = resp.json()
         if hbody.get("success"):
             sess = (hbody.get("data") or {}).get("session") or {}
@@ -863,35 +880,51 @@ async def _judge_one(
     )
     try:
         async with sem:
-            async with httpx.AsyncClient(timeout=HUNYUAN_TIMEOUT_SECONDS) as client:
-                resp = await client.post(
-                    f"{HUNYUAN_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {HUNYUAN_SECRET_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": HUNYUAN_EVAL_MODEL,
-                        "messages": [
-                            {"role": "system", "content": rubric["system"]},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "response_format": {"type": "json_object"},
-                    },
+            # 混元 OpenAI 兼容网关调用：走 OpenAI SDK（与网关官方示例一致）。
+            # 不使用 response_format=json_object：实测该网关对 hy4-preview 推理模型
+            # 开启 json_object 时 content 为空（耗时更长），改由 prompt 约束 +
+            # 下方 _parse_eval_response 容错解析（去 markdown fence / 提取花括号）。
+            client = AsyncOpenAI(
+                api_key=HUNYUAN_SECRET_KEY,
+                base_url=HUNYUAN_BASE_URL,
+                timeout=HUNYUAN_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
+            resp = await client.chat.completions.create(
+                model=HUNYUAN_EVAL_MODEL,
+                messages=[
+                    {"role": "system", "content": rubric["system"]},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            if not content:
+                # 推理类模型可能把答复放在 reasoning_content 而未落到 content
+                raise ValueError(
+                    f"Judge 响应 content 为空（model={HUNYUAN_EVAL_MODEL}，"
+                    f"base_url={HUNYUAN_BASE_URL} 须为 OpenAI 兼容 /chat/completions 网关）"
                 )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
-                result = _parse_eval_response(content)
-                score = max(0.0, min(1.0, float(result.get("score", -1.0))))
-                return {
-                    "score": score,
-                    "feedback": str(result.get("feedback", "")),
-                    "issues": result.get("issues", []),
-                    "dimensions": result.get("dimensions", []),
-                }
+            result = _parse_eval_response(content)
+            score = max(0.0, min(1.0, float(result.get("score", -1.0))))
+            return {
+                "score": score,
+                "feedback": str(result.get("feedback", "")),
+                "issues": result.get("issues", []),
+                "dimensions": result.get("dimensions", []),
+            }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"混元评估失败，降级跳过: {type(e).__name__}: {e}")
         return {"score": -1.0, "feedback": f"评估跳过: {e}", "issues": [], "dimensions": []}
+
+
+async def _judge_all(tasks: list) -> list:
+    """在统一事件循环内并发执行全部混元评分任务。
+
+    Python 3.14 兼容：`asyncio.gather(*tasks)` 必须在运行中的 loop 内调用
+    （3.12 前会隐式自建默认 loop，3.14 起直接抛 RuntimeError），
+    因此不能写成 `asyncio.run(asyncio.gather(*tasks))`。
+    """
+    return await asyncio.gather(*tasks)
 
 
 def build_artifacts(
@@ -1007,7 +1040,8 @@ def main() -> None:
     parser.add_argument("--scholar-id", default=os.environ.get("EVAL_SCHOLAR_ID", ""),
                         help="被评估学者 ID（需有已学句数据；缺省仅跑可用性门禁与 NEEDS_DATA 提示）")
     parser.add_argument("--poll-interval", type=float, default=1.0, help="轮询间隔秒（默认 1s）")
-    parser.add_argument("--max-wait", type=float, default=120, help="等待终态上限秒（默认 120）")
+    parser.add_argument("--max-wait", type=float, default=300,
+                        help="等待终态上限秒（默认 300；LLM 生成任务真实耗时可达数分钟）")
     parser.add_argument("--no-live", action="store_true", help="跳过 L2 功能链路（只跑可用性门禁）")
     parser.add_argument("--no-judge", action="store_true", help="跳过 L3 混元质量评分")
     parser.add_argument("--judge-limit", type=int, default=8, help="混元 Judge 最多调用数（默认 8）")
@@ -1030,6 +1064,15 @@ def main() -> None:
     print(f"  火山生成: VOLCANO_CHAT_MODEL={'已配置' if volcano_ok else '未配置'}")
     if not hunyuan_ok and not args.no_judge:
         print("[WARN] 混元凭据未配置（HUNYUAN_SECRET_KEY/HUNYUAN_EVAL_MODEL），L3 将全部 JUDGE_SKIPPED")
+    elif not args.no_judge:
+        # 凭据存在但网关/密钥不匹配：默认值回落会让 L3 实际全部跳过，提前指出配置方向
+        if HUNYUAN_BASE_URL.rstrip("/").endswith("hunyuan.tencentcloudapi.com"):
+            print("[WARN] HUNYUAN_BASE_URL 仍为腾讯云 OpenAPI 默认值（hunyuan.tencentcloudapi.com）："
+                  "该端点回 HTTP 200 + 错误 JSON（无 choices），不兼容 Bearer /chat/completions 调用，"
+                  "L3 将全部 JUDGE_SKIPPED。请在 .env 设 HUNYUAN_BASE_URL=https://api.hunyuan.cloud.tencent.com/v1")
+        if not os.environ.get("HUNYUAN_SECRET_KEY") and os.environ.get("TENCENTCLOUD_SECRETKEY"):
+            print("[WARN] HUNYUAN_SECRET_KEY 未显式配置（回落 TENCENTCLOUD_SECRETKEY）："
+                  "Bearer 鉴权需混元控制台 API 密钥，云 SecretKey 不可用于该网关，L3 将 401/403")
     if not args.scholar_id and not args.no_live:
         print("[WARN] 未指定 --scholar-id，L2 功能链路将标记 NEEDS_DATA（可用性门禁不受影响）")
 
@@ -1135,7 +1178,7 @@ def main() -> None:
                 _judge_one(a, a["family"], a["interface_label"], sem)
                 for a in artifacts[: args.judge_limit]
             ]
-            results = asyncio.run(asyncio.gather(*tasks))
+            results = asyncio.run(_judge_all(tasks))
             for artifact, judged in zip(artifacts[: args.judge_limit], results):
                 report["judgments"].append({
                     "case": artifact["case"],
@@ -1154,7 +1197,11 @@ def main() -> None:
             if args.strict and skipped:
                 reasons.append(f"[strict] JUDGE_SKIPPED 视为失败: {len(skipped)} 个产物")
             elif skipped and not judged_scores:
-                reasons.append("混元 Judge 全部跳过（凭据/超时），请人工复核或检查 HUNYUAN_* 配置")
+                first_fb = str(skipped[0].get("feedback") or "")[:160]
+                reasons.append(
+                    "混元 Judge 全部跳过（凭据/网关/超时），请人工复核或检查 HUNYUAN_* 配置"
+                    + (f"；首个原因: {first_fb}" if first_fb else "")
+                )
 
     # 汇总判定
     implemented = [r for r in report["availability"] if r["status"] == "implemented"]

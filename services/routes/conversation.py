@@ -96,6 +96,9 @@ def _generate_reply(
     - answer / hint / rephrase / downgrade 均由 stage 描述引导方向。
     """
     stage_hint = {
+        "opening": "会话开场：AI 扮演会话中的对方角色（如客户/朋友），用自然英文开启一段围绕话题的练习对话："
+                   "简要交代情景并点明学习者立场，以开放问题/邀请结尾引导学习者开口；"
+                   "不要直接写出目标句全文，不要使用中文",
         "answer": "用户输出正确或接近，给出自然回应；若 target 为空则生成一句新目标句",
         "hint": "用户卡住：给出目标句的首词/关键短语提示，帮助他继续",
         "rephrase": "用户仍不会：用更简单的英文重述目标句（同义替换）",
@@ -126,6 +129,16 @@ def _generate_reply(
 
 def _fallback_reply(*, topic: str, target: str, utterance: str, stage: str) -> dict:
     """规则兜底回复（LLM 不可用时保证接口可用，P0 验收可测试）。"""
+    if stage == "opening":
+        topic_label = topic or "this topic"
+        return {
+            "reply": (
+                f"Thanks for joining this conversation! Today, let's practise a short "
+                f"dialogue about {topic_label}. I'll play the other side — could you begin "
+                f"by telling me your first thoughts in a complete English sentence?"
+            ),
+            "next_target": "",
+        }
     if stage == "hint":
         words = target.split()[:2]
         return {"reply": f"提示：以 {(' '.join(words))} 开头试试？", "next_target": ""}
@@ -348,10 +361,12 @@ async def conversation_scenario(
     topic = str(data.topic or "").strip() or "daily conversation"
     scenario = str(data.scenario or "").strip() or "free_talk"
     sentence_ids: list[str] = []
+    bound_sentence_text = ""  # 绑定目标句文本：作为开场白牵引的目标句上下文（P0 单句）
     if data.sentence_id:
         sentences = await get_sentences_by_ids(db, [data.sentence_id])
         if sentences:
             sentence_ids = [data.sentence_id]
+            bound_sentence_text = str(sentences[0].get("text") or "")
 
     # 前置评估（S3.2 §6.2/§9-5）：基于 skill_state 聚合生成 Gate 建议 + 难度档位 +
     # Activity 推荐（建议层不阻断）；无历史 → 冷启动回退（§5.6），不报错不拒绝
@@ -415,6 +430,24 @@ async def conversation_scenario(
     }
     if prior is not None:
         data["prior_defaults"] = prior  # 先验默认（仅冷启动返回，前端可展示引导）
+
+    # 沉浸式开场（扩展字段，向后兼容）：生成引导学习者开口的英文开场白 + 会话初始状态，
+    # 供会话页直接渲染首条 AI 气泡。LLM 失败回落规则兜底（_generate_reply 内部处理），不阻断创建。
+    opening = _generate_reply(
+        topic=topic,
+        target=bound_sentence_text,
+        utterance="",
+        stage="opening",
+        difficulty=int(session["difficulty"] or assessment["difficulty"]),
+    )
+    data["reply"] = opening.get("reply") or ""
+    data["state"] = {
+        "stage": "opening",
+        "hint": None,
+        "rephrased": None,
+        "suggestion": None,
+        "difficulty": int(session["difficulty"] or assessment["difficulty"]),
+    }
     return ConvResponse(success=True, data=data)
 
 

@@ -47,6 +47,12 @@ class TestScenario:
         assert data["prior_defaults"]["mastery"] == pytest.approx(0.35)
         assert data["prior_defaults"]["difficulty"] == 1
         assert data["prior_defaults"]["confidence"] == 0.0
+        # 沉浸式开场扩展字段：引导开口的英文开场白 + 会话初始状态（供会话页渲染首条气泡）
+        assert data["reply"] == "OK, continue."  # 注入回复（真实链路为 LLM 开场白）
+        assert data["state"]["stage"] == "opening"
+        assert data["state"]["hint"] is None
+        assert data["state"]["rephrased"] is None
+        assert data["state"]["difficulty"] == 1
 
     def test_create_session_with_history_not_cold(self, make_client, monkeypatch, fake_db):
         """已有 skill_state 历史 → 非冷启动（§5.6.5）。"""

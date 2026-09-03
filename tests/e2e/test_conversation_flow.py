@@ -98,6 +98,10 @@ class TestConversationColdStart:
             "translation",
             "listening",
         ]
+        # 沉浸式开场扩展字段：引导开口的英文开场白 + 会话初始状态
+        assert data["reply"] == "Good job! Keep going."  # 注入回复（真实链路为 LLM 开场白）
+        assert data["state"]["stage"] == "opening"
+        assert data["state"]["difficulty"] == 1
 
     def test_scenario_missing_scholar_invalid(self, make_client, monkeypatch):
         client = _client(make_client, monkeypatch)

@@ -165,7 +165,7 @@ async def node_classify_and_match(state: DialogueState) -> dict:
     prompt = f"""请完成以下三项任务，只返回一个 JSON 对象（不要有任何其他文字）：
 
 1. 判断输入英文句是"陈述句(statement)"还是"疑问句(question)"。
-2. 从下方已学语句中选出最合适的一句作为配对句：若输入是疑问句，找一句合适的陈述句作为回答；若输入是陈述句，找一句合适的问句（以 what/where/when/who/how/why/is/are/do/does/did/can 等开头）作为对该陈述句的提问。
+2. 从下方已学语句中选出最合适的一句作为配对句：若输入是疑问句，找一句合适的陈述句作为回答；若输入是陈述句，找一句合适的问句作为「引导问句」——即在真实日常对话中能自然引出该陈述句的问句（优先 what/how/why/when/where/who 等开放式问句；不要选把该陈述句原句改写成是非问句的句子）。
 3. 判断该配对是否符合日常英语交流习惯（自然、合理）。
 
 输入句子："{input_sentence}"
@@ -220,12 +220,20 @@ async def node_generate(state: DialogueState) -> dict:
 请只返回一个 JSON 对象，不要有任何其他文字：
 {{"text": "你的回答"}}"""
     else:
-        prompt = f"""请为以下英文陈述句生成一个合适的一般疑问句或特殊疑问句（以 what、where、when、who、how、why、is、are、do、does、did、can 等开头）。
+        # 陈述句 → 「引导问句」：由对话另一方对学习者说出，引导学习者说出原句。
+        # 目的（对话匹配引导初衷）：让学习者把原句用作自己的答句来练习输出，
+        # 而不是替学习者把整句说出来或改写成人称漂移的是非问句（只答 Yes/No 无效）。
+        prompt = f"""请为以下英文陈述句设计一句英文「引导问句」，用于对话练习：这句问话由对话中的另一方（顾客、朋友、老师等）对学习者说出，目标是引导学习者用自己的话说出这句原句，而不是替学习者说出或改写原句。
+
+要求：
+1. 围绕原句的信息点提问（对象、方式、条件、时间、数量、价格等），让学习者必须说出原句（或原句的核心表达）才能完整作答；不得把原句整句写进问句，也不得把原句直接改写成只需回答 Yes/No 的是非问句；
+2. 保持原句立场不漂移：若原句主语是 we（我们/我方公司），问句应站在对方立场用 you / your company 指向学习者，使学习者仍以原句的 we 立场作答。示例：目标句 "We are willing to consider a discount if the order volume is substantial." → 引导问句 "If we place a substantial order, what would your company be willing to offer?"；
+3. 口语化、自然、地道，难度不超过原句，只输出一句。
 
 陈述句："{input_sentence}"
 
 请只返回一个 JSON 对象，不要有任何其他文字：
-{{"text": "生成的疑问句"}}"""
+{{"text": "引导问句"}}"""
 
     try:
         reply = await asyncio.to_thread(call_volcano, prompt)

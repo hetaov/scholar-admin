@@ -1,0 +1,471 @@
+{
+  "meta": {
+    "generated_at": "2026-09-03T10:28:07",
+    "judge_model": "hy3",
+    "pass_threshold": 0.7,
+    "scholar_id": "950208346a71a1b5042237f734982806",
+    "source_docs": [
+      "scholar-skill/docs_v1/沉浸式学习页中的AI会话功能优化.md",
+      "scholar-skill/docs_v1/沉浸式AI会话域接口混元评估方案.md"
+    ]
+  },
+  "availability": [
+    {
+      "id": "ai_session_v2_submit",
+      "label": "沉浸式会话 v2 提交（契约 §3.12①）",
+      "method": "POST",
+      "path": "/ai/session/v2",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "ai_session_v2_task",
+      "label": "沉浸式会话 v2 查询（契约 §3.12②）",
+      "method": "GET",
+      "path": "/ai/session/v2/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "match_dialogue",
+      "label": "对话匹配（现状会话回复 /match/dialogue）",
+      "method": "POST",
+      "path": "/match/dialogue",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 400",
+      "available": true
+    },
+    {
+      "id": "match_dialogue_task",
+      "label": "对话匹配异步提交 /match/dialogue/task",
+      "method": "POST",
+      "path": "/match/dialogue/task",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 400",
+      "available": true
+    },
+    {
+      "id": "match_dialogue_task_query",
+      "label": "对话匹配异步查询 /match/dialogue/task/{task_id}",
+      "method": "GET",
+      "path": "/match/dialogue/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "eval_translate",
+      "label": "评估 v1 同步（语音转写现状 /eval/translate）",
+      "method": "POST",
+      "path": "/eval/translate",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "eval_translate_v2",
+      "label": "评估 v2 异步提交 /eval/translate/v2",
+      "method": "POST",
+      "path": "/eval/translate/v2",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "eval_translate_v2_query",
+      "label": "评估 v2 异步查询 /eval/translate/v2/task/{task_id}",
+      "method": "GET",
+      "path": "/eval/translate/v2/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "conversation_scenario",
+      "label": "会话链路 开场 /conversation/scenario",
+      "method": "POST",
+      "path": "/conversation/scenario",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "conversation_turn",
+      "label": "会话链路 续轮 /conversation/turn",
+      "method": "POST",
+      "path": "/conversation/turn",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "conversation_history",
+      "label": "会话链路 历史 /conversation/history",
+      "method": "GET",
+      "path": "/conversation/history",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=NOT_FOUND",
+      "available": true
+    }
+  ],
+  "functions": [
+    {
+      "case": "C6_ai_session_v2_start",
+      "session_id": "s_d24a4f33a3f5451b81d250150fca5597",
+      "task_id": "st_b0696a2038ca44ccadfd99b715f13d1d",
+      "submit_ms": 195.44075000158045,
+      "status": "success",
+      "result": {
+        "session_id": "s_d24a4f33a3f5451b81d250150fca5597",
+        "content_type": "fill",
+        "ai_text": "Thanks for taking the time for this negotiation today. We've gone through your preliminary offer, but the 12% discount you proposed earlier is not something we can approve easily without reasonable supporting terms. Can you specify under what circumstances your team is able to offer that kind of preferential price?",
+        "hint": {
+          "levels": [
+            "词义/词块线索：我们愿意考虑折扣、如果订单量相当可观，核心词块首字母：W w c a d, i t o v i s",
+            "句式骨架：We are willing to ____ a discount if the order volume is ____.",
+            "整句中文意思：如果订单量足够大，我们愿意考虑折扣。逐段对照：我们愿意考虑折扣 — We are willing to ____ a discount；如果订单量很大 — if the order volume is ____，提示你可以从We are willing to开头组织句子"
+          ],
+          "max_level": 3
+        },
+        "suggested_targets": [
+          "tg_discount"
+        ]
+      }
+    },
+    {
+      "case": "C7_ai_session_v2_turn",
+      "session_id": "s_d24a4f33a3f5451b81d250150fca5597",
+      "task_id": "st_7adfe9e8cb244cf28bee51821c40f987",
+      "submit_ms": 353.7309999956051,
+      "status": "success",
+      "result": {
+        "session_id": "s_d24a4f33a3f5451b81d250150fca5597",
+        "content_type": "fill",
+        "ai_text": "I see your point, but a vague promise of discussing a discount after volume increase is not actionable for our procurement team. Could you state your formal position on this clearly?",
+        "hint": {
+          "levels": [
+            "词义：我们愿意考虑折扣，前提是订单量足够大；核心词块首字母：乐意考虑折扣 w____ t____ c____ a d____；订单量足够大 i____ t____ o____ v____ i____ s____",
+            "We ____ ____ to consider a discount ____ the order volume ____ ____.",
+            "整句中文意思：如果订单量足够大，我们愿意考虑折扣。逐段对照拆分：我们愿意考虑折扣 / 对应英文部分，条件状语「如果订单量足够大」/ 对应英文部分，句式开头已给出：We are willing to..."
+          ],
+          "max_level": 3
+        },
+        "suggested_targets": [
+          "tg_discount"
+        ]
+      }
+    },
+    {
+      "case": "C5_eval_v2",
+      "task_id": "tr_bf79588127b24e169b1e7b64b5364e64",
+      "submit_ms": 107.47766699932981,
+      "status": "success",
+      "result": {
+        "transcription": "如果订单量足够大，我们愿意考虑给予折扣。",
+        "status": 5,
+        "feedback": "译文准确还原了原句的全部含义，表达符合中文商务场景的常用表述，自然通顺，无任何错误。",
+        "confidence": 0.8,
+        "raw_model_output": "{\"status\": 5, \"feedback\": \"译文准确还原了原句的全部含义，表达符合中文商务场景的常用表述，自然通顺，无任何错误。\"}"
+      }
+    },
+    {
+      "case": "C1_match_dialogue_task",
+      "taskId": "dt_28c554b57d2449e198a796b34977b9ca",
+      "submit_ms": 94.44804200029466,
+      "status": "success",
+      "result": {
+        "type": "qa",
+        "statement": "We are willing to consider a discount if the order volume is substantial.",
+        "question": "If we place a substantial order, what would your company be willing to consider in terms of pricing?",
+        "source": "generated"
+      }
+    },
+    {
+      "case": "C2_match_dialogue",
+      "submit_ms": 40629.40799999342,
+      "status": "success",
+      "result": {
+        "type": "qa",
+        "statement": "We are willing to consider a discount if the order volume is substantial.",
+        "question": "If we place a substantial order, what would your company be willing to consider in terms of pricing?",
+        "source": "generated"
+      },
+      "is_question": false
+    },
+    {
+      "case": "C3_scenario",
+      "status": "success",
+      "submit_ms": 20966.26037498936,
+      "result": {
+        "session_id": "cvs_1788402636_53599fd2",
+        "difficulty": 1,
+        "pre_assessment": {
+          "gate_suggestion": "pass",
+          "activity_recommendation": [
+            "content",
+            "shadowing",
+            "translation",
+            "listening"
+          ]
+        },
+        "cold_start": false,
+        "reply": "Hi there! I'm the sales representative of the home appliance brand you reached out to last week. You mentioned you want to stock 80 units of our mini portable blenders for your lifestyle shop, right? Our standard wholesale price is $12 per unit, but we can adjust the rate for bulk purchases. Could you share what kind of favorable pricing you are expecting for this cooperation?",
+        "state": {
+          "stage": "opening",
+          "hint": null,
+          "rephrased": null,
+          "suggestion": null,
+          "difficulty": 1
+        }
+      }
+    },
+    {
+      "case": "C3_turn_good",
+      "status": "success",
+      "submit_ms": 41618.24783300108,
+      "result": {
+        "reply": "Great job! That's a very polite and appropriate expression for pricing negotiation. Considering we hope to build a long-term cooperative relationship with you, we can offer you a 5% exclusive discount for this order.",
+        "state": {
+          "stage": "answer",
+          "hint": null,
+          "rephrased": null,
+          "suggestion": null,
+          "difficulty": 1
+        },
+        "eval_verdict": {
+          "score": 100,
+          "meaningful": true,
+          "faithfulness": true,
+          "anomaly": false,
+          "confidence": 1.0,
+          "level": "l2",
+          "judge_model": "ep-20260901102645-ffnf6"
+        }
+      }
+    },
+    {
+      "case": "C4_turn_weak",
+      "status": "success",
+      "submit_ms": 14679.809708002722,
+      "result": {
+        "reply": "Great that you're bringing up the discount for your big order! Let me give you a little hint to help you make the full request: the first key phrase of the target sentence you need is 'Can you also cover', try to finish the rest of the sentence about the shipping fee for this order!",
+        "state": {
+          "stage": "hint",
+          "hint": true,
+          "rephrased": null,
+          "suggestion": null,
+          "difficulty": 1
+        },
+        "eval_verdict": {
+          "score": 0,
+          "meaningful": false,
+          "faithfulness": false,
+          "anomaly": true,
+          "confidence": 1.0,
+          "level": "l2",
+          "judge_model": "ep-20260901102645-ffnf6"
+        }
+      }
+    },
+    {
+      "case": "C3_history",
+      "status": "success",
+      "result": {
+        "has_summary": true,
+        "turn_count": 2
+      }
+    }
+  ],
+  "judgments": [
+    {
+      "case": "C6_ai_session_v2_start",
+      "family": "ai_session_v2",
+      "interface": "POST /ai/session/v2（start 开场）",
+      "score": 0.77,
+      "feedback": "总体不错，但遗漏了review(付款条款)的埋伏要求，需在AI文本或hint中自然融入付款条件旧句引诱。",
+      "issues": [
+        "未埋伏复习组付款条款旧句",
+        "suggested_targets仅含新目标，未标记复习目标"
+      ],
+      "dimensions": [
+        {
+          "name": "场景/角色三要素生效",
+          "score": 0.9,
+          "comment": "AI以Buyer角色开启谈判，提及折扣与支撑条款，贴合商务折扣场景且未跳出角色。"
+        },
+        {
+          "name": "素材绑定与新句必用",
+          "score": 0.9,
+          "comment": "通过提问引诱对方说明折扣条件，制造填空目标句语境且未泄露整句。"
+        },
+        {
+          "name": "复习句埋伏",
+          "score": 0.0,
+          "comment": "未自然埋伏付款条款复习句，学习者无机会回想旧素材。"
+        },
+        {
+          "name": "提示不给整句答案",
+          "score": 0.9,
+          "comment": "hint提供词块、骨架与中文对照，渐进引导未给英文整句。"
+        },
+        {
+          "name": "语言自然度与正确性",
+          "score": 0.9,
+          "comment": "英文表达自然礼貌，语法准确，符合买方谈判风格。"
+        },
+        {
+          "name": "结构化契约",
+          "score": 0.9,
+          "comment": "content_type为fill合法，各字段语义清晰，契约完整。"
+        }
+      ]
+    },
+    {
+      "case": "C7_ai_session_v2_turn",
+      "family": "ai_session_v2",
+      "interface": "POST /ai/session/v2（turn 续轮）",
+      "score": 0.94,
+      "feedback": "总体质量良好，AI有效维持角色并引导填空练习，仅响应未包含assisted字段略有契约瑕疵。",
+      "issues": [
+        "响应JSON缺少assisted字段，按契约应回显或包含该字段"
+      ],
+      "dimensions": [
+        {
+          "name": "场景/角色三要素生效",
+          "score": 0.95,
+          "comment": "AI以采购方身份自然回应，未跳出角色点评语法，体现谈判场景"
+        },
+        {
+          "name": "素材绑定与新句必用",
+          "score": 0.95,
+          "comment": "通过质疑模糊承诺制造语境，引导学习者说出目标新句且未直接展示原文"
+        },
+        {
+          "name": "复习句埋伏",
+          "score": 1.0,
+          "comment": "本轮无复习素材，自然不适用"
+        },
+        {
+          "name": "提示不给整句答案",
+          "score": 0.95,
+          "comment": "hint采用词块、骨架、对照拆分渐进引导，未给完整句子"
+        },
+        {
+          "name": "语言自然度与正确性",
+          "score": 0.95,
+          "comment": "英文表达自然符合商务谈判风格，语法正确"
+        },
+        {
+          "name": "结构化契约",
+          "score": 0.8,
+          "comment": "content_type等合法，但响应缺失assisted字段回显"
+        }
+      ]
+    },
+    {
+      "case": "C1_match_dialogue_task",
+      "family": "match_dialogue",
+      "interface": "POST /match/dialogue(/task) 对话匹配回复",
+      "score": -1.0,
+      "feedback": "评估跳过: Judge 响应 content 为空（model=hy3，base_url=https://tokenhub.tencentmaas.com/v1 须为 OpenAI 兼容 /chat/completions 网关）",
+      "issues": [],
+      "dimensions": []
+    },
+    {
+      "case": "C2_match_dialogue",
+      "family": "match_dialogue",
+      "interface": "POST /match/dialogue(/task) 对话匹配回复",
+      "score": 0.84,
+      "feedback": "总体评价：AI生成qa结构，以买方身份就原句内容设问，引导学习者应答，语言自然且字段合规；但问题设计较为机械，直接将陈述句转为疑问句，缺乏对话推进感。改进建议：可设计更开放的跟进问题，如询问具体折扣比例或最小订单量，以增强互动性。",
+      "issues": [
+        "问题设计循环冗余，未推动对话深入"
+      ],
+      "dimensions": [
+        {
+          "name": "引导而非代答",
+          "score": 0.8,
+          "comment": "AI以设问引导学习者产出目标表达，未直接代答"
+        },
+        {
+          "name": "素材牵引",
+          "score": 0.7,
+          "comment": "围绕输入句转化为问题，但略显循环缺乏延伸"
+        },
+        {
+          "name": "场景与角色一致性",
+          "score": 0.9,
+          "comment": "买方问卖方折扣事宜，贴合商务谈判语境"
+        },
+        {
+          "name": "语言自然度与正确性",
+          "score": 0.95,
+          "comment": "英文问句语法正确、表达自然"
+        },
+        {
+          "name": "结构化契约",
+          "score": 0.9,
+          "comment": "返回字段齐备，type/statement/question/source语义合规"
+        }
+      ]
+    },
+    {
+      "case": "C3_scenario",
+      "family": "conversation",
+      "interface": "POST /conversation/scenario 会话开场",
+      "score": 0.99,
+      "feedback": "总体优秀，开场白自然引导用户进入商务谈判语境，字段契约完整。建议可稍增加明确的学习者任务提示如'Please respond in English'以增强引导性。",
+      "issues": [],
+      "dimensions": [
+        {
+          "name": "引导而非代答",
+          "score": 1.0,
+          "comment": "回复全英文并以提问引导学习者表达期望价格，无代答或中文。"
+        },
+        {
+          "name": "素材牵引",
+          "score": 1.0,
+          "comment": "紧扣产品定价谈判话题，提及数量、单价与批量优惠，有效牵引目标表达。"
+        },
+        {
+          "name": "提示递进合理性",
+          "score": 1.0,
+          "comment": "未提供hint/rephrase，无跳级或整句答案风险。"
+        },
+        {
+          "name": "语言自然度与正确性",
+          "score": 0.95,
+          "comment": "英文自然流利，仅'adjust the rate'稍口语化但正确。"
+        },
+        {
+          "name": "结构化契约",
+          "score": 1.0,
+          "comment": "reply与state字段合法，stage匹配opening，无非法值。"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "availability_ok": true,
+    "implemented_count": 11,
+    "draft_count": 0,
+    "function_ok": true,
+    "needs_data_count": 0,
+    "judge_count": 5,
+    "judge_pass_count": 4
+  },
+  "pass": true,
+  "reasons": []
+}

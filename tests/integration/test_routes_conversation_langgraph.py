@@ -33,6 +33,23 @@ def _create_session(client) -> str:
 
 
 class TestScenarioGraphInit:
+    def test_scenario_returns_immersive_opening(self, make_client, monkeypatch, fake_db):
+        """开场返回引导性英文回复 + 会话初始状态（混元评估 conversation 维度要求）。"""
+        client = _client(make_client, monkeypatch)
+        resp = client.post(
+            "/conversation/scenario",
+            json={"scholar_id": "u1", "topic": "Product pricing negotiation"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["reply"] == "OK, continue."  # 注入回复（真实链路为 LLM 开场白）
+        state = data["state"]
+        assert state["stage"] == "opening"
+        assert state["hint"] is None
+        assert state["rephrased"] is None
+        assert state["suggestion"] is None
+        assert state["difficulty"] in (1, 2)
+
     def test_scenario_writes_graph_state_and_checkpoint(self, make_client, monkeypatch, fake_db):
         client = _client(make_client, monkeypatch)
         sid = _create_session(client)
