@@ -23,6 +23,12 @@ POST /eval/speech — SOE-N 句级口语评测（F2/2.3，契约 api-contract §
 - 原始 JSON 落 speech_evaluation 集合（raw + 归一化 parsed），与 skill_state 解耦
 - 错误契约对齐 /eval/translate：业务失败 200 + success=false + code
   （INVALID_INPUT / INVALID_AUDIO / SOE_UNAVAILABLE），仅技术异常走 5xx
+
+POST /eval/transcribe — 纯语音转写（2026-09-03，AI 会话语音输入数据源）。
+- 只做 ASR 转写、不做任何评分：会话自由语音无标准答案，v1 /eval/translate
+  的 evaluate()（LLM 评分，失败兜底 levenshtein）从不被消费 → 本端点去除该步骤；
+- 入参仅 audio_base64（+ 可选 voice_format），不需要 original_text / user_input；
+- 错误契约同上：业务失败 200 + success=false + code（INVALID_AUDIO / ASR_UNAVAILABLE）
 """
 from __future__ import annotations
 
@@ -401,6 +407,77 @@ def _decode_audio_base64(raw_b64: str) -> Optional[bytes]:
         return base64.b64decode(s, validate=True)
     except (binascii.Error, ValueError):
         return None
+
+
+class EvalTranscribeRequest(BaseModel):
+    """纯语音转写请求（AI 会话语音输入数据源，2026-09-03）。
+
+    只做 ASR 转写、不评分：会话自由语音无标准答案，不需要
+    original_text / user_input（v1 /eval/translate 对语音路径必跑 evaluate()，
+    其 LLM 评分对会话语音从不被消费 → 白付一次 LLM 调用与同步等待）。
+    """
+
+    audio_base64: str = Field(..., description="音频 base64（16k/单声道/mp3|wav，≤60s）")
+    voice_format: Optional[str] = Field(
+        "mp3", description="音频格式（mp3/wav/m4a/aac/pcm），默认 mp3"
+    )
+
+
+@router.post("/eval/transcribe", response_model=EvalTranslateResponse)
+async def eval_transcribe(
+    body: EvalTranscribeRequest,
+    asr: ASRService = Depends(get_asr_service),
+) -> EvalTranslateResponse:
+    """纯语音转写 — ASR → transcription，不做任何评分（AI 会话语音输入数据源，2026-09-03）。
+
+    返回：{ success: true, data: { transcription } }（无 status 评分字段）
+    错误契约对齐 /eval/translate：业务失败 200 + success=false + code
+    （INVALID_AUDIO / ASR_UNAVAILABLE），仅技术异常走 5xx。
+    """
+    # 1. 基础校验（业务失败 200 + success=false，无 4xx）
+    if not body.audio_base64.strip():
+        return EvalTranslateResponse(
+            success=False, code="INVALID_AUDIO", message="音频内容为空"
+        )
+    # 2. 音频解码/大小校验（INVALID_AUDIO）
+    audio_bytes = _decode_audio_base64(body.audio_base64)
+    if audio_bytes is None:
+        return EvalTranslateResponse(
+            success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
+        )
+    if not audio_bytes:
+        return EvalTranslateResponse(
+            success=False, code="INVALID_AUDIO", message="音频内容为空"
+        )
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        return EvalTranslateResponse(
+            success=False,
+            code="INVALID_AUDIO",
+            message="音频过大（16k/60s 上限约 5MB），请分段重试",
+        )
+    # 3. ASR 转写（不做任何评分）
+    if not asr.available:
+        logger.warning(
+            "[eval] /eval/transcribe ASR_UNAVAILABLE 诊断：TCB_APPID=%s, SECRET_ID=%s, "
+            "SECRET_KEY=%s, SESSION_TOKEN=%s",
+            "已配置" if TCB_APPID else "缺失",
+            "已配置" if SECRET_ID else "缺失",
+            "已配置" if SECRET_KEY else "缺失",
+            "已配置" if SESSION_TOKEN else "缺失",
+        )
+        return EvalTranslateResponse(
+            success=False,
+            code="ASR_UNAVAILABLE",
+            message="ASR 服务未配置凭据（语音输入暂不可用）",
+        )
+    result = asr.recognize(audio_bytes, voice_format=body.voice_format or "mp3")
+    if not result:
+        return EvalTranslateResponse(
+            success=False,
+            code="ASR_UNAVAILABLE",
+            message="语音识别失败，请重试",
+        )
+    return EvalTranslateResponse(success=True, data={"transcription": result})
 
 
 @router.post("/eval/speech", response_model=EvalTranslateResponse)

@@ -154,3 +154,87 @@ class TestEvalTranslateValidation:
         assert resp.json()["success"] is True
         assert fake_db.all("skill_state") == []
         assert fake_db.all("study_attempt") == []
+
+
+class TestEvalTranscribe:
+    """纯语音转写（2026-09-03）— POST /eval/transcribe：ASR → transcription，只转写不评分。
+
+    会话自由语音无标准答案:v1 /eval/translate 语音路径的 evaluate()(LLM 评分,
+    失败兜底 levenshtein)从不被消费 → 本端点去除评分环节,无需 original_text。
+    错误契约与 /eval/translate 对齐:业务失败 200 + success=false + code。
+    """
+
+    def _audio(self, raw=b"fake-mp3-bytes"):
+        return base64.b64encode(raw).decode()
+
+    def _block_scoring(self, monkeypatch):
+        """评分一旦被调用立即失败 → 证明转写端点不进入评估链路。"""
+
+        def _boom(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("POST /eval/transcribe 不应调用 evaluate()（纯转写无评分）")
+
+        monkeypatch.setattr("services.routes.eval.evaluate", _boom)
+
+    def test_transcribe_audio_only(self, make_client, monkeypatch):
+        """语音转写成功:仅返回 transcription(无 status 评分字段),不触发评估。"""
+        self._block_scoring(monkeypatch)
+        asr = FakeAsrService()
+        client = _client(make_client, monkeypatch, asr=asr)
+        resp = client.post(
+            "/eval/transcribe",
+            json={"audio_base64": self._audio(), "voice_format": "mp3"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["data"] == {"transcription": "it is a watch"}  # 无 status
+        assert asr.call_count == 1
+        assert asr.calls[0][0] == b"fake-mp3-bytes"
+        assert asr.calls[0][1] == "mp3"
+
+    def test_no_original_text_needed(self, make_client, monkeypatch):
+        """纯转写不要求 original_text:AI 会话自由语音无标准答案(与 v1 关键差异)。"""
+        self._block_scoring(monkeypatch)
+        client = _client(make_client, monkeypatch)
+        resp = client.post("/eval/transcribe", json={"audio_base64": self._audio()})
+        assert resp.status_code == 200
+        assert resp.json()["data"]["transcription"] == "it is a watch"
+
+    def test_empty_audio(self, make_client, monkeypatch):
+        client = _client(make_client, monkeypatch)
+        resp = client.post("/eval/transcribe", json={"audio_base64": ""})
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "INVALID_AUDIO"
+
+    def test_missing_audio(self, make_client, monkeypatch):
+        # audio_base64 为必填字段 → pydantic 422（同 /eval/speech）
+        client = _client(make_client, monkeypatch)
+        resp = client.post("/eval/transcribe", json={})
+        assert resp.status_code == 422
+
+    def test_invalid_base64(self, make_client, monkeypatch):
+        client = _client(make_client, monkeypatch)
+        resp = client.post("/eval/transcribe", json={"audio_base64": "!!!not-base64!!!"})
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "INVALID_AUDIO"
+
+    def test_audio_too_large(self, make_client, monkeypatch):
+        # 超过 MAX_AUDIO_BYTES(5MB) → INVALID_AUDIO
+        client = _client(make_client, monkeypatch)
+        big = b"x" * (5 * 1024 * 1024 + 1)
+        resp = client.post("/eval/transcribe", json={"audio_base64": self._audio(big)})
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "INVALID_AUDIO"
+
+    def test_asr_unavailable(self, make_client, monkeypatch):
+        client = _client(make_client, monkeypatch, asr=FakeAsrService.unavailable())
+        resp = client.post("/eval/transcribe", json={"audio_base64": self._audio()})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is False
+        assert resp.json()["code"] == "ASR_UNAVAILABLE"
+
+    def test_asr_recognition_failure(self, make_client, monkeypatch):
+        client = _client(make_client, monkeypatch, asr=FakeAsrService.failing())
+        resp = client.post("/eval/transcribe", json={"audio_base64": self._audio()})
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "ASR_UNAVAILABLE"
