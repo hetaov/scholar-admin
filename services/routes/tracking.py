@@ -454,6 +454,7 @@ async def get_textbook_lessons(
           {
             "lesson_id": "...",
             "lesson_title": "...",
+            "order": 1,                    // 课序（教材内唯一递增，脚本 repair_lesson_order 重写）
             "progress": {
               "overall_percent": 60,           // 0-100
               "mastery": 0.5,                  // 0-1
@@ -556,6 +557,10 @@ async def get_textbook_lessons(
             lessons_out.append({
                 "lesson_id": lid,
                 "lesson_title": lesson.get("lesson_title", ""),
+                # 2026-09-03 统一修复：透传 DB order（repair_lesson_order 脚本已按标题课号
+                # 重写为教材内唯一递增）。小程序 fetchBookDetail 展开保留该字段，配合
+                # 前端 sortChaptersByLessonNumber 以「后端权威课序」还原目录顺序。
+                "order": lesson.get("order"),
                 "progress": {
                     "overall_percent": round(lesson.get("progress", 0) * 100),
                     "mastery": mastery_ratio(
@@ -568,6 +573,16 @@ async def get_textbook_lessons(
                     ),
                 },
             })
+        # 2026-09-03 统一修复：聚合输出（detail="lesson"）的顶层 lessons 顺序受
+        # sentence dict 插入序（学习记录先后）影响不可信（见 progress.aggregate_progress），
+        # 接口层按 DB order 升序还原目录序 —— 与 DB 查询 order ASC、修复脚本同一口径。
+        # order 缺失/非正数视为无效：保持原相对顺序排末尾（Python sort 稳定）。
+        lessons_out.sort(
+            key=lambda item: (
+                0 if isinstance(item.get("order"), int) and item.get("order", 0) > 0 else 1,
+                item.get("order") if isinstance(item.get("order"), int) and item.get("order", 0) > 0 else 0,
+            ),
+        )
 
         total_attempt_count = summary_raw.get("total_attempt_count", 0)
         learned_sentence_count = summary_raw.get("learned_sentence_count", 0)
