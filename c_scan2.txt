@@ -1,0 +1,212 @@
+================================================================================================
+C 区（MIXED）幽灵行级细扫（DRY-RUN，只读）| 判据同 scan_ghost_distribution.collect_all
+强幽灵指纹 = 同批 created(≥5行/跨度≤1h00m, gap≤900s) + attempt=1 + mastery=null + 课无强证据 + created 在脚本日 2026-08-14
+================================================================================================
+
+[0] 结论速览
+  MIXED 书 2 | 幽灵行 1464
+  指纹候选（删除候选，人工过目）: 1441
+  其余幽灵去向: lesson-has-evidence 10  non-batch 4  off-script-date 5  row-has-revisit 4
+
+[1] 书级上下文
+  950208346a71   | 新概念英语第一册               tb_db3e2209b3c | 行 1445 ghost 1395 learning=1395  mastered=50
+    书级证据 R:50 M:0 A带分:0 A总:162 S:3(2817s) | 批簇 6 个
+  scholar_book: status=learning total_time_spent=2817s last=2026-08-27 08:01 started=2026-08-14 06:16 anchor_lesson=unit_2def3abb8 anchor_chapter=unit_2def3abb8
+    行级去向: fingerprint 1379  lesson-has-evidence 3  non-batch 4  off-script-date 5  row-has-revisit 4
+  6d758f346a6d   | 三年级英语上册 广州版            tb_ed12c746d8a | 行 71 ghost 69 learning=69  mastered=2
+    书级证据 R:2 M:0 A带分:0 A总:4 S:0(0s) | 批簇 1 个
+  scholar_book: status=learning total_time_spent=0s last=2026-08-14 06:16 started=2026-08-14 06:16 anchor_lesson=- anchor_chapter=unit_31094b48a
+    行级去向: fingerprint 62  lesson-has-evidence 7
+
+[2] 课级明细（幽灵行 > 0；指纹候选所在课）
+  -- 950208346a71 × 新概念英语第一册 tb_db3e2209b3c --
+    L1   Lesson 1: Excuse …   | state  18(learning=1 mastered=17) ghost   1 | 指纹   0 | 证据 R17 M0 A0 att0分97
+    L2   Lesson 2: Excuse …   | state  35(learning=2 mastered=33) ghost   2 | 指纹   0 | 证据 R33 M0 A0 att0分46
+    L3   Lesson 3: Sorry, …   | state  18(learning=18) ghost  18 | 指纹  11 | 证据 R0 M0 A0 att0分12
+    L4   Lesson 4: Is this…   | state  15(learning=15) ghost  15 | 指纹  10 | 证据 R0 M0 A0 att0分5
+    L5   Lesson 5: Nice to…   | state  13(learning=13) ghost  13 | 指纹  13 | 证据 R0 M0 A0 att0分0
+    L6   Lesson 6: What ma…   | state  25(learning=25) ghost  25 | 指纹  25 | 证据 R0 M0 A0 att0分0
+    L7   Lesson 7: Are you…   | state  14(learning=14) ghost  14 | 指纹  14 | 证据 R0 M0 A0 att0分0
+    L8   Lesson 8: What's …   | state  11(learning=11) ghost  11 | 指纹  11 | 证据 R0 M0 A0 att0分0
+    L9   Lesson 9: How are…   | state  10(learning=10) ghost  10 | 指纹  10 | 证据 R0 M0 A0 att0分0
+    L10  Lesson 10: Look a…   | state  48(learning=48) ghost  48 | 指纹  48 | 证据 R0 M0 A0 att0分0
+    L11  Lesson 11: Is thi…   | state  12(learning=12) ghost  12 | 指纹  12 | 证据 R0 M0 A0 att0分0
+    L12  Lesson 12: Whose …   | state  46(learning=46) ghost  46 | 指纹  46 | 证据 R0 M0 A0 att0分0
+    L13  Lesson 13: A new …   | state  10(learning=10) ghost  10 | 指纹  10 | 证据 R0 M0 A0 att0分0
+    L14  Lesson 14: What c…   | state  18(learning=18) ghost  18 | 指纹  18 | 证据 R0 M0 A0 att0分0
+    L15  Lesson 15: Your p…   | state  15(learning=15) ghost  15 | 指纹  15 | 证据 R0 M0 A0 att0分0
+    L16  Lesson 16: Are yo…   | state  27(learning=27) ghost  27 | 指纹  27 | 证据 R0 M0 A0 att0分0
+    L17  Lesson 17: How do…   | state  12(learning=12) ghost  12 | 指纹  12 | 证据 R0 M0 A0 att0分0
+    L18  Lesson 18: What a…   | state  16(learning=16) ghost  16 | 指纹  16 | 证据 R0 M0 A0 att0分0
+    L19  Lesson 19: Tired …   | state  65(learning=65) ghost  65 | 指纹  65 | 证据 R0 M0 A0 att0分0
+    L20  Lesson 20: Look a…   | state  24(learning=24) ghost  24 | 指纹  24 | 证据 R0 M0 A0 att0分0
+    L21  Lesson 21: Which …   | state  40(learning=40) ghost  40 | 指纹  40 | 证据 R0 M0 A0 att0分0
+    L22  Lesson 22: Give m…   | state  15(learning=15) ghost  15 | 指纹  15 | 证据 R0 M0 A0 att0分0
+    L23  Lesson 23: Which …   | state  40(learning=40) ghost  40 | 指纹  40 | 证据 R0 M0 A0 att0分0
+    L24  Lesson 24: Give m…   | state   5(learning=5) ghost   5 | 指纹   5 | 证据 R0 M0 A0 att0分0
+    L25  Lesson 25: Mrs. S…   | state  60(learning=60) ghost  60 | 指纹  60 | 证据 R0 M0 A0 att0分0
+    L26  Lesson 26: Where …   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L27  Lesson 27: Mrs. S…   | state  65(learning=65) ghost  65 | 指纹  65 | 证据 R0 M0 A0 att0分0
+    L28  Lesson 28: Where …   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L29  Lesson 29: Come i…   | state  45(learning=45) ghost  45 | 指纹  45 | 证据 R0 M0 A0 att0分0
+    L30  Lesson 30: What m…   | state  11(learning=11) ghost  11 | 指纹  11 | 证据 R0 M0 A0 att0分0
+    L31  Lesson 31: Where'…   | state  57(learning=57) ghost  57 | 指纹  57 | 证据 R0 M0 A0 att0分0
+    L32  Lesson 32: What's…   | state   8(learning=8) ghost   8 | 指纹   8 | 证据 R0 M0 A0 att0分0
+    L33  Lesson 33: A Fine…   | state  50(learning=50) ghost  50 | 指纹  50 | 证据 R0 M0 A0 att0分0
+    L34  Lesson 34: What a…   | state   8(learning=8) ghost   8 | 指纹   8 | 证据 R0 M0 A0 att0分0
+    L35  Lesson 35: Our Vi…   | state  75(learning=75) ghost  75 | 指纹  75 | 证据 R0 M0 A0 att0分0
+    L36  Lesson 36: Where.…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L37  Lesson 37: Making…   | state  72(learning=72) ghost  72 | 指纹  72 | 证据 R0 M0 A0 att0分0
+    L38  Lesson 38: What a…   | state   8(learning=8) ghost   8 | 指纹   8 | 证据 R0 M0 A0 att0分0
+    L39  Lesson 39: Don't …   | state  49(learning=49) ghost  49 | 指纹  49 | 证据 R0 M0 A0 att0分0
+    L40  Lesson 40: What a…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L41  Lesson 41: Penny'…   | state  48(learning=48) ghost  48 | 指纹  48 | 证据 R0 M0 A0 att0分0
+    L42  Lesson 42: Is the…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L43  Lesson 43: Hurry …   | state  75(learning=75) ghost  75 | 指纹  75 | 证据 R0 M0 A0 att0分0
+    L44  Lesson 44: Are th…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L45  Lesson 45: The Bo…   | state  74(learning=74) ghost  74 | 指纹  74 | 证据 R0 M0 A0 att0分0
+    L46  Lesson 46: Can yo…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L47  Lesson 47: A Cup …   | state  64(learning=64) ghost  64 | 指纹  64 | 证据 R0 M0 A0 att0分0
+    L48  Lesson 48: Do you…   | state   6(learning=6) ghost   6 | 指纹   6 | 证据 R0 M0 A0 att0分0
+    L49  Lesson 49: At the…   | state  68(learning=68) ghost  68 | 指纹  68 | 证据 R0 M0 A0 att0分0
+    L50  Lesson 50: He lik…   | state   8(learning=8) ghost   8 | 指纹   7 | 证据 R0 M0 A0 att0分2
+  -- 6d758f346a6d × 三年级英语上册 广州版 tb_ed12c746d8a --
+    L1   Unit 1 Letters in…   | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L2   Unit 2 English an…   | state   9(learning=7 mastered=2) ghost   7 | 指纹   0 | 证据 R2 M0 A0 att0分4
+    L3   Unit 3 Who's Who?    | state   8(learning=8) ghost   8 | 指纹   8 | 证据 R0 M0 A0 att0分0
+    L4   Unit 4 Colour a K…   | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L5   Unit 5 Set a Pass…   | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L6   Unit 6 I Can Draw    | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L7   Unit 7 Be a Good …   | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L8   Unit 8 It's Time …   | state   7(learning=7) ghost   7 | 指纹   7 | 证据 R0 M0 A0 att0分0
+    L9   Review A Music Sh…   | state  12(learning=12) ghost  12 | 指纹  12 | 证据 R0 M0 A0 att0分0
+
+[3] 指纹候选行明细（1441 行；全量见 --json 清单，此处展示前 120 行）
+  state_id                                     | lesson                     | sentence 文本前40                             | created
+  6d758f346a6daee000859c332ed11089_sent_07c…   | L1 Unit 1 Letters in Ou…   | It's letter A.                             | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_107…   | L1 Unit 1 Letters in Ou…   | What's this letter?                        | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_135…   | L1 Unit 1 Letters in Ou…   | Can you say the letter?                    | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_844…   | L1 Unit 1 Letters in Ou…   | We can see letters on the bag.             | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_a0a…   | L1 Unit 1 Letters in Ou…   | Show me the letter "B".                    | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_b0b…   | L1 Unit 1 Letters in Ou…   | Letters are everywhere.                    | 2026-08-14 05:02
+  6d758f346a6daee000859c332ed11089_sent_e26…   | L1 Unit 1 Letters in Ou…   | This is the letter for apple.              | 2026-08-14 05:02
+  950208346a71a1b5042237f734982806_sent_037…   | L10 Lesson 10: Look at.…   | Look at that air hostess.                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_039…   | L10 Lesson 10: Look at.…   | Look at that woman.                        | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_06c…   | L10 Lesson 10: Look at.…   | He's fat.                                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_0b3…   | L10 Lesson 10: Look at.…   | He's old.                                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_0c5…   | L10 Lesson 10: Look at.…   | She's short.                               | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_0fa…   | L10 Lesson 10: Look at.…   | Look at that man.                          | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_119…   | L10 Lesson 10: Look at.…   | She's hot.                                 | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_13b…   | L10 Lesson 10: Look at.…   | He's lazy.                                 | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_14a…   | L10 Lesson 10: Look at.…   | She's thin.                                | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_15a…   | L10 Lesson 10: Look at.…   | Look at that policeman.                    | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_22f…   | L10 Lesson 10: Look at.…   | Look at that postman.                      | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_267…   | L10 Lesson 10: Look at.…   | Look at that man.                          | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_32d…   | L10 Lesson 10: Look at.…   | Look at that nurse.                        | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_35b…   | L10 Lesson 10: Look at.…   | He's dirty.                                | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_36f…   | L10 Lesson 10: Look at.…   | Look at that policeman.                    | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_375…   | L10 Lesson 10: Look at.…   | He's dirty.                                | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_406…   | L10 Lesson 10: Look at.…   | Look at that milkman.                      | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_422…   | L10 Lesson 10: Look at.…   | He's tall.                                 | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_482…   | L10 Lesson 10: Look at.…   | Look at that policewoman.                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_4bf…   | L10 Lesson 10: Look at.…   | He's tall.                                 | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_537…   | L10 Lesson 10: Look at.…   | He's busy.                                 | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_592…   | L10 Lesson 10: Look at.…   | Look at that postman.                      | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_593…   | L10 Lesson 10: Look at.…   | Look at that housewife.                    | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_5a2…   | L10 Lesson 10: Look at.…   | Look at that hairdresser.                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_717…   | L10 Lesson 10: Look at.…   | He's old.                                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_723…   | L10 Lesson 10: Look at.…   | He's cold.                                 | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_90e…   | L10 Lesson 10: Look at.…   | She's clean.                               | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_962…   | L10 Lesson 10: Look at.…   | She's short.                               | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_9bf…   | L10 Lesson 10: Look at.…   | He's hot.                                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_9de…   | L10 Lesson 10: Look at.…   | She's thin.                                | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_a3f…   | L10 Lesson 10: Look at.…   | Look at that mechanic.                     | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_ab0…   | L10 Lesson 10: Look at.…   | Look at that nurse.                        | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_aea…   | L10 Lesson 10: Look at.…   | Look at that milkman.                      | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_b0c…   | L10 Lesson 10: Look at.…   | She's cold.                                | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_b26…   | L10 Lesson 10: Look at.…   | Look at that woman.                        | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_b2c…   | L10 Lesson 10: Look at.…   | Look at that taxi driver.                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_b51…   | L10 Lesson 10: Look at.…   | He's busy.                                 | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_b74…   | L10 Lesson 10: Look at.…   | He's young.                                | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_ba1…   | L10 Lesson 10: Look at.…   | She's young.                               | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_bb9…   | L10 Lesson 10: Look at.…   | Look at that policewoman.                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_bfb…   | L10 Lesson 10: Look at.…   | He's fat.                                  | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_d6f…   | L10 Lesson 10: Look at.…   | Look at that mechanic.                     | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_da9…   | L10 Lesson 10: Look at.…   | Look at that housewife.                    | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_dc7…   | L10 Lesson 10: Look at.…   | Look at that taxi driver.                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_e14…   | L10 Lesson 10: Look at.…   | Look at that hairdresser.                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_e27…   | L10 Lesson 10: Look at.…   | Look at that air hostess.                  | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_fa3…   | L10 Lesson 10: Look at.…   | She's lazy.                                | 2026-08-14 05:55
+  950208346a71a1b5042237f734982806_sent_fd0…   | L10 Lesson 10: Look at.…   | She's clean.                               | 2026-08-14 06:08
+  950208346a71a1b5042237f734982806_sent_025…   | L11 Lesson 11: Is this …   | Here you are. Catch!                       | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_1b6…   | L11 Lesson 11: Is this …   | Yes, sir?                                  | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_283…   | L11 Lesson 11: Is this …   | Whose shirt is that?                       | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_576…   | L11 Lesson 11: Is this …   | Perhaps it is, sir. Tim's shirt's white.   | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_598…   | L11 Lesson 11: Is this …   | Is this your shirt?                        | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_82a…   | L11 Lesson 11: Is this …   | Tim!                                       | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_8e6…   | L11 Lesson 11: Is this …   | Is this shirt Tim's?                       | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_986…   | L11 Lesson 11: Is this …   | Yes, sir.                                  | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_caf…   | L11 Lesson 11: Is this …   | This is my shirt. My shirt's blue.         | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_cf2…   | L11 Lesson 11: Is this …   | Thank you, sir.                            | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_df9…   | L11 Lesson 11: Is this …   | No, sir. It's not my shirt.                | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_e31…   | L11 Lesson 11: Is this …   | Is this your shirt, Dave?                  | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_023…   | L12 Lesson 12: Whose is…   | It's my brother's.                         | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_026…   | L12 Lesson 12: Whose is…   | Whose is this?                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_10d…   | L12 Lesson 12: Whose is…   | It's his umbrella.                         | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_132…   | L12 Lesson 12: Whose is…   | It's Paul's.                               | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_1b6…   | L12 Lesson 12: Whose is…   | Whose is this handbag?                     | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_1ec…   | L12 Lesson 12: Whose is…   | It's Tim's.                                | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_2a7…   | L12 Lesson 12: Whose is…   | Whose is this car?                         | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_2cb…   | L12 Lesson 12: Whose is…   | It's Sophie's.                             | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_2d5…   | L12 Lesson 12: Whose is…   | It's Stella's.                             | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_36d…   | L12 Lesson 12: Whose is…   | Whose is that coat?                        | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_38f…   | L12 Lesson 12: Whose is…   | It's Steven's.                             | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_475…   | L12 Lesson 12: Whose is…   | Whose is this handbag?                     | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_4ba…   | L12 Lesson 12: Whose is…   | Whose is this handbag?                     | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_5a6…   | L12 Lesson 12: Whose is…   | Whose is this umbrella?                    | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_665…   | L12 Lesson 12: Whose is…   | Whose is that dress?                       | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_6dc…   | L12 Lesson 12: Whose is…   | Whose is this shirt?                       | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_7a7…   | L12 Lesson 12: Whose is…   | It's Stella's.                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_7bd…   | L12 Lesson 12: Whose is…   | Whose is that car?                         | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_860…   | L12 Lesson 12: Whose is…   | It's my sister's.                          | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_8e6…   | L12 Lesson 12: Whose is…   | Whose is that tie?                         | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_9b4…   | L12 Lesson 12: Whose is…   | It's his car.                              | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_9d8…   | L12 Lesson 12: Whose is…   | Whose is this shirt?                       | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_9db…   | L12 Lesson 12: Whose is…   | It's Stella's.                             | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_abf…   | L12 Lesson 12: Whose is…   | Whose is that car?                         | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_ada…   | L12 Lesson 12: Whose is…   | It's her handbag.                          | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_b53…   | L12 Lesson 12: Whose is…   | It's Sophie's.                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_b69…   | L12 Lesson 12: Whose is…   | It's Steven's.                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_b77…   | L12 Lesson 12: Whose is…   | It's Paul's.                               | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_ba7…   | L12 Lesson 12: Whose is…   | Whose is that?                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_bc6…   | L12 Lesson 12: Whose is…   | Whose is that coat?                        | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_c55…   | L12 Lesson 12: Whose is…   | It's her coat.                             | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_c98…   | L12 Lesson 12: Whose is…   | It's his shirt.                            | 2026-08-14 05:51
+  950208346a71a1b5042237f734982806_sent_ca7…   | L12 Lesson 12: Whose is…   | Whose is that skirt?                       | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_cb1…   | L12 Lesson 12: Whose is…   | It's my son's.                             | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_cbf…   | L12 Lesson 12: Whose is…   | It's Paul's.                               | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_d03…   | L12 Lesson 12: Whose is…   | It's my daughter's.                        | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_d9f…   | L12 Lesson 12: Whose is…   | Whose is that umbrella?                    | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_dac…   | L12 Lesson 12: Whose is…   | Whose is this suit?                        | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_dcc…   | L12 Lesson 12: Whose is…   | It's his car.                              | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_e1a…   | L12 Lesson 12: Whose is…   | Whose is that pen?                         | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_e24…   | L12 Lesson 12: Whose is…   | Whose is this blouse?                      | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_e42…   | L12 Lesson 12: Whose is…   | It's my mother's.                          | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_e7e…   | L12 Lesson 12: Whose is…   | It's her handbag.                          | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_eaf…   | L12 Lesson 12: Whose is…   | It's my father's.                          | 2026-08-14 06:01
+  950208346a71a1b5042237f734982806_sent_fc7…   | L12 Lesson 12: Whose is…   | It's his shirt.                            | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_fca…   | L12 Lesson 12: Whose is…   | It's Tim's.                                | 2026-08-14 05:56
+  950208346a71a1b5042237f734982806_sent_0ab…   | L13 Lesson 13: A new dr…   | Look! Here it is!                          | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_126…   | L13 Lesson 13: A new dr…   | It's the same colour. It's green, too.     | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_311…   | L13 Lesson 13: A new dr…   | It's green.                                | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_323…   | L13 Lesson 13: A new dr…   | Thank you.                                 | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_466…   | L13 Lesson 13: A new dr…   | What colour is it?                         | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_b06…   | L13 Lesson 13: A new dr…   | That's a nice dress. It's very smart.      | 2026-08-14 05:09
+  950208346a71a1b5042237f734982806_sent_b52…   | L13 Lesson 13: A new dr…   | My hat's new, too.                         | 2026-08-14 05:09
+  …（其余 1321 行略，见清单 JSON）
+
+[合计] 幽灵行 1464 | 指纹候选 1441 | 其余 lesson-has-evidence 10  non-batch 4  off-script-date 5  row-has-revisit 4
+dry-run 未写库。指纹子集删除前请人工过目 --json 行级清单；其余幽灵默认保留/降级待产品确认。
+
+行级清单 JSON 已输出: c_list2.json
+C_EXIT=0
