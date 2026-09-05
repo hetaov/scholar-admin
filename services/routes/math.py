@@ -725,9 +725,16 @@ async def math_error_stats(
 
     后端直接查 error_record，不做聚合；前端在 JS 层聚合统计。
     MVP 出参：{ success, data: { items: [{ error_record_id, knowledge_point_name,
-      error_type, source, created_at }], total } }
+      error_type, source, created_at, question_text, occurrence,
+      textbook_id, grade, semester, unit_title, lesson_title, node_title,
+      node_code, drill_stats, last_drill_result }], total } }
     字段映射：record_id → error_record_id，primary_error → error_type；
     knowledge_point_name 为识别/修正落库的冗余字段（缺失时回退 node_code）。
+    B2 追加透传（B1/B1.5 已随落库，缺省空串/0/{} 向后兼容历史数据）：
+    question_text 题干原文、occurrence 错题次数、链锚点
+    （textbook_id/grade/semester/unit_title/lesson_title/node_title）、
+    drill_stats/last_drill_result 巩固证据 —— 供前端列表行「原题概述」、
+    教材链归集与先修/拔高判定直接渲染。
     """
     if not scholar_id:
         raise HTTPException(status_code=400, detail="缺少 scholar_id")
@@ -752,6 +759,18 @@ async def math_error_stats(
             "error_type": r.get("primary_error") or "",
             "source": r.get("source") or "",
             "created_at": r.get("created_at") or 0,
+            # ── B2：题干 / 链锚点 / 巩固证据透传（缺省兜底，前端 normalize 零改动）──
+            "question_text": r.get("question_text") or "",
+            "occurrence": r.get("occurrence") or 0,
+            "textbook_id": r.get("textbook_id") or "",
+            "grade": r.get("grade") or "",
+            "semester": r.get("semester") or "",
+            "unit_title": r.get("unit_title") or "",
+            "lesson_title": r.get("lesson_title") or "",
+            "node_title": r.get("node_title") or "",
+            "node_code": r.get("node_code") or "",
+            "drill_stats": r.get("drill_stats") or {},
+            "last_drill_result": r.get("last_drill_result") or {},
         }
         for r in records
     ]

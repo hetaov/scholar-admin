@@ -105,3 +105,58 @@ class TestMathErrorStats:
         assert res.status_code == 200, res.text
         item = res.json()["data"]["items"][0]
         assert item["knowledge_point_name"] == "nc_001"
+
+    def test_b2_passthrough_fields_echoed(self, make_client, fake_db):
+        # B1/B1.5 已随 error_record 落库题干/链锚点/巩固证据 → B2 逐字透传
+        _seed_error_record(
+            fake_db,
+            record_id="er_full",
+            kp="分数除法",
+            error_type="method",
+            question_text="把 3/4 米平均分成 3 份，每份是多少米？",
+            occurrence=2,
+            textbook_id="TB-A",
+            grade="五年级",
+            semester="up",
+            unit_title="第3单元 分数",
+            lesson_title="课时3 分数除法",
+            node_title="分数除法",
+            drill_stats={"drill_count": 1, "pass_count": 1},
+            last_drill_result={"correct": True, "at": 5000},
+        )
+
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        item = res.json()["data"]["items"][0]
+        assert item["question_text"] == "把 3/4 米平均分成 3 份，每份是多少米？"
+        assert item["occurrence"] == 2
+        assert item["textbook_id"] == "TB-A"
+        assert item["grade"] == "五年级"
+        assert item["semester"] == "up"
+        assert item["unit_title"] == "第3单元 分数"
+        assert item["lesson_title"] == "课时3 分数除法"
+        assert item["node_title"] == "分数除法"
+        assert item["node_code"] == "code_er_full"
+        assert item["drill_stats"] == {"drill_count": 1, "pass_count": 1}
+        assert item["last_drill_result"] == {"correct": True, "at": 5000}
+
+    def test_b2_defaults_for_legacy_records(self, make_client, fake_db):
+        # 存量记录无 B1 扩展字段 → 空串/0/{} 兜底（前端 normalize 零改动）
+        _seed_error_record(fake_db, record_id="er_legacy")
+
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        item = res.json()["data"]["items"][0]
+        assert item["question_text"] == ""
+        assert item["occurrence"] == 0
+        assert item["textbook_id"] == ""
+        assert item["grade"] == ""
+        assert item["semester"] == ""
+        assert item["unit_title"] == ""
+        assert item["lesson_title"] == ""
+        assert item["node_title"] == ""
+        assert item["node_code"] == "code_er_legacy"
+        assert item["drill_stats"] == {}
+        assert item["last_drill_result"] == {}
