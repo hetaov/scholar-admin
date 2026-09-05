@@ -492,7 +492,9 @@ async def math_generate_practice_sheet(
             actor=actor,
         )
         return {"success": True, "data": data}
-    except PracticeSheetError as e:
+    except (PracticeSheetError, LLMResponseError) as e:
+        # LLMResponseError（AI 出题失败，契约 500）继承自 KnowledgeSummaryError 而非
+        # PracticeSheetError，需一并映射，避免未处理异常吞掉 detail
         raise _practice_sheet_error_to_http(e) from e
 
 

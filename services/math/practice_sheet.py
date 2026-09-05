@@ -30,7 +30,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Any
 
-from config import LLM_SUMMARY_MODEL
+from config import LLM_DISABLE_THINKING, LLM_SUMMARY_MODEL
 from services.audit import AUDIT_ACTION_GENERATE, write_audit
 from services.database import (
     CURRICULUM_NODE_COLLECTION,
@@ -82,6 +82,13 @@ DEFAULT_WRONG_BOOK_RATIO = 0.5
 MAX_SHEET_NODES = 3                       # nodes ≤3（错题练习纸 A4 篇幅）
 MAX_ERROR_RECORDS_SCAN = 200              # 错题聚合扫描上限
 SHEET_REPEAT_WINDOW_MS = 10 * 60 * 1000   # 幂等窗口：10 分钟
+
+# 出题并发与时延预算（超时根因修复，详见 scripts/math_practice_sheet_probe.py）：
+# 小程序 callContainer 上限 15s（tcb.js timeout=15000）。知识点间出题互不依赖，
+# 串行最多 6 次（3 基础 + 3 奥数）在 15s 内必然超时 → 有界并发 + 单次调用限时。
+MAX_LLM_CONCURRENCY = 3                   # 同时进行中的 LLM 出题数（控第三方并发限流）
+SHEET_LLM_CALL_TIMEOUT_SEC = 12.0         # 单次 LLM 调用上限（s）；超时不再整次重试
+                                          # （2×timeout 会突破 15s 容器上限）
 
 # 能力维度中文标签（出题 prompt 用）
 _ABILITY_DIM_LABELS = {
@@ -445,17 +452,27 @@ def _validate_question_items(result: dict) -> list[dict]:
 
 
 def _call_chat_sync(client, model: str, prompt: str) -> str:
-    """同步 chat 调用（在线程池中执行），复用 F1 总结模型"""
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
+    """同步 chat 调用（在线程池中执行），复用 F1 总结模型
+
+    超时根因修复（与 knowledge_summary/Judge 同口径）：
+    - LLM_DISABLE_THINKING 时显式禁用 thinking —— 推理模型不禁用单次可 >60s，
+      出题请求叠加后必然突破小程序 callContainer 15s 上限（探针 P1）；
+    - 每次请求带 SHEET_LLM_CALL_TIMEOUT_SEC 上限，替代客户端默认 60s（探针 P3）。
+    """
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": _QUESTION_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.4,
-        max_tokens=2048,
-        response_format={"type": "json_object"},
-    )
+        "temperature": 0.4,
+        "max_tokens": 2048,
+        "response_format": {"type": "json_object"},
+        "timeout": SHEET_LLM_CALL_TIMEOUT_SEC,
+    }
+    if LLM_DISABLE_THINKING:
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    resp = client.chat.completions.create(**kwargs)
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -500,6 +517,10 @@ async def _generate_questions(
                 f"出题失败（第 {attempt} 次）kp={kp.get('name')!r} "
                 f"extended={extended}: {type(e).__name__}: {e}"
             )
+            if type(e).__name__ in ("APITimeoutError", "TimeoutError"):
+                # 硬超时（SHEET_LLM_CALL_TIMEOUT_SEC 触发）：不再整次重试，
+                # 否则 2×timeout 会突破 callContainer 15s 容器上限（探针 P3）
+                break
     raise LLMResponseError(f"AI 出题失败: {last_err}")
 
 
@@ -752,7 +773,39 @@ async def generatePracticeSheet(
     bands: list[dict] = []
     items: list[dict] = []
 
-    async def _generate_for_kp(
+    def _make_item(
+        q: dict,
+        *,
+        node_code: str,
+        target_error: str,
+        source_kp: str = "",
+        difficulty: int | None = None,
+        extended: bool = False,
+    ) -> dict:
+        """题目记录 → practice_sheet_item（奥数题打内部标记，落库前剥离）"""
+        item = {
+            "item_id": _gen_item_id(),
+            "sheet_id": "",  # 组装后回填
+            "question": q["question"],
+            "answer": q["answer"],
+            "hint_card": q["hint_card"],
+            "node_code": node_code,
+            "target_error": target_error,
+            "variant_level": VARIANT_LEVEL_L1,
+            "difficulty": q["difficulty"] if difficulty is None else difficulty,
+            "source_kp": source_kp,
+            "sim_check": {"status": "skipped"},  # 防背题相似度校验：渲染任务阶段启用
+        }
+        if extended:
+            item[_EXTENDED_ITEM_FLAG] = True
+        return item
+
+    # 知识点间出题互不依赖 → 有界并发调 LLM（超时根因修复 P2）：
+    # 串行最多 6 次（3 基础 + 3 奥数）在 callContainer 15s 上限下极易超时；
+    # 并行 + MAX_LLM_CONCURRENCY 后墙钟 ≈ ceil(N/并发) 波 × 单次时延。
+    _llm_sem = asyncio.Semaphore(MAX_LLM_CONCURRENCY)
+
+    async def _gen_basic(
         *,
         node_code: str,
         node_title: str,
@@ -762,111 +815,173 @@ async def generatePracticeSheet(
         count: int,
         source_kp: str = "",
     ) -> list[dict]:
-        questions = await _generate_questions(
-            kp=kp, node=node, count=count
-        )
+        async with _llm_sem:
+            questions = await _generate_questions(kp=kp, node=node, count=count)
         if len(questions) < count:
-            warnings.append(f"知识点题量不足: {node_title}")
-        kp_items = []
-        for q in questions:
-            kp_items.append(
+            warnings.append(f"知识点题量不足: {node_title or node_code}")
+        return [
+            _make_item(
+                q,
+                node_code=node_code,
+                target_error=target_error,
+                source_kp=source_kp,
+            )
+            for q in questions
+        ]
+
+    async def _gen_extended(
+        *,
+        node_code: str,
+        node_title: str,
+        kp: dict | None,
+        node: dict | None,
+        band: str,
+    ) -> list[dict]:
+        """奥数拔高题（每知识点 1 道；仅 include_extended_points 且命中扩展点才出）"""
+        if not kp:
+            return []
+        async with _llm_sem:
+            questions = await _generate_questions(
+                kp=kp, node=node, count=1, extended=True, extended_band=band
+            )
+        return [
+            _make_item(
+                q,
+                node_code=node_code,
+                target_error="",
+                difficulty=_band_to_difficulty(band),
+                extended=True,
+            )
+            for q in questions[:1]
+        ]
+
+    async def _exec_wrong_group() -> tuple[list, list, list, list]:
+        """wrong_book 源：知识点 = 聚合出的错题知识点（每点 2 题），组内并行"""
+        plan: list[dict] = []
+        for wk in wrong_kps:
+            node_code = wk["node_code"]
+            target_error = wk["primary_error"]
+            band = "挑战" if (wk.get("occurrence") or 1) >= 3 else "巩固"
+            # 出题上下文优先取节点 F1 ai_summary 的知识点总结，增强题目质量
+            node = wk.get("node") or {}
+            ai = node.get("ai_summary") or {}
+            first_kp = (ai.get("knowledge_points") or [{}])[0]
+            plan.append(
                 {
-                    "item_id": _gen_item_id(),
-                    "sheet_id": "",  # 组装后回填
-                    "question": q["question"],
-                    "answer": q["answer"],
-                    "hint_card": q["hint_card"],
                     "node_code": node_code,
+                    "node_title": wk.get("node_title") or node_code,
                     "target_error": target_error,
-                    "variant_level": VARIANT_LEVEL_L1,
-                    "difficulty": q["difficulty"],
-                    "source_kp": source_kp,
-                    "sim_check": {"status": "skipped"},  # 防背题相似度校验：渲染任务阶段启用
+                    "band": band,
+                    "kp": {
+                        "name": first_kp.get("name") or wk.get("node_title") or node_code,
+                        "summary": first_kp.get("summary") or node.get("title") or "",
+                        "ability_dimensions": first_kp.get("ability_dimensions") or [],
+                    },
+                    "node": node,
                 }
             )
-        return kp_items
-
-    # wrong_book 源：知识点 = 聚合出的错题知识点（每点 2 题）
-    for wk in wrong_kps:
-        node_code = wk["node_code"]
-        target_error = wk["primary_error"]
-        band = "挑战" if (wk.get("occurrence") or 1) >= 3 else "巩固"
-        # 出题上下文优先取节点 F1 ai_summary 的知识点总结，增强题目质量
-        node = wk.get("node") or {}
-        ai = node.get("ai_summary") or {}
-        first_kp = (ai.get("knowledge_points") or [{}])[0]
-        kp_payload = {
-            "name": first_kp.get("name") or wk.get("node_title") or node_code,
-            "summary": first_kp.get("summary") or node.get("title") or "",
-            "ability_dimensions": first_kp.get("ability_dimensions") or [],
-        }
-        generated = await _generate_for_kp(
-            node_code=node_code,
-            node_title=wk.get("node_title") or node_code,
-            target_error=target_error,
-            kp=kp_payload,
-            node=wk.get("node"),
-            count=DEFAULT_QUESTION_COUNT_PER_KNOWLEDGE,
-        )
-        nodes.append(
-            {"node_code": node_code, "node_title": wk.get("node_title") or node_code}
-        )
-        primary_errors.append({"node_code": node_code, "type": target_error})
-        bands.append({"node_code": node_code, "band": band})
-        items.extend(generated)
-
-    # ai_knowledge / mixed 源：知识点 = 匹配出的 AI 知识点（每点 2 题，source_kp=知识点名）
-    for entry in ai_kps:
-        kp = entry["kp"]
-        node = entry["node"]
-        node_id = kp.get("source_node_id") or ""
-        node_for_code = await _load_node_by_id(db, node_id) if node_id else node
-        node_code = (node_for_code or {}).get("code") or kp.get("name") or ""
-        node_title = (node_for_code or {}).get("title") or (node or {}).get("title") or kp.get("name") or ""
-        generated = await _generate_for_kp(
-            node_code=node_code,
-            node_title=node_title,
-            target_error="",
-            kp=kp,
-            node=node,
-            count=DEFAULT_QUESTION_COUNT_PER_KNOWLEDGE,
-            source_kp=kp.get("name") or "",
-        )
-        nodes.append({"node_code": node_code, "node_title": node_title})
-        bands.append({"node_code": node_code, "band": "巩固"})
-        items.extend(generated)
-
-        # 奥数拔高题：include_extended_points=true 时列在主练习后（每知识点 1 道）
-        if include_extended_points:
-            ep = _find_extended_point(node, kp.get("name") or "")
-            if ep:
-                ep_questions = await _generate_questions(
-                    kp=ep,
-                    node=node,
-                    count=1,
-                    extended=True,
-                    extended_band=ep.get("difficulty_band") or "入门",
+        if not plan:
+            return [], [], [], []
+        results = await asyncio.gather(
+            *(
+                _gen_basic(
+                    node_code=p["node_code"],
+                    node_title=p["node_title"],
+                    target_error=p["target_error"],
+                    kp=p["kp"],
+                    node=p["node"],
+                    count=DEFAULT_QUESTION_COUNT_PER_KNOWLEDGE,
                 )
-                if ep_questions:
-                    q = ep_questions[0]
-                    items.append(
-                        {
-                            "item_id": _gen_item_id(),
-                            "sheet_id": "",
-                            "question": q["question"],
-                            "answer": q["answer"],
-                            "hint_card": q["hint_card"],
-                            "node_code": node_code,
-                            "target_error": "",
-                            "variant_level": VARIANT_LEVEL_L1,
-                            "difficulty": _band_to_difficulty(
-                                ep.get("difficulty_band") or "入门"
-                            ),
-                            "source_kp": ep.get("name") or "",
-                            "sim_check": {"status": "skipped"},
-                            _EXTENDED_ITEM_FLAG: True,
-                        }
-                    )
+                for p in plan
+            )
+        )
+        g_nodes: list[dict] = []
+        g_errors: list[dict] = []
+        g_bands: list[dict] = []
+        g_items: list[dict] = []
+        for p, generated in zip(plan, results):
+            g_nodes.append({"node_code": p["node_code"], "node_title": p["node_title"]})
+            g_errors.append({"node_code": p["node_code"], "type": p["target_error"]})
+            g_bands.append({"node_code": p["node_code"], "band": p["band"]})
+            g_items.extend(generated)
+        return g_nodes, g_errors, g_bands, g_items
+
+    async def _exec_ai_group() -> tuple[list, list, list]:
+        """ai_knowledge / mixed 源：知识点 = 匹配出的 AI 知识点（每点 2 题 + 奥数 1 题）"""
+        plan: list[dict] = []
+        for entry in ai_kps:
+            kp = entry["kp"]
+            node = entry["node"]
+            node_id = kp.get("source_node_id") or ""
+            node_for_code = await _load_node_by_id(db, node_id) if node_id else node
+            node_code = (node_for_code or {}).get("code") or kp.get("name") or ""
+            node_title = (
+                (node_for_code or {}).get("title")
+                or (node or {}).get("title")
+                or kp.get("name")
+                or ""
+            )
+            ep = None
+            if include_extended_points:
+                ep = _find_extended_point(node, kp.get("name") or "")
+            plan.append(
+                {
+                    "node_code": node_code,
+                    "node_title": node_title,
+                    "kp": kp,
+                    "node": node,
+                    "ep": ep,
+                    "ext_band": (ep.get("difficulty_band") or "入门") if ep else "",
+                }
+            )
+        if not plan:
+            return [], [], []
+        n = len(plan)
+        results = await asyncio.gather(
+            *(
+                _gen_basic(
+                    node_code=p["node_code"],
+                    node_title=p["node_title"],
+                    target_error="",
+                    kp=p["kp"],
+                    node=p["node"],
+                    count=DEFAULT_QUESTION_COUNT_PER_KNOWLEDGE,
+                    source_kp=p["kp"].get("name") or "",
+                )
+                for p in plan
+            ),
+            *(
+                _gen_extended(
+                    node_code=p["node_code"],
+                    node_title=p["node_title"],
+                    kp=p["ep"],
+                    node=p["node"],
+                    band=p["ext_band"],
+                )
+                for p in plan
+            ),
+        )
+        g_nodes: list[dict] = []
+        g_bands: list[dict] = []
+        g_items: list[dict] = []
+        for idx, p in enumerate(plan):
+            basic_gen = results[idx]
+            ext_gen = results[n + idx]
+            g_nodes.append({"node_code": p["node_code"], "node_title": p["node_title"]})
+            g_bands.append({"node_code": p["node_code"], "band": "巩固"})
+            g_items.extend(basic_gen)
+            g_items.extend(ext_gen)
+        return g_nodes, g_bands, g_items
+
+    # mixed：错题组与 AI 组相互独立 → 组间也并发（共享同一并发上限）
+    (w_nodes, w_errors, w_bands, w_items), (a_nodes, a_bands, a_items) = (
+        await asyncio.gather(_exec_wrong_group(), _exec_ai_group())
+    )
+    # 顺序归位（与历史输出一致：wrong 在前、ai 在后），保证 nodes/题序确定性
+    nodes = w_nodes + a_nodes
+    primary_errors = w_errors
+    bands = w_bands + a_bands
+    items = w_items + a_items
 
     if not items:
         raise NoQuestionsAvailableError("无可用选题（出题结果为空）")
