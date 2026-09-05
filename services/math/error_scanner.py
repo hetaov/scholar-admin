@@ -45,6 +45,7 @@ from services.database import (
     CURRICULUM_NODE_COLLECTION,
     ERROR_RECORD_COLLECTION,
     MATH_SCAN_UPLOAD_COLLECTION,
+    TEXTBOOK_V2,
 )
 from services.tcb_storage import CloudBaseStorageClient
 
@@ -70,6 +71,18 @@ CLASSIFY_STATUS_NEEDS_REVIEW = "needs_review"
 
 # 云存储路径前缀
 SCAN_STORAGE_PREFIX = "scan"
+
+# ---------------------------------------------------------------------------
+# B1.5 图谱外知识点（EXTRA_AI 虚拟教材，主文档 §4.3 / 契约 §1.2b）
+#   未命中正式教材候选集的高置信知识点 → 挂「课外补充 · AI 归类」虚拟教材下
+#   幂等新建/复用节点，保证每条错题都有完整链锚点（不强行改挂正式节点）。
+# ---------------------------------------------------------------------------
+
+EXTRA_AI_TEXTBOOK_ID = "EXTRA_AI"
+EXTRA_AI_TEXTBOOK_TITLE = "课外补充 · AI 归类"
+EXTRA_AI_UNCLASSIFIED = "未分类"
+EXTRA_AI_NODE_CODE_PREFIX = "xai_"
+EXTRA_AI_CANDIDATE_HITS_LIMIT = 3  # 疑似正式教材匹配候选 ≤3（契约 §1.2b）
 
 
 # ---------------------------------------------------------------------------
@@ -400,13 +413,16 @@ async def _load_knowledge_point_candidates(
     优先按学者当前教材（scholar_book → textbook_id）过滤；无关联记录时
     回退全量已总结节点（保证新学者也能归类，Judge 按 OCR 内容匹配）。
 
-    返回 [{node_id, node_code, kp_name, grade, textbook_id}]。
+    返回 [{node_id, node_code, kp_name, grade, semester, textbook_id, title}]，
+    title/semester 供 B1.5 链锚点冗余落库（命中候选时 node_title/grade/semester 直接可取）。
     """
     _SELECT = {
         "node_id": 1,
         "code": 1,
         "grade": 1,
+        "semester": 1,
         "textbook_id": 1,
+        "title": 1,
         "ai_summary": 1,
     }
     textbook_ids = await _load_scholar_textbook_ids(db, scholar_id)
@@ -457,7 +473,9 @@ async def _load_knowledge_point_candidates(
                     "node_code": node.get("code") or "",
                     "kp_name": name,
                     "grade": node.get("grade") or "",
+                    "semester": node.get("semester") or "",
                     "textbook_id": node.get("textbook_id") or "",
+                    "title": node.get("title") or "",
                 }
             )
     return candidates
@@ -485,13 +503,18 @@ OCR 全文：
 1. 识别 OCR 文本中的每道错题（按题号或独立题干切分），每道题输出一项。
 2. knowledge_point_name：优先从候选集中选最匹配的知识点 name；候选集无匹配项时，按 OCR 内容给出最贴近的知识点名称（不要填空字符串，尽量具体，如"大数加减法""两位数乘两位数"）。
 3. error_type：错因四分类，取值 concept（概念错）/ method（方法错）/ computation（计算错）/ reading（审题错）。
-4. confidence：本道题归类置信度 0~1（知识点在候选集内且匹配明确时 ≥0.6；候选集无匹配或错因不明时 ≤0.5）。
+4. confidence：本道题归类置信度 0~1，按「题干语义是否明确」给分，不以「是否命中候选集」为限（B1.5）：
+   命中候选集且匹配明确 → ≥0.7；候选集外但题干完整、知识点可明确命名且与题面语义吻合 → ≥0.6
+   （这类将自动走课外图谱 EXTRA_AI 新建直落，属正常高置信，不必压到低置信）；
+   题干残缺/语义模糊/错因不明/知识点名无从把握 → <0.6（进 needs_review 人工修正）。
 5. ocr_block_id：本道题在 OCR 检测块中对应的 block_id（取题干所在块，无则填空字符串 ""）。
+6. question_text：从上方 OCR 全文**原文截取**本道题的完整题干（含条件与问题，逐字保留不改写、不补全）；一道大题拆成多个 item 时各自截取对应小题题干；无法截取（OCR 缺失/边界不明）填空字符串 ""。
+7. candidate_hits：当本道题 knowledge_point_name **未出现在候选集**时，从候选集中挑 1~3 个**最疑似匹配**的知识点 name（数组，按疑似度降序）；knowledge_point_name 已在候选集内或候选集为空/无疑似项时输出 []。
 
 输出 JSON 结构：
 {{
   "items": [
-    {{"knowledge_point_name": "...", "error_type": "concept|method|computation|reading", "confidence": 0.85, "ocr_block_id": "blk_0001"}}
+    {{"knowledge_point_name": "...", "error_type": "concept|method|computation|reading", "confidence": 0.85, "ocr_block_id": "blk_0001", "question_text": "本道题题干原文", "candidate_hits": ["疑似正式教材知识点名1"]}}
   ]
 }}"""
 
@@ -608,6 +631,18 @@ def _validate_classify_result(result: dict) -> None:
         if conf_val < 0 or conf_val > 1:
             raise JudgeResponseError(f"confidence 必须在 0~1 之间，得到 {conf_val}")
         item["confidence"] = conf_val
+        # question_text：题干原文，允许为空（OCR 不完整/未截取时走 needs_review，
+        # 语义不变）；非字符串值归一为空串，不阻断归类（B1 契约 §1.2a）
+        qt = item.get("question_text")
+        item["question_text"] = qt.strip() if isinstance(qt, str) else ""
+        # candidate_hits：疑似正式教材匹配名（≤3，B1.5 契约 §1.2b）；非法值归一 []
+        raw_hits = item.get("candidate_hits")
+        hits: list[str] = []
+        if isinstance(raw_hits, list):
+            for h in raw_hits:
+                if isinstance(h, str) and h.strip() and h.strip() not in hits:
+                    hits.append(h.strip())
+        item["candidate_hits"] = hits[:EXTRA_AI_CANDIDATE_HITS_LIMIT]
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +667,258 @@ def _match_candidate(
     return None
 
 
+def _kp_bigrams(text: str) -> set[str]:
+    """知识点名的 2-gram 字符集（语义近似基础，中文无需分词）"""
+    return {text[i : i + 2] for i in range(len(text) - 1)}
+
+
+def _strip_common_suffix(a: str, b: str) -> tuple[str, str]:
+    """剥离两名的公共尾部（泛化模板后缀，如「的实际应用」/「计算规则」）。
+
+    中文知识点名常以模板后缀收尾，bigram Jaccard 会因此虚高——「小数加法的
+    实际应用」与「统计的实际应用」共享「的实际应用」gram 得 j≈0.4 却语义无关
+    （真实候选集实测）。就近比较前剥掉公共尾，让交集只反映主题词相似。
+    """
+    i = 0
+    while i < len(a) and i < len(b) and a[-1 - i] == b[-1 - i]:
+        i += 1
+    return (a[:-i] if i else a, b[:-i] if i else b)
+
+
+# B1.5a 就近改名护栏：互斥运算语义词。中文知识点名 bigram 对单字操作符差异
+# 不敏感——「小数加法的实际应用」vs「小数减法的实际应用」字符 2-gram
+# Jaccard≈0.56 ≥0.25，机械就近会把加法题误挂到减法知识点（报告「加法↔减法
+# 一字差误挂」风险）。就近改名前先做操作符互斥检查：两边各含运算语义词但
+# 无交集 → 运算不同，禁止就近（共享语义词如「乘法…」≈「乘除…」不受影响）。
+_OPERATOR_CONFLICT_TERMS = ("加", "减", "乘", "除")
+
+
+def _operator_terms_in(name: str) -> set[str]:
+    """知识点名中的运算语义词（加/减/乘/除），供操作符互斥护栏使用"""
+    return {t for t in _OPERATOR_CONFLICT_TERMS if t in name}
+
+
+def _operator_conflict(a: str, b: str) -> bool:
+    """a/b 是否含互斥运算语义（如「加法…」vs「减法…」）。"""
+    ops_a = _operator_terms_in(a)
+    ops_b = _operator_terms_in(b)
+    return bool(ops_a and ops_b) and not (ops_a & ops_b)
+
+
+def _nearest_candidates(
+    kp_name: str, candidates: list[dict[str, Any]], limit: int = 1
+) -> list[dict[str, Any]]:
+    """语义就近：2-gram Jaccard ≥0.25 的近似候选（精确恒排最前，按相似度降序）。
+
+    B1.5「候选内修正命名」：correct 传入的自拟名未精确命中候选时，若与某候选
+    语义接近（如「加法简便运算」≈ 候选「加法运算」：字符 2-gram 交集非空且
+    Jaccard≥0.25），就近锚定该候选并修正为标准知识点名，避免图谱外误建 /
+    机械改挂首个（报告 manual_correct 根因）。「单位换算」与教材候选交集为空 →
+    不就近，走图谱外 EXTRA_AI 新建。
+
+    B1.5a：就近前过两道护栏，防 bigram 相似但语义无关的误挂：
+    1) 操作符互斥（_operator_conflict）——加减乘除互斥名（「加法…」vs
+       「减法…」一字差）一律不就近；
+    2) 公共模板后缀剥离（_strip_common_suffix）——先剥「的实际应用」等
+       泛化尾再算 Jaccard，避免共享模板后缀虚高（真实候选集实测
+       「小数加法的实际应用」vs「统计的实际应用」j≈0.4 但语义无关）。
+    classify 直落 / correct 修正 / candidate_hits 建议共用此函数，天然同口径。
+    """
+    if not kp_name or not candidates:
+        return []
+    name = kp_name.strip()
+    if len(name) < 2:
+        return []
+    exact: list[dict[str, Any]] = []
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for c in candidates:
+        cand = (c.get("kp_name") or "").strip()
+        if not cand or len(cand) < 2:
+            continue
+        if cand == name:
+            exact.append(c)
+            continue
+        if _operator_conflict(name, cand):
+            continue  # 护栏 1：操作符互斥（加法↔减法）→ 不可就近
+        core_a, core_cand = _strip_common_suffix(name, cand)
+        ta = _kp_bigrams(core_a)
+        cg = _kp_bigrams(core_cand)
+        inter = len(ta & cg)
+        if inter == 0:
+            continue
+        j = inter / len(ta | cg)
+        if j >= 0.25:
+            scored.append((j, c))
+    # 同相似度按候选集原序（稳定排序）
+    scored.sort(key=lambda t: -t[0])
+    return (exact + [c for _, c in scored])[:limit]
+
+
+def _candidate_hits_struct(
+    judge_names: list[str], candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """疑似正式教材改挂候选 → 结构化 [{textbook_id, grade, kp_name}]（≤3，契约 §1.2b）
+
+    Judge 可按名回传 candidate_hits；后端用候选集映射为带教材/年级的结构化条目
+    （随响应下发仅供前端建议，本期不持久化）。Judge 名精确/就近匹配不到候选，
+    或 Judge 未回传时，用题面主名（judge_names[0]）就近子串兜底给建议。
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _push(c: dict[str, Any]) -> None:
+        kp = c.get("kp_name") or ""
+        if not kp or kp in seen:
+            return
+        seen.add(kp)
+        out.append(
+            {
+                "textbook_id": c.get("textbook_id") or "",
+                "grade": c.get("grade") or "",
+                "kp_name": kp,
+            }
+        )
+
+    for nm in judge_names or []:
+        name = str(nm).strip()
+        if not name:
+            continue
+        exact = _match_candidate(name, candidates)
+        if exact:
+            _push(exact)
+        else:
+            for near in _nearest_candidates(name, candidates, limit=1):
+                _push(near)
+        if len(out) >= EXTRA_AI_CANDIDATE_HITS_LIMIT:
+            break
+    return out[:EXTRA_AI_CANDIDATE_HITS_LIMIT]
+
+
+# ---------------------------------------------------------------------------
+# B1.5 EXTRA_AI 虚拟教材与图谱外节点（主文档 §4.3，幂等）
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_extra_ai_textbook(db) -> None:
+    """幂等 seed 虚拟教材「课外补充 · AI 归类」（textbook_v2）
+
+    只作图谱外知识点挂靠锚点；不进入学者教材列表 / 教材三选 / 选材（§4.3）。
+    """
+    res = await db.query(
+        TEXTBOOK_V2, where={"textbook_id": EXTRA_AI_TEXTBOOK_ID}, limit=1
+    )
+    if res.get("records"):
+        return
+    now_ms = int(time.time() * 1000)
+    await db.insert(
+        TEXTBOOK_V2,
+        {
+            "textbook_id": EXTRA_AI_TEXTBOOK_ID,
+            "title": EXTRA_AI_TEXTBOOK_TITLE,
+            "grade": "",
+            "semester": "",
+            "subject_type": "math",
+            "publisher": "",
+            "cover_url": "",
+            "isbn": "",
+            "chapters": [],
+            "created_at": now_ms,
+            "updated_at": now_ms,
+            "note": "B1.5 图谱外知识点虚拟挂靠教材（主文档 §4.3），不进入选材与进度",
+        },
+    )
+
+
+def _extra_ai_node_code(kp_name: str) -> str:
+    """EXTRA_AI 节点 code：xai_{kp名 md5 前12}（稳定幂等，避免与正式教材 code 冲突）"""
+    return f"{EXTRA_AI_NODE_CODE_PREFIX}{hashlib.md5(kp_name.encode('utf-8')).hexdigest()[:12]}"
+
+
+async def _ensure_extra_ai_node(db, kp_name: str) -> dict[str, Any]:
+    """图谱外知识点节点幂等新建/复用（title 精确匹配，§4.3）
+
+    返回链锚点 dict（与候选 dict 同构，可直接喂 _write_error_record）：
+    {node_code, kp_name, title, textbook_id, grade, semester, unit_title, lesson_title}
+    unit/lesson 缺省「未分类」；textbook_id=EXTRA_AI。
+    """
+    name = (kp_name or "").strip()
+    if not name:
+        raise ValueError("图谱外知识点名不能为空")
+    await _ensure_extra_ai_textbook(db)
+    res = await db.query(
+        CURRICULUM_NODE_COLLECTION,
+        where={"textbook_id": EXTRA_AI_TEXTBOOK_ID, "title": name},
+        limit=1,
+    )
+    existing = (res.get("records") or [])
+    if existing:
+        node = existing[0]
+        return {
+            "node_code": node.get("code") or _extra_ai_node_code(name),
+            "kp_name": name,
+            "title": name,
+            "textbook_id": EXTRA_AI_TEXTBOOK_ID,
+            "grade": "",
+            "semester": "",
+            "unit_title": EXTRA_AI_UNCLASSIFIED,
+            "lesson_title": EXTRA_AI_UNCLASSIFIED,
+        }
+    code = _extra_ai_node_code(name)
+    now_ms = int(time.time() * 1000)
+    await db.insert(
+        CURRICULUM_NODE_COLLECTION,
+        {
+            "textbook_id": EXTRA_AI_TEXTBOOK_ID,
+            "node_id": f"{EXTRA_AI_TEXTBOOK_ID}_{code}",
+            "code": code,
+            "title": name,
+            "node_type": "knowledge",
+            "grade": "",
+            "semester": "",
+            "unit_title": EXTRA_AI_UNCLASSIFIED,
+            "lesson_title": EXTRA_AI_UNCLASSIFIED,
+            "created_at": now_ms,
+            "updated_at": now_ms,
+            "note": "B1.5 图谱外知识点（AI 归类），title 精确幂等",
+        },
+    )
+    return {
+        "node_code": code,
+        "kp_name": name,
+        "title": name,
+        "textbook_id": EXTRA_AI_TEXTBOOK_ID,
+        "grade": "",
+        "semester": "",
+        "unit_title": EXTRA_AI_UNCLASSIFIED,
+        "lesson_title": EXTRA_AI_UNCLASSIFIED,
+    }
+
+
+def _is_extra_ai_anchor(matched: dict[str, Any]) -> bool:
+    """链锚点是否挂在 EXTRA_AI 虚拟教材（图谱外）"""
+    return (matched.get("textbook_id") or "") == EXTRA_AI_TEXTBOOK_ID
+
+
+def _chain_anchor_fields(matched: dict[str, Any] | None) -> dict[str, Any]:
+    """从链锚点（正式候选 / EXTRA_AI 节点）提取 error_record 链字段（§4.1）。
+
+    与 _write_error_record 落库口径一致，correct 的 update/insert 分支复用，
+    保证人工修正/改挂后链锚点与 node_code 同步刷新。
+    """
+    if not matched:
+        return {}
+    return {
+        "node_code": matched.get("node_code") or "",
+        "textbook_id": matched.get("textbook_id") or "",
+        "grade": matched.get("grade") or "",
+        "semester": matched.get("semester") or "",
+        "unit_title": matched.get("unit_title") or "",
+        "lesson_title": matched.get("lesson_title") or "",
+        "node_title": matched.get("node_title") or matched.get("title")
+        or matched.get("kp_name") or "",
+    }
+
+
 async def _write_error_record(
     db,
     *,
@@ -642,11 +929,26 @@ async def _write_error_record(
     error_type: str,
     confidence: float,
     knowledge_point_name: str = "",
+    question_text: str = "",
+    original_kp_name: str = "",
 ) -> str:
     """写一条 error_record（契约 §4.12.2 + §4.12.9(b) 扩展字段）
 
+    matched：链锚点 dict —— 命中正式候选（_load_knowledge_point_candidates 单项）
+    或图谱外 EXTRA_AI 节点（_ensure_extra_ai_node 返回值，textbook_id=EXTRA_AI）。
+
     knowledge_point_name：识别命中/人工修正时的知识点名（冗余落库，
     供错题列表直接展示，免 join；与 node_code 并存）。
+
+    original_kp_name：B1.5a classify 直落就近改名时的原判名（Judge 自拟、
+    与 knowledge_point_name 不同的名字）。仅就近改名分支传入并落库——eval
+    评估与前端展示借此识别「自动就近改名」（对称于 EXTRA_AI 分支的 new_kp_name，
+    因为 classify_result 项里存的已是改名后标准名，原判名需在记录上保留追踪）。
+
+    question_text：题干原文（Judge 从 OCR 截取，B1 契约 §1.2a）；允许为空。
+
+    链锚点冗余（textbook_id/grade/semester/unit_title/lesson_title/node_title）
+    与 drill_stats/last_drill_result 初始化随库落（B1.5 §4.1，B2 免 join 聚合）。
 
     返回 record_id（= _id）。
     """
@@ -669,7 +971,21 @@ async def _write_error_record(
         "ocr_block_id": ocr_block_id,
         "source": SOURCE_AUTO_SCAN,
         "confidence": confidence,
+        "question_text": question_text,
+        # B1.5 §4.1：链锚点冗余（命中正式候选 / 图谱外 EXTRA_AI）
+        "textbook_id": matched.get("textbook_id") or "",
+        "grade": matched.get("grade") or "",
+        "semester": matched.get("semester") or "",
+        "unit_title": matched.get("unit_title") or "",
+        "lesson_title": matched.get("lesson_title") or "",
+        "node_title": matched.get("node_title") or matched.get("title")
+        or matched.get("kp_name") or knowledge_point_name or "",
+        # B1.5 §4.1：巩固证据初始化（B3 drill 回写）
+        "drill_stats": {},
+        "last_drill_result": {},
     }
+    if original_kp_name:
+        record["original_kp_name"] = original_kp_name  # B1.5a 就近改名追踪
     await db.insert(ERROR_RECORD_COLLECTION, record)
     return record_id
 
@@ -809,7 +1125,11 @@ async def classify_scan_upload(
         )
         raise
 
-    # 6. 置信度门控 + 写 error_record（仅高置信 + 知识点匹配项）
+    # 6. 置信度门控 + 写 error_record（三态分支，B1.5 契约 §1.2b）
+    #    - 命中候选且 conf≥阈值且错因 → 直落 error_record（锚定正式教材节点）
+    #    - 未命中候选但 conf≥阈值且错因且 kp 可命名 → EXTRA_AI 幂等新建/复用节点
+    #      （图谱外自动归链，不再 needs_review 空置；修复报告「强行改挂」根因）
+    #    - 其余（低置信/无错因/无 kp）→ needs_review，修正页提供新建/疑似改挂建议
     public_items: list[dict[str, Any]] = []
     all_confident = True
     for item in judge_result.get("items") or []:
@@ -817,8 +1137,39 @@ async def classify_scan_upload(
         error_type = item.get("error_type") or ""
         confidence = float(item.get("confidence") or 0)
         ocr_block_id = item.get("ocr_block_id") or ""
+        question_text = item.get("question_text") or ""
 
-        matched = _match_candidate(kp_name, candidates)
+        exact = _match_candidate(kp_name, candidates)
+        matched = exact
+        extra_ai = False
+        final_kp = kp_name  # 落库/出参用名（就近改名时修正为候选标准名）
+        renamed_from = ""   # B1.5a 就近改名原判名（仅近改名分支非空）
+        if not exact and kp_name and confidence >= EVAL_CONFIDENCE_THRESHOLD and error_type:
+            # B1.5a：候选外高置信先查语义就近（含操作符互斥护栏，口径同 correct 分支）
+            # → 就近改名挂正式候选；无就近候选才 EXTRA_AI 幂等新建/复用（§4.3）。
+            # 例：「小数乘法的实际应用」≈候选「小数乘除的实际应用」(Jaccard≥0.25)
+            # 自动修正为标准名挂 formal，不再一律图谱外新建（评审 manual_correct
+            # 「图谱外恰当性 0.8」修复）。
+            near = _nearest_candidates(kp_name, candidates, limit=1)
+            if near:
+                matched = near[0]
+                final_kp = near[0]["kp_name"]
+                # 原判名保留追踪（对称 EXTRA_AI 分支的 new_kp_name）：
+                # classify_result 项与 error_record 落库均为改名后标准名，
+                # eval/前端需借此识别「自动就近改名」并核对改名目标是否贴切。
+                renamed_from = kp_name
+            else:
+                matched = await _ensure_extra_ai_node(db, kp_name)
+                extra_ai = True
+
+        # 疑似正式教材改挂候选（仅供前端建议，不持久化；needs_review 修正页同用）
+        candidate_hits: list[dict[str, Any]] = []
+        if not exact:
+            candidate_hits = _candidate_hits_struct(
+                [n for n in (item.get("candidate_hits") or []) if n] or [kp_name],
+                candidates,
+            )
+
         if matched and confidence >= EVAL_CONFIDENCE_THRESHOLD and error_type:
             record_id = await _write_error_record(
                 db,
@@ -828,29 +1179,44 @@ async def classify_scan_upload(
                 matched=matched,
                 error_type=error_type,
                 confidence=confidence,
-                knowledge_point_name=kp_name,
+                knowledge_point_name=final_kp,
+                question_text=question_text,
+                original_kp_name=renamed_from,
             )
-            public_items.append(
-                {
-                    "error_record_id": record_id,
-                    "knowledge_point_name": kp_name,
-                    "error_type": error_type,
-                    "confidence": confidence,
-                    "ocr_block_id": ocr_block_id,
-                }
-            )
+            public_item: dict[str, Any] = {
+                "error_record_id": record_id,
+                "knowledge_point_name": final_kp,
+                "error_type": error_type,
+                "confidence": confidence,
+                "ocr_block_id": ocr_block_id,
+                "question_text": question_text,
+            }
+            if renamed_from:
+                # 就近改名分支：original_kp_name 记录 Judge 原判名（对称 new_kp_name）
+                public_item["original_kp_name"] = renamed_from
+            if extra_ai:
+                # 图谱外新建分支：new_kp_name 与 knowledge_point_name 同值（契约 §1.2b）
+                public_item["new_kp_name"] = kp_name
+            if candidate_hits:
+                public_item["candidate_hits"] = candidate_hits
+            public_items.append(public_item)
         else:
-            # 低置信/知识点未匹配/无错因 → needs_review，不写 error_record
+            # 低置信/无错因/无 kp → needs_review，不写 error_record
             all_confident = False
-            public_items.append(
-                {
-                    "error_record_id": "",
-                    "knowledge_point_name": kp_name,
-                    "error_type": error_type,
-                    "confidence": confidence,
-                    "ocr_block_id": ocr_block_id,
-                }
-            )
+            review_item: dict[str, Any] = {
+                "error_record_id": "",
+                "knowledge_point_name": kp_name,
+                "error_type": error_type,
+                "confidence": confidence,
+                "ocr_block_id": ocr_block_id,
+                "question_text": question_text,
+            }
+            if kp_name:
+                # 修正页「图谱外 → 新建知识点」预填名（与 knowledge_point_name 同值）
+                review_item["new_kp_name"] = kp_name
+            if candidate_hits:
+                review_item["candidate_hits"] = candidate_hits
+            public_items.append(review_item)
 
     # 7. 更新 math_scan_upload.classify_status + classify_result
     final_status = (
@@ -1016,25 +1382,59 @@ async def correct_scan_classify(
     for item in items:
         record_id = item.get("error_record_id") or ""
         kp_name = (item.get("knowledge_point_name") or "").strip()
+        # B1.5（契约 §1.3）：图谱外专用新建名；picker 未命中任何教材图谱时 LLM 预填
+        new_kp_name = (item.get("new_kp_name") or "").strip()
         error_type = item.get("error_type") or ""
         raw_text_corrected = item.get("raw_text_corrected") or ""
+        # B1（契约 §1.3）：题干统一落 question_text；raw_text_corrected 保留兼容字段。
+        # 语义合并：question_text 优先，未传则回退 raw_text_corrected（老客户端向上兼容）。
+        question_text = (item.get("question_text") or "").strip()
+        merged_text = question_text or raw_text_corrected
 
-        # name → node_code 匹配（匹配不到时 node_code 留空，不阻断人工修正）
-        matched = _match_candidate(kp_name, candidates) if kp_name else None
-        node_code = matched.get("node_code") or "" if matched else ""
+        # ---- 锚点决策链（B1.5：图谱外新建 / 候选内精确或就近修正命名）----
+        # 1) new_kp_name 非空 → 图谱外 EXTRA_AI 幂等新建/复用；
+        # 2) kp_name 精确命中候选 → 锚定正式节点（标准名落库）；
+        # 3) kp_name 就近命中（子串）→ 修正命名为候选标准名（报告「候选内修正命名」）；
+        # 4) 其余 kp_name → 图谱外 EXTRA_AI（服务端兜底，老客户端无需 new_kp_name 也能归链）；
+        # 5) 完全无名字（仅改错因）→ matched=None，不动 node_code/链锚点（update）或置空（新建）。
+        matched: dict[str, Any] | None = None
+        final_kp = ""
+        if new_kp_name:
+            matched = await _ensure_extra_ai_node(db, new_kp_name)
+            final_kp = new_kp_name
+        elif kp_name:
+            exact = _match_candidate(kp_name, candidates)
+            if exact:
+                matched = exact
+                final_kp = exact["kp_name"]
+            else:
+                near = _nearest_candidates(kp_name, candidates, limit=1)
+                if near:
+                    matched = near[0]
+                    final_kp = near[0]["kp_name"]
+                else:
+                    matched = await _ensure_extra_ai_node(db, kp_name)
+                    final_kp = kp_name
+        anchor_fields = _chain_anchor_fields(matched)
 
         if record_id:
             # 已有 error_record_id → 更新归类（契约：classify_method=manual_corrected）
             update_data: dict[str, Any] = {
                 "classify_method": CLASSIFY_METHOD_MANUAL_CORRECTED,
             }
-            if kp_name:
-                update_data["node_code"] = node_code
-                update_data["knowledge_point_name"] = kp_name
+            if final_kp:
+                # 知识节点变更（含改挂 EXTRA_AI / 正式候选）→ 链锚点同步刷新
+                update_data["node_code"] = anchor_fields["node_code"]
+                update_data["knowledge_point_name"] = final_kp
+                for k in ("textbook_id", "grade", "semester",
+                          "unit_title", "lesson_title", "node_title"):
+                    update_data[k] = anchor_fields[k]
             if error_type:
                 update_data["primary_error"] = error_type
-            if raw_text_corrected:
-                update_data["raw_text_corrected"] = raw_text_corrected
+            if merged_text:
+                update_data["question_text"] = merged_text
+                # 兼容字段同步：老读取方读 raw_text_corrected 也能拿到最新题干
+                update_data["raw_text_corrected"] = merged_text
             update_data["corrected_at"] = now_ms
 
             await db.update(
@@ -1046,8 +1446,11 @@ async def correct_scan_classify(
             corrected.append(
                 {
                     "error_record_id": record_id,
-                    "knowledge_point_name": kp_name,
+                    "knowledge_point_name": final_kp or kp_name,
                     "error_type": error_type,
+                    "new_kp_name": new_kp_name or (
+                        kp_name if matched and _is_extra_ai_anchor(matched) else ""
+                    ),
                 }
             )
         else:
@@ -1058,8 +1461,8 @@ async def correct_scan_classify(
                 "record_id": new_id,
                 "scholar_id": scholar_id,
                 "attempt_ref": "",
-                "node_code": node_code,
-                "knowledge_point_name": kp_name,
+                "node_code": anchor_fields.get("node_code") or "",
+                "knowledge_point_name": final_kp or kp_name,
                 "primary_error": error_type,
                 "secondary_error": None,
                 "stuck_step": None,
@@ -1071,28 +1474,82 @@ async def correct_scan_classify(
                 "ocr_block_id": "",
                 "source": SOURCE_MANUAL_CORRECTED,
                 "confidence": 1.0,  # 人工修正置信度固定 1.0
-                "raw_text_corrected": raw_text_corrected,
+                "question_text": merged_text,
+                "raw_text_corrected": merged_text,
                 "corrected_at": now_ms,
+                # B1.5 §4.1：链锚点冗余 + 巩固证据初始化
+                "textbook_id": anchor_fields.get("textbook_id") or "",
+                "grade": anchor_fields.get("grade") or "",
+                "semester": anchor_fields.get("semester") or "",
+                "unit_title": anchor_fields.get("unit_title") or "",
+                "lesson_title": anchor_fields.get("lesson_title") or "",
+                "node_title": anchor_fields.get("node_title") or "",
+                "drill_stats": {},
+                "last_drill_result": {},
             }
             await db.insert(ERROR_RECORD_COLLECTION, record)
             corrected.append(
                 {
                     "error_record_id": new_id,
-                    "knowledge_point_name": kp_name,
+                    "knowledge_point_name": final_kp or kp_name,
                     "error_type": error_type,
+                    "new_kp_name": new_kp_name or (
+                        kp_name if matched and _is_extra_ai_anchor(matched) else ""
+                    ),
                 }
             )
 
+    # 3.5 回写 classify_result（状态自洽）：correct 成功后 classify 幂等返回应能看到
+    #     已落库/更新的 error_record_id；否则该题在 classify_result 中 error_record_id
+    #     恒为空串，前端与重跑流程无法感知「已人工修正」。
+    #     映射口径：classify_result 中 error_record_id 为空的槽位按序回填本次「新建」
+    #     项的 id（corrected 与请求 items 同序，只取请求中无 error_record_id 的新建项；
+    #     请求带 error_record_id 的 update 项不回填——槽位本就是直落题，id 已存在）。
+    #     注：classify_result 无稳定逐题 id，若调用方未按空槽顺序提交则可能错位，
+    #     MVP 接受该位置约定（B1 已落 question_text，后续可升级为题干锚定替代位置约定）。
+    write_back: list[dict[str, Any]] = []
+    existing_items = scan.get("classify_result") or []
+    if existing_items and corrected:
+        def _merged_qt(req: dict) -> str:
+            qt = (req.get("question_text") or "").strip()
+            return qt or (req.get("raw_text_corrected") or "")
+
+        pending = [
+            {
+                "error_record_id": c.get("error_record_id", ""),
+                "knowledge_point_name": c.get("knowledge_point_name") or "",
+                "error_type": c.get("error_type") or "",
+                "question_text": _merged_qt(req),
+            }
+            for c, req in zip(corrected, items)
+            if not (req.get("error_record_id") or "")
+        ]
+        backfilled = False
+        for it in existing_items:
+            merged = dict(it)
+            if not merged.get("error_record_id") and pending:
+                nxt = pending.pop(0)
+                merged["error_record_id"] = nxt["error_record_id"]
+                if nxt["knowledge_point_name"]:
+                    merged["knowledge_point_name"] = nxt["knowledge_point_name"]
+                if nxt["error_type"]:
+                    merged["error_type"] = nxt["error_type"]
+                if nxt["question_text"]:
+                    merged["question_text"] = nxt["question_text"]
+                backfilled = True
+            write_back.append(merged)
+
     # 4. 更新 classify_status=success（契约五态无 corrected，§0.4 以 success 代之）
+    set_fields: dict[str, Any] = {
+        "classify_status": CLASSIFY_STATUS_SUCCESS,
+        "completed_at": now_ms,
+    }
+    if write_back and backfilled:
+        set_fields["classify_result"] = write_back
     await db.update(
         MATH_SCAN_UPLOAD_COLLECTION,
         where={"scan_id": scan_id},
-        data={
-            "$set": {
-                "classify_status": CLASSIFY_STATUS_SUCCESS,
-                "completed_at": now_ms,
-            }
-        },
+        data={"$set": set_fields},
     )
 
     # 5. 写审计 scan_correct（必审）

@@ -641,10 +641,20 @@ class CorrectItemRequest(BaseModel):
 
     error_record_id: str = Field("", description="已有错因记录 id（提供则更新，否则新建）")
     knowledge_point_name: str = Field("", description="修正后的知识点 name")
+    new_kp_name: str = Field(
+        "",
+        description="图谱外 → 新建知识点专用名（B1.5）：picker 未命中任何教材图谱时 "
+        "LLM 预填、用户可编辑，提交后按 EXTRA_AI 幂等规则新建/复用节点并锚定",
+    )
     error_type: str = Field(
         "", description="错因四分类 concept/method/computation/reading"
     )
-    raw_text_corrected: str = Field("", description="人工修正后的原始题干文本（可选）")
+    question_text: str = Field(
+        "",
+        description="人工修正后的题干原文（可选；与 raw_text_corrected 语义合并，"
+        "落库统一写 question_text，raw_text_corrected 保留兼容字段）",
+    )
+    raw_text_corrected: str = Field("", description="人工修正后的原始题干文本（可选，兼容字段）")
 
 
 class CorrectScanRequest(BaseModel):

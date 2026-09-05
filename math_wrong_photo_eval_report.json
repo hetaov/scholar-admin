@@ -1,0 +1,123 @@
+{
+  "meta": {
+    "generated_at": "2026-09-05T16:05:18",
+    "judge_model": "hy3",
+    "pass_threshold": 0.7,
+    "scan_id": "scan_1788588396308_0b02b182",
+    "scholar_id": "6d758f346a6daee000859c332ed11089",
+    "textbook_id": "tb_math_五年级_up_70963119",
+    "source_docs": [
+      "scholar-skill/docs_v1/待确认/数学错题拍照设计脚本-测试脚本设计与实现.md",
+      "scholar-skill/docs_v1/待确认/数学错题拍照设计脚本-教材链条归集与同题型出题.md"
+    ]
+  },
+  "availability": [
+    {
+      "label": "scan 记录读取",
+      "available": true,
+      "detail": "scan_id=scan_1788588396308_0b02b182 ocr_status=success classify_status=success ocr_chars=1964"
+    },
+    {
+      "label": "OCR 就绪",
+      "available": true,
+      "detail": "ocr_status=success"
+    },
+    {
+      "label": "classify 有产物",
+      "available": true,
+      "detail": "items=11"
+    },
+    {
+      "label": "落库 error_record 读取",
+      "available": true,
+      "detail": "count=11"
+    },
+    {
+      "label": "候选知识点加载",
+      "available": true,
+      "detail": "candidates=59"
+    }
+  ],
+  "stats": {
+    "scan_id": "scan_1788588396308_0b02b182",
+    "ocr": {
+      "status": "success",
+      "chars": 1964,
+      "lines": 123,
+      "markers": {
+        "line_qn": 21,
+        "paren_qn": 14,
+        "est_total": 35
+      },
+      "blocks": 123
+    },
+    "classify": {
+      "status": "success",
+      "items_count": 11,
+      "auto_direct": 11,
+      "auto_direct_exact": 5,
+      "auto_direct_renamed": 1,
+      "auto_direct_extra_ai": 5,
+      "manual_corrected_items": 0,
+      "needs_review_items": 0,
+      "record_missing_items": 0,
+      "candidate_hits": 6,
+      "candidate_total": 59,
+      "error_type_valid": 11,
+      "confidence": {
+        "min": 0.7,
+        "max": 0.9,
+        "mean": 0.818,
+        "ge_threshold": 11
+      },
+      "needs_review_all": false,
+      "reasons": [
+        "auto_scan 直落 → formal(math_5_up_01) conf=0.90",
+        "auto_scan 直落 → extra_ai(xai_be2e228b10db) conf=0.70",
+        "auto_scan 直落 → formal(math_5_up_01) conf=0.90",
+        "auto_scan 直落 → formal(math_5_up_01) conf=0.90",
+        "auto_scan 直落 → formal(math_5_up_01) conf=0.90",
+        "auto_scan 直落 → extra_ai(xai_090986201ce4) conf=0.80",
+        "auto_scan 直落 → extra_ai(xai_9c49ba723fcf) conf=0.70",
+        "auto_scan 直落 → extra_ai(xai_f3b10b3928c2) conf=0.80",
+        "auto_scan 直落 → extra_ai(xai_f3b10b3928c2) conf=0.80",
+        "auto_scan 直落 → formal(math_4_up_7) conf=0.90",
+        "auto_scan 直落(就近改名 小数乘法的实际应用→小数乘除的实际应用) → formal(math_5_up_03) conf=0.70"
+      ]
+    },
+    "corrected_records": {
+      "count": 11,
+      "kp_dist": {
+        "小数的基础概念与读写": 2,
+        "小数加法的数位意义理解": 1,
+        "小数减法的实际应用": 2,
+        "质量单位、时间单位的换算": 1,
+        "小数加法的实际应用（行程折返问题）": 1,
+        "小数加法简便运算": 2,
+        "求平均数的基本方法": 1,
+        "小数乘除的实际应用": 1
+      },
+      "error_type_dist": {
+        "concept": 4,
+        "computation": 7
+      },
+      "method_dist": {
+        "auto_scan": 11
+      },
+      "kp_in_candidates": 6,
+      "auto_scan_count": 11,
+      "manual_corrected_count": 0,
+      "extra_ai_count": 5,
+      "formal_count": 6,
+      "orphan_records": 0
+    }
+  },
+  "judgments": [],
+  "summary": {
+    "data_gate_ok": true,
+    "judge_count": 0,
+    "judge_pass_count": 0
+  },
+  "pass": true,
+  "reasons": []
+}
