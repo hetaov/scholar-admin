@@ -192,6 +192,35 @@ class TestEvalTranscribe:
         assert asr.calls[0][0] == b"fake-mp3-bytes"
         assert asr.calls[0][1] == "mp3"
 
+    def test_transcribe_lang_zh_uses_chinese_engine(self, make_client, monkeypatch):
+        """lang=zh → 中文引擎 16k_zh（英译中语音作答）；不误用默认英语引擎 16k_en。
+
+        回归：突击翻译/英译中语音作答口述中文，若走英语引擎会被按英文音素转写为
+        错文本 → 评价全判「完全错误」。
+        """
+        self._block_scoring(monkeypatch)
+        en_asr = FakeAsrService()
+        zh_asr = FakeAsrService()
+        captured = {}
+
+        def _fake_get_asr_service_for(engine_type):
+            captured["engine_type"] = engine_type
+            return zh_asr
+
+        monkeypatch.setattr(
+            "services.routes.eval.get_asr_service_for", _fake_get_asr_service_for
+        )
+        client = _client(make_client, monkeypatch, asr=en_asr)
+        resp = client.post(
+            "/eval/transcribe",
+            json={"audio_base64": self._audio(), "lang": "zh"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"] == {"transcription": "it is a watch"}
+        assert captured["engine_type"] == "16k_zh"
+        assert zh_asr.call_count == 1
+        assert en_asr.call_count == 0  # 未误用英语引擎
+
     def test_no_original_text_needed(self, make_client, monkeypatch):
         """纯转写不要求 original_text:AI 会话自由语音无标准答案(与 v1 关键差异)。"""
         self._block_scoring(monkeypatch)

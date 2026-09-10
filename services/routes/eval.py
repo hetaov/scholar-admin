@@ -28,6 +28,8 @@ POST /eval/transcribe — 纯语音转写（2026-09-03，AI 会话语音输入�
 - 只做 ASR 转写、不做任何评分：会话自由语音无标准答案，v1 /eval/translate
   的 evaluate()（LLM 评分，失败兜底 levenshtein）从不被消费 → 本端点去除该步骤；
 - 入参仅 audio_base64（+ 可选 voice_format），不需要 original_text / user_input；
+- 2026-09-10 新增可选 lang：zh=中文引擎 16k_zh（英译中语音作答，中文口述），
+  缺省 en=英语引擎 16k_en（AI 会话自由语音），行为不变；
 - 错误契约同上：业务失败 200 + success=false + code（INVALID_AUDIO / ASR_UNAVAILABLE）
 """
 from __future__ import annotations
@@ -49,6 +51,7 @@ from services.asr import (
     ASR_SERVICE_TYPE_ZH,
     ASRService,
     get_asr_service,
+    get_asr_service_for,
 )
 from services.dependencies import get_db
 from services.database import CloudBaseNoSQLClient
@@ -421,6 +424,10 @@ class EvalTranscribeRequest(BaseModel):
     voice_format: Optional[str] = Field(
         "mp3", description="音频格式（mp3/wav/m4a/aac/pcm），默认 mp3"
     )
+    lang: Optional[str] = Field(
+        "en",
+        description="识别语言：en=英语引擎 16k_en（默认，AI 会话自由语音）；zh=中文引擎 16k_zh（英译中语音作答）",
+    )
 
 
 @router.post("/eval/transcribe", response_model=EvalTranslateResponse)
@@ -433,6 +440,9 @@ async def eval_transcribe(
     返回：{ success: true, data: { transcription } }（无 status 评分字段）
     错误契约对齐 /eval/translate：业务失败 200 + success=false + code
     （INVALID_AUDIO / ASR_UNAVAILABLE），仅技术异常走 5xx。
+
+    2026-09-10 新增 `lang`：英译中语音作答（中文口述）传 `lang=zh` 走中文引擎 `16k_zh`
+    （缺省英语引擎会把中文按英文音素转写为错文本）；缺省 `en` 行为不变。
     """
     # 1. 基础校验（业务失败 200 + success=false，无 4xx）
     if not body.audio_base64.strip():
@@ -455,7 +465,11 @@ async def eval_transcribe(
             code="INVALID_AUDIO",
             message="音频过大（16k/60s 上限约 5MB），请分段重试",
         )
-    # 3. ASR 转写（不做任何评分）
+    # 3. 引擎选择（2026-09-10）：lang=zh → 中文引擎 16k_zh（英译中语音作答，中文口述）；
+    #    缺省 en → 依赖注入的英语引擎（AI 会话自由语音，行为不变）。
+    if (body.lang or "en").strip().lower() == "zh":
+        asr = get_asr_service_for(ASR_SERVICE_TYPE_ZH)
+    # 4. ASR 转写（不做任何评分）
     if not asr.available:
         logger.warning(
             "[eval] /eval/transcribe ASR_UNAVAILABLE 诊断：TCB_APPID=%s, SECRET_ID=%s, "
