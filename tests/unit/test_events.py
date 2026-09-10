@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 
 from services.events import (
+    ATTEMPT_SOURCE_EVAL,
+    ATTEMPT_SOURCE_SELF,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ENDED,
     STUDY_ATTEMPT,
@@ -20,6 +22,7 @@ from services.events import (
     build_session_doc,
     end_session,
     infer_attempt_type,
+    normalize_attempt_source,
     normalize_attempt_status,
     normalize_attempt_type,
     record_attempt,
@@ -52,6 +55,14 @@ class TestInfer:
         assert normalize_attempt_status(None) == "completed"
         assert normalize_attempt_status("bogus") == "completed"
         assert normalize_attempt_status("已学") == "completed"
+
+    def test_normalize_attempt_source(self):
+        # Q5：仅 eval/self 合法；大小写/空白归一；缺失/非法 → None（不写入，向后兼容）
+        assert normalize_attempt_source("EVAL") == ATTEMPT_SOURCE_EVAL
+        assert normalize_attempt_source(" self ") == ATTEMPT_SOURCE_SELF
+        assert normalize_attempt_source(None) is None
+        assert normalize_attempt_source("") is None
+        assert normalize_attempt_source("bogus") is None
 
 
 class TestBuildAttemptDoc:
@@ -96,6 +107,21 @@ class TestBuildAttemptDoc:
         assert doc["status"] == "completed"
         assert doc["time_spent"] is None
         assert doc["session_id"] is None
+
+    def test_source_written_only_when_provided(self):
+        # Q5：显式传 eval/self 才写入；缺省或非法不落字段（存量/普通事件零差）
+        assert build_attempt_doc(
+            scholar_id="s1", sentence_id="sent_1", skill_code="translation", source="eval"
+        )["source"] == ATTEMPT_SOURCE_EVAL
+        assert build_attempt_doc(
+            scholar_id="s1", sentence_id="sent_1", skill_code="translation", source="self"
+        )["source"] == ATTEMPT_SOURCE_SELF
+        assert "source" not in build_attempt_doc(
+            scholar_id="s1", sentence_id="sent_1", skill_code="translation"
+        )
+        assert "source" not in build_attempt_doc(
+            scholar_id="s1", sentence_id="sent_1", skill_code="translation", source="bogus"
+        )
 
 
 class TestBuildSessionDoc:

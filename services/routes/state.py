@@ -11,6 +11,7 @@ total_time_spent），供"我的教材列表/断点续学"使用。
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -18,7 +19,13 @@ from services.dependencies import get_db
 from services.english import SentenceNotFoundError
 from services.english.sentence_management import ensureSentenceSemanticKey
 from services.events import end_session, record_attempt, start_session
-from services.models_learning import DEFAULT_SKILL_CODE, upsert_skill_state
+from services.models_learning import (
+    DEFAULT_SKILL_CODE,
+    SELF_EVAL_COOLDOWN_MS,
+    SKILL_STATE,
+    skill_state_id,
+    upsert_skill_state,
+)
 from services.models_scholar_book import touch_scholar_book, upsert_scholar_book
 
 logger = logging.getLogger("scholar-admin.routes.state")
@@ -42,9 +49,19 @@ async def report_tracking_state(data: dict):
       "attempt_type": "translate",   // 可选，事件类型（read/translate/listen/speak/quiz）
       "attempt_status": "completed", // 可选，事件结果（correct/incorrect/completed/abandoned）
       "session_id": "ses_xxx",       // 可选，所属会话（由 POST /tracking/session/start 创建）
-      "error_type": "grammar"        // 可选（P2/F11）：仅 attempt_status=incorrect 时生效
+      "error_type": "grammar",       // 可选（P2/F11）：仅 attempt_status=incorrect 时生效
                                      //   vocabulary/grammar/pronunciation/comprehension/other
+      "source": "eval"               // 可选（Q5 审计）：eval（评估消灭）/ self（自评消灭），
+                                     //   仅消灭写侧显式携带时落 study_attempt.source，缺省不写
     }
+
+    消灭语义（短板消灭战 D2 + P3）：
+    - `status=mastered` 且未携带 score/mastery 时，后端按证据量选 floor 档位抬升
+      mastery_score（L1=60 冷启动 / L2=80 有证据 / L3=max(评估分,80) 有达标评估），
+      与旧分取 max 不回退；携带真实评估分（评估路径）时以真值为准。
+    - 自评冷却（P3.2）：`source='self'` 时若距上次学习 < 3s，返回
+      `{success:false, code:'SELF_EVAL_COOLDOWN'}`，不写侧；`source='eval'` 不受限。
+    签名/字段不变。
 
     返回：
     {
@@ -64,9 +81,29 @@ async def report_tracking_state(data: dict):
 
     skill_code = str(data.get("skill_code") or DEFAULT_SKILL_CODE).strip()
     time_spent = data.get("time_spent")
+    source = str(data.get("source") or "").strip() or None
 
     try:
         db = get_db()
+        # P3.2 自评冷却：仅 source='self'（显式自评消灭）受 3s 冷却限制；
+        # 评估路径（source='eval'）不受限。冷却内返回业务失败，不写侧。
+        if source == "self":
+            state_key = skill_state_id(scholar_id, sentence_id, skill_code)
+            existing = await db.query(collection=SKILL_STATE, where={"_id": state_key}, limit=1)
+            records = existing.get("records", [])
+            if records:
+                last_studied = int(records[0].get("last_studied_at") or 0)
+                now_ms = int(time.time() * 1000)
+                if last_studied and now_ms - last_studied < SELF_EVAL_COOLDOWN_MS:
+                    logger.info(
+                        f"[tracking/state] 自评冷却中 scholar_id={scholar_id} "
+                        f"sentence_id={sentence_id} skill_code={skill_code}"
+                    )
+                    return {
+                        "success": False,
+                        "code": "SELF_EVAL_COOLDOWN",
+                        "message": "操作过快，请稍后再试",
+                    }
         # M3 G1.2 + M5（service-contract §8.5 + data-model §4.15）：Lazy dedup —
         # 惰性补齐语义键并落 sentence_semantic_key（registry 成为 canonical/duplicate
         # 权威源，sentence_v2 字段保持同步）；skill_state 写入键零变化。
@@ -102,6 +139,7 @@ async def report_tracking_state(data: dict):
             lesson_id=data.get("lesson_id"),
             session_id=data.get("session_id"),
             error_type=data.get("error_type"),
+            source=data.get("source"),
         )
         logger.info(
             f"[tracking/state] scholar_id={scholar_id}, sentence_id={sentence_id}, "

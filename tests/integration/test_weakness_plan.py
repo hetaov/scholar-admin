@@ -67,6 +67,23 @@ class TestWeaknessPlan:
         assert s3["status"] == 0  # status_to_int(not_started)
         assert s3["mastery_score"] == 0
 
+    def test_mastered_low_score_excluded(self, make_client, fake_db):
+        """显式掌握即消灭:mastered 且 mastery_score<60 也排除(D6 防御纵深)。
+
+        写侧已由消灭语义抬分(新写入 FLOOR=80 保底 / 存量 backfill),此处构造的是
+        历史/脏数据(mastered+低分),验证读侧守卫仍恒出列——迁移窗口期兜底。
+        """
+        _seed_content(fake_db)
+        # 历史/脏数据:mastered 但 mastery_score 仍低(迁移前或异常路径)
+        fake_db.add("skill_state", _state("s1", "translation", "mastered", 40))
+        fake_db.add("skill_state", _state("s2", "translation", "learning", 40))  # 对照:低分未掌握保留
+        client = make_client(tracking_router)
+        resp = client.post("/tracking/weakness-plan", json={"scholar_id": "scholar_1"})
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["total"] == 1
+        assert [q["sentence_id"] for q in data["weakness_queue"]] == ["s2"]
+
     def test_pick_state_highest_progress(self, make_client, fake_db):
         """乐观 pick_state:同句多能力取 progress 最高(listening 90 救活 translation 40)。"""
         _seed_content(fake_db)

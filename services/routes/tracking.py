@@ -1020,7 +1020,10 @@ async def get_weakness_plan(data: dict):
     口径：
     - 候选 = `pick_state`（乐观）后 `status = not_started`（未学）或
       `mastery_score < 60`（低分）的句子（仅含有 skill_state 记录的句子，
-      与掌握度聚合口径一致）；
+      与掌握度聚合口径一致）；**`status = mastered` 恒出列**（显式掌握即消灭，
+      作为迁移窗口期兜底与防御纵深保留；写侧已由消灭语义抬升 `mastery_score`，
+      新写入 `MASTERED_SCORE_FLOOR=80` 保底、存量经 backfill 回填，故 mastered 句
+      `mastery_score` 现应 ≥80）；
     - 范围：不传 → 学者全量一次状态查询；传 `textbook_id` → 先加载该教材
       句子再查状态；传 `lesson_id` → 先加载该课句子再查状态（此时必须同传
       `textbook_id`）；
@@ -1085,11 +1088,17 @@ async def get_weakness_plan(data: dict):
         for st in states:
             states_by_sentence.setdefault(st.get("sentence_id"), []).append(st)
 
-        # 3. 内存过滤候选：pick_state（乐观）后未学或低分
+        # 3. 内存过滤候选：pick_state（乐观）后未学或低分（已掌握恒出列）
         candidates: list[tuple[str, dict]] = []
         for sid, s_states in states_by_sentence.items():
             picked = pick_state(s_states)
             if not picked:
+                continue
+            # 已掌握恒出列（D6 防御纵深）：显式掌握（status=mastered）即不再算短板——
+            # 否则「已经掌握 / 评价合格」后句仍留在补漏队列，看板数字不减（设计 §3.2
+            # 消失口径「或 status=mastered」）。写侧已由消灭语义抬升 mastery_score
+            # （新写入 FLOOR=80 保底 / 存量 backfill），此守卫保留作迁移窗口期兜底。
+            if picked.get("status") == STATUS_MASTERED:
                 continue
             try:
                 score = int(picked.get("mastery_score") or 0)

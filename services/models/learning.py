@@ -94,6 +94,19 @@ STABILITY_DOWN_STEP = 0.1  # 稳定性衰减步长（反方向立即回落）
 DIFFICULTY_MIN = 1  # 难度档位下限（对齐冷启动先验）
 DIFFICULTY_MAX = 5  # 难度档位上限
 
+# 消灭语义保底分（短板消灭战 D2）：显式 status=mastered 但未携带 score 时，
+# mastery_score 不低于该值。对齐 SKILL_SEEDS.mastery_threshold=0.8（mastered ⇔ score≥80）；
+# 60 仅为 weakness 退出线，若取 60 会与 mastery_ratio 把 mastered 计满（3/3）自相矛盾。
+MASTERED_SCORE_FLOOR = 80.0
+
+# P3 floor 档位：自评消灭保底分按证据量分级（§11.4）。
+# L1 冷启动（attempt_count==0）：仅退出 weakness 线（<60 出列），不直接满档。
+# L2 有证据（attempt_count>=1 且无达标评估）：按 mastered 档抬升（= MASTERED_SCORE_FLOOR）。
+# L3 有达标评估（历史 study_attempt 存在 source='eval' 且 score>=60）：floor = max(评估分, 80)。
+MASTERED_SCORE_FLOOR_COLD = 60.0
+# 自评消灭冷却窗口（毫秒），仅作用于 source='self'（评估路径不受限）。
+SELF_EVAL_COOLDOWN_MS = 3000
+
 # S3.1 P1：Activity → Skill 权重配置种子（契约 §4.11.5，草稿 §二十四）
 ACTIVITY_SKILL_WEIGHT = "activity_skill_weight"
 ACTIVITY_SKILL_WEIGHT_SEEDS: dict[str, dict[str, float]] = {
@@ -326,6 +339,67 @@ def derive_progress(status: str, mastery_score: float | None) -> float:
 
 
 # ---------------------------------------------------------------------------
+# P3：自评消灭 floor 档位选择（短板消灭战 §11.4）
+# ---------------------------------------------------------------------------
+
+
+def select_mastered_floor(
+    attempt_count: int,
+    has_passing_eval: bool,
+    best_eval_score: float | None = None,
+) -> float:
+    """自评消灭保底分档位（纯函数，便于单测）。
+
+    L1 冷启动（attempt_count==0）：MASTERED_SCORE_FLOOR_COLD(60)，仅退出 weakness 线；
+    L2 有证据（attempt_count>=1 且无达标评估）：MASTERED_SCORE_FLOOR(80)；
+    L3 有达标评估：max(best_eval_score, MASTERED_SCORE_FLOOR)，只升不降。
+    """
+    if attempt_count <= 0:
+        return MASTERED_SCORE_FLOOR_COLD
+    if has_passing_eval and best_eval_score is not None:
+        return max(float(best_eval_score), MASTERED_SCORE_FLOOR)
+    return MASTERED_SCORE_FLOOR
+
+
+async def get_best_passing_eval_score(
+    db, *, scholar_id: str, sentence_id: str, skill_code: str
+) -> float | None:
+    """查询该句该 skill 历史 study_attempt 中 source='eval' 且 score>=60 的最高分。
+
+    用于 P3 L3 档位判定。无达标评估返回 None（走 L2）。
+
+    性能优化：过滤条件（含 score>=60）、按 score 降序排序、limit=1、只投影 score
+    字段全部下推到 DB，最多只返回 1 条记录的 1 个字段，避免拉取全量文档在 Python
+    层遍历取 max。
+    """
+    from services.models.events import STUDY_ATTEMPT
+
+    result = await db.query(
+        collection=STUDY_ATTEMPT,
+        where={
+            "scholar_id": scholar_id,
+            "sentence_id": sentence_id,
+            "skill_code": skill_code,
+            "source": "eval",
+            "score": {"$gte": 60.0},
+        },
+        order=[{"field": "score", "direction": "desc"}],
+        limit=1,
+        select={"score": 1},
+    )
+    records = result.get("records", [])
+    if not records:
+        return None
+    s = records[0].get("score")
+    if s is None:
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # S3.1 P1：confidence / stability / difficulty 更新策略（§5.6.2，契约 §4.11.4）
 # ---------------------------------------------------------------------------
 
@@ -506,6 +580,13 @@ async def upsert_skill_state(
       （第 1 次后续更新只贡献 1/3，防单次偶然污染）；
     - 默认 False 保持既有调用行为不变（旧调用不受影响）。
 
+    消灭语义（短板消灭战 §3 D2 + P3 §11.4）：`status=mastered` 且未携带 score/mastery 时，
+    mastery_score 按证据量选 floor 档位后抬升（`max(旧分, floor)`，不回退旧高分）：
+    - L1 冷启动（无历史 attempt）：floor=60（仅退出 weakness 线）
+    - L2 有证据（attempt_count>=1 且无达标评估）：floor=80
+    - L3 有达标评估（历史 source='eval' 且 score>=60）：floor=max(评估分, 80)
+    非 mastered 且无分时维持既有行为（保留旧分）。
+
     S3.1 P1（契约 §4.11.4 启用）：
     - confidence：本轮评估置信度，写入前经 `update_confidence`（近 N 次均值 × 证据系数）
     - outcome：本次结果方向（"success" / "fail"），用于 `update_stability` 稳定性更新
@@ -528,7 +609,19 @@ async def upsert_skill_state(
         raw_score = to_mastery_score(update.get("score"), update.get("mastery"))
         effective_weight = float(weight) if weight else 1.0
         if raw_score is None:
-            mastery_score = old_score
+            if normalize_status(update.get("status")) == STATUS_MASTERED:
+                # 消灭语义（D2 / P3 §11.4）：显式掌握但未带分 → 按证据量选 floor 档位，
+                # max 保证不回退已有更高分。档位：L1=60(冷启动) / L2=80(有证据) / L3=max(评估分,80)
+                existing_attempts = int(doc.get("attempt_count") or 0)
+                best_eval = await get_best_passing_eval_score(
+                    db, scholar_id=scholar_id, sentence_id=sentence_id, skill_code=skill_code
+                )
+                floor = select_mastered_floor(
+                    existing_attempts, has_passing_eval=best_eval is not None, best_eval_score=best_eval
+                )
+                mastery_score = max(float(old_score or 0.0), floor)
+            else:
+                mastery_score = old_score
         elif sparse_discount and attempt_count < MIN_EVIDENCE:
             # 证据稀疏打折：只按证据比例贡献增量（§5.6.2）
             effective_weight *= attempt_count / MIN_EVIDENCE
@@ -581,6 +674,10 @@ async def upsert_skill_state(
         return latest["records"][0]
 
     mastery_score = to_mastery_score(update.get("score"), update.get("mastery"))
+    if mastery_score is None and normalize_status(update.get("status")) == STATUS_MASTERED:
+        # 消灭语义（D2 / P3 §11.4）：首次写入即显式掌握且无分 → L1 冷启动档位（60），
+        # 仅退出 weakness 线，不直接满档；后续有证据后再自评走 L2/L3。
+        mastery_score = MASTERED_SCORE_FLOOR_COLD
     has_mastery = mastery_score is not None
     status = derive_status(
         update.get("status"), mastery_score, has_mastery, skill_code=skill_code

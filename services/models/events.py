@@ -75,6 +75,12 @@ VALID_ERROR_TYPES = {
 # 错题本聚合时对缺失 error_type 的回落口径（存量数据归入 other）
 ERROR_TYPE_FALLBACK = ERROR_TYPE_OTHER
 
+# 消灭来源（Q5 审计）：区分「评估消灭」（eval）与「自评消灭」（self），
+# 供复盘与产品决策观察自评频次。仅消灭路径显式传入才写入，普通学习事件不带（向后兼容）。
+ATTEMPT_SOURCE_EVAL = "eval"
+ATTEMPT_SOURCE_SELF = "self"
+VALID_ATTEMPT_SOURCES = {ATTEMPT_SOURCE_EVAL, ATTEMPT_SOURCE_SELF}
+
 # 会话状态
 SESSION_STATUS_ACTIVE = "active"
 SESSION_STATUS_ENDED = "ended"
@@ -121,6 +127,14 @@ def normalize_attempt_status(status: Any) -> str:
     return ATTEMPT_STATUS_COMPLETED
 
 
+def normalize_attempt_source(source: Any) -> str | None:
+    """把消灭来源收敛为 eval/self；缺失或非法返回 None（不写入，保持向后兼容）。"""
+    if not source:
+        return None
+    s = str(source).strip().lower()
+    return s if s in VALID_ATTEMPT_SOURCES else None
+
+
 # ---------------------------------------------------------------------------
 # 主键生成
 # ---------------------------------------------------------------------------
@@ -156,6 +170,7 @@ def build_attempt_doc(
     lesson_id: str | None = None,
     session_id: str | None = None,
     error_type: str | None = None,
+    source: str | None = None,
     attempt_id: str | None = None,
     now: int | None = None,
 ) -> dict:
@@ -183,6 +198,11 @@ def build_attempt_doc(
         _t = str(error_type).strip().lower()
         if _t in VALID_ERROR_TYPES:
             doc["error_type"] = _t
+    # Q5 审计：仅显式传入且合法时写入 source（eval=评估消灭 / self=自评消灭）；
+    # 普通学习事件与存量文档不带该字段（向后兼容，无迁移）。
+    normalized_source = normalize_attempt_source(source)
+    if normalized_source:
+        doc["source"] = normalized_source
     return doc
 
 
@@ -240,11 +260,13 @@ async def record_attempt(
     lesson_id: str | None = None,
     session_id: str | None = None,
     error_type: str | None = None,
+    source: str | None = None,
     now: int | None = None,
 ) -> dict:
     """写入一条 study_attempt 事件（append-only，只插入不修改）。
 
     - `error_type`（P2/F11 错题本）：仅 `status=incorrect` 且显式传入时写入文档。
+    - `source`（Q5 审计）：消灭来源 `eval`（评估消灭）/ `self`（自评消灭），显式传入才写入。
     返回写入的事件文档。
     """
     doc = build_attempt_doc(
@@ -259,6 +281,7 @@ async def record_attempt(
         lesson_id=lesson_id,
         session_id=session_id,
         error_type=error_type,
+        source=source,
         now=now,
     )
     await db.insert(collection=STUDY_ATTEMPT, data=doc)
