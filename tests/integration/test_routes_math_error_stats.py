@@ -8,6 +8,9 @@
     primary_error→error_type，透传 knowledge_point_name/source/created_at；
   - knowledge_point_name 过滤（可选）；
   - total 不受 limit 截断影响。
+- M13 双源透传（接口 25 出参增 kp_source / exam_backlink_to，data-model §4.12.9(b)）：
+  - 缺省按数据事实兜底：EXTRA_AI（真题/图谱外）→ exam_paper；正式教材链/无链 → textbook；
+  - 显式落库字段原样透传（kp_source / exam_backlink_to）；无回链 → exam_backlink_to=None。
 """
 from __future__ import annotations
 
@@ -160,3 +163,152 @@ class TestMathErrorStats:
         assert item["node_code"] == "code_er_legacy"
         assert item["drill_stats"] == {}
         assert item["last_drill_result"] == {}
+        # M11：无正式教材链 → skill_progress 缺省空数组（存量兼容）
+        assert res.json()["data"]["skill_progress"] == []
+
+
+class TestMathErrorStatsSkillProgress:
+    """M11 ②：error-stats 出参新增 skill_progress（学者维度技能条统计）"""
+
+    def test_skill_progress_empty_when_no_unit_summary(self, make_client, fake_db):
+        """学者有错题但教材单元尚无 display_groups 总结 → 缺省空数组"""
+        _seed_error_record(
+            fake_db, record_id="er_u1",
+            textbook_id="TB-3A", unit_title="第1单元 万以内的加法和减法",
+            kp="整数加法",
+        )
+        # 教材链上存在 unit 节点，但 ai_summary 是老总结（无 display_groups）
+        fake_db.add("curriculum_node", {
+            "node_id": "unit_a",
+            "node_type": "unit",
+            "textbook_id": "TB-3A",
+            "unit_title": "第1单元 万以内的加法和减法",
+            "ai_summary": {"status": "success", "knowledge_points": [],
+                           "extended_points": [], "idempotency_key": "k_old"},
+        })
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        assert data["total"] == 1
+        assert data["skill_progress"] == []
+
+    def test_skill_progress_computed_from_unit_display_groups(self, make_client, fake_db):
+        """display_groups 已生成 → 按 kp 名映射聚合，weakness 综合信号正确"""
+        _seed_error_record(
+            fake_db, record_id="er_1",
+            textbook_id="TB-3A", unit_title="第1单元 万以内的加法和减法",
+            kp="整数加法", error_type="computation", occurrence=2,
+        )
+        _seed_error_record(
+            fake_db, record_id="er_2",
+            textbook_id="TB-3A", unit_title="第1单元 万以内的加法和减法",
+            kp="生活应用", error_type="method",
+        )
+        fake_db.add("curriculum_node", {
+            "node_id": "unit_a",
+            "node_type": "unit",
+            "textbook_id": "TB-3A",
+            "unit_title": "第1单元 万以内的加法和减法",
+            "ai_summary": {
+                "status": "success",
+                "knowledge_points": [],
+                "extended_points": [],
+                "display_groups": [
+                    {"display_group": "进位加法",
+                     "kp_names": ["整数加法", "整数减法"],
+                     "kp_ids": ["kp_jf", "kp_jt"], "count": 2},
+                    {"display_group": "应用与建模",
+                     "kp_names": ["生活应用"],
+                     "kp_ids": ["kp_yy"], "count": 1},
+                    {"display_group": "逻辑推理",
+                     "kp_names": ["图形推理"],
+                     "kp_ids": ["kp_tl"], "count": 1},
+                ],
+            },
+        })
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        assert data["total"] == 2
+        progress = data["skill_progress"]
+        # 逻辑推理无错误证据 → 不入列；保 display_groups 顺序
+        assert [it["display_group"] for it in progress] == ["进位加法", "应用与建模"]
+        first = progress[0]
+        assert first["kp_ids"] == ["kp_jf", "kp_jt"]
+        assert first["mastery_avg"] == 0.5
+        assert first["weakness_signal"] is True   # 重复错 occ=2
+        second = progress[1]
+        assert second["kp_ids"] == ["kp_yy"]
+        assert second["mastery_avg"] == 0.5
+        assert second["weakness_signal"] is False  # 单条首错非薄弱
+
+
+class TestMathErrorStatsExamSource:
+    """M13 双源透传：error-stats 出参 kp_source / exam_backlink_to
+    （data-model §4.12.9(b)；缺省按数据事实兜底，存量记录零回填可识别）"""
+
+    def test_legacy_extra_ai_record_defaults_to_exam_paper(self, make_client, fake_db):
+        """存量 EXTRA_AI 记录（无 kp_source 字段）→ 读取层兜底 exam_paper；
+        无回链 → exam_backlink_to=None"""
+        _seed_error_record(
+            fake_db, record_id="er_extra_legacy",
+            kp="鸡兔同笼", textbook_id="EXTRA_AI",
+        )
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        item = res.json()["data"]["items"][0]
+        assert item["kp_source"] == "exam_paper"
+        assert item["exam_backlink_to"] is None
+
+    def test_formal_and_unlinked_records_default_to_textbook(self, make_client, fake_db):
+        """正式教材链 / 无链记录（无 kp_source 字段）→ 兜底 textbook（教材锚）"""
+        _seed_error_record(
+            fake_db, record_id="er_formal",
+            kp="进位加法", textbook_id="TB-3A",
+        )
+        _seed_error_record(fake_db, record_id="er_unlinked", kp="分数除法")
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        items = {it["error_record_id"]: it for it in res.json()["data"]["items"]}
+        assert items["er_formal"]["kp_source"] == "textbook"
+        assert items["er_unlinked"]["kp_source"] == "textbook"
+        assert items["er_formal"]["exam_backlink_to"] is None
+        assert items["er_unlinked"]["exam_backlink_to"] is None
+
+    def test_explicit_fields_echoed_verbatim(self, make_client, fake_db):
+        """M13 新版落库字段（kp_source='exam_paper' + exam_backlink_to）→ 原样透传"""
+        backlink = {
+            "node_code": "ua1",
+            "kp_name": "小数乘整数",
+            "textbook_id": "tb-multi",
+            "unit_title": "第3单元 小数乘法",
+            "lesson_title": "课时1 小数乘整数",
+        }
+        _seed_error_record(
+            fake_db, record_id="er_exam_new",
+            kp="鸡兔同笼", textbook_id="EXTRA_AI",
+            kp_source="exam_paper", exam_backlink_to=backlink,
+        )
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        item = res.json()["data"]["items"][0]
+        assert item["kp_source"] == "exam_paper"
+        assert item["exam_backlink_to"] == backlink
+
+    def test_explicit_textbook_source_not_overridden(self, make_client, fake_db):
+        """防御：正式记录显式 kp_source='textbook' 不被推导覆盖（显式字段优先）"""
+        _seed_error_record(
+            fake_db, record_id="er_tb_explicit",
+            kp="加法运算", textbook_id="TB-3A", kp_source="textbook",
+        )
+        client = make_client(math_router)
+        res = client.get("/math/error-stats?scholar_id=s1")
+        assert res.status_code == 200, res.text
+        item = res.json()["data"]["items"][0]
+        assert item["kp_source"] == "textbook"
+        assert item["exam_backlink_to"] is None

@@ -38,6 +38,7 @@ from services.database import (
     PRACTICE_SHEET_COLLECTION,
     SHEET_RENDER_JOB_COLLECTION,
 )
+from services.math.error_scanner import EXTRA_AI_TEXTBOOK_ID, KP_SOURCE_EXAM_PAPER
 from services.math.knowledge_summary import (
     LLMNotConfiguredError,
     LLMResponseError,
@@ -72,6 +73,13 @@ SHEET_TEMPLATE_VERSION = 1
 
 # 变式等级（ADR-0010：MVP L1/L2；LLM 按知识点生成的题目记为 L1 基础变式）
 VARIANT_LEVEL_L1 = "L1"
+
+# 出题源标记（M14 双源出题：教材母题默认 / 真题同款变式；契约 items[].source_type）
+ITEM_SOURCE_TEXTBOOK = "textbook"
+ITEM_SOURCE_EXAM_PAPER = "exam_paper"
+
+# 真题同款变式上限（每命中教材点 ≤1 道、总 ≤3，防 A4 篇幅膨胀）
+EXAM_VARIANT_MAX = 3
 
 # 内部标记：奥数扩展题（洗牌时区分，落库前剥离，非契约字段）
 _EXTENDED_ITEM_FLAG = "_extended"
@@ -156,6 +164,8 @@ def _sheet_signature(
     node_codes: list | None,
     knowledge_points: list | None,
     include_extended_points: bool,
+    skill_weakness: list | None = None,
+    include_exam_variants: bool = False,
 ) -> str:
     """幂等签名：同 scholar 同参数 → 相同签名（重复生成幂等）"""
     sig = {
@@ -171,6 +181,11 @@ def _sheet_signature(
             for kp in (knowledge_points or [])
         ],
         "include_extended_points": bool(include_extended_points),
+        "skill_weakness": [
+            {"display_group": sw.get("display_group"), "kp_ids": sorted(sw.get("kp_ids") or [])}
+            for sw in (skill_weakness or [])
+        ],
+        "include_exam_variants": bool(include_exam_variants),
     }
     raw = json.dumps(sig, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -352,6 +367,68 @@ async def _select_wrong_book_kps(db, scholar_id: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 选题源：真题同款变式（M14 双源出题，契约 skill_weakness / include_exam_variants）
+# ---------------------------------------------------------------------------
+
+
+def _normalize_skill_weakness(skill_weakness: list | None) -> list[dict]:
+    """契约化技能条弱信号：仅保留 {display_group, kp_ids?}；无 display_group 项剔除（空 → []）。
+
+    幂等签名 / 落库 / 出参回显共用此口径，避免携带页面装饰字段（percent/energy）污染请求。
+    """
+    out: list[dict] = []
+    for sw in skill_weakness or []:
+        if not isinstance(sw, dict):
+            continue
+        label = (sw.get("display_group") or "").strip()
+        if not label:
+            continue
+        entry: dict = {"display_group": label}
+        kp_ids = [str(x) for x in (sw.get("kp_ids") or []) if str(x)]
+        if kp_ids:
+            entry["kp_ids"] = kp_ids
+        out.append(entry)
+    return out
+
+
+def _is_exam_paper_record(rec: dict) -> bool:
+    """真题证据记录（M13 双源落库事实）：kp_source=exam_paper 或 textbook_id=EXTRA_AI"""
+    return (
+        rec.get("kp_source") == KP_SOURCE_EXAM_PAPER
+        or (rec.get("textbook_id") or "") == EXTRA_AI_TEXTBOOK_ID
+    )
+
+
+async def _select_exam_variant_targets(
+    db, scholar_id: str, textbook_kp_names: set
+) -> list[dict]:
+    """真题同款变式选题：学者真题（exam_paper）错题中 exam_backlink_to 回链教材点在
+    本次选中教材点集合内 → 同考点同错因可出真题变式。
+
+    返回 [{record}]（按 occurrence 降序，最多 EXAM_VARIANT_MAX 条）；
+    无真题证据 / 无回链命中 → []。真题题面库未建前由 LLM 按教材点上下文生成变式并标
+    source_type='exam_paper'（契约字段透传断言口径）。
+    """
+    if not textbook_kp_names:
+        return []
+    res = await db.query(
+        ERROR_RECORD_COLLECTION,
+        where={"scholar_id": scholar_id},
+        limit=MAX_ERROR_RECORDS_SCAN,
+    )
+    records = res.get("records") or []
+    hits = [
+        r
+        for r in records
+        if _is_exam_paper_record(r)
+        and (r.get("knowledge_point_name") or "").strip()
+        and (r.get("exam_backlink_to") or {}).get("kp_name") in textbook_kp_names
+    ]
+    hits.sort(key=lambda r: -(int(r.get("occurrence") or 1)))
+    return hits[:EXAM_VARIANT_MAX]
+
+
+# ---------------------------------------------------------------------------
 # 出题（LLM 按知识点生成变式题；奥数题按 difficulty_band 标注难度）
 # ---------------------------------------------------------------------------
 
@@ -395,6 +472,7 @@ def _build_question_prompt(
     count: int,
     extended: bool = False,
     extended_band: str = "",
+    exam_error_tip: str = "",
 ) -> str:
     node = node or {}
     if extended:
@@ -402,7 +480,15 @@ def _build_question_prompt(
         difficulty_note = f"难度：奥数拔高题（{band_label}档，建议难度 4~5）。"
         extended_prefix = "奥数拔高"
     else:
-        difficulty_note = "难度：对应教材基础巩固（建议难度 1~3 为主）。"
+        tip = (exam_error_tip or "").strip()
+        if tip:
+            # 真题易错同类变式：同考点（教材点上下文）、同错因方向（学者真题错题 primary_error）
+            difficulty_note = (
+                f"出题类型：真题易错同类变式（同考点、同错因方向：{tip}），不超纲。\n"
+                "难度：对应教材基础巩固（建议难度 1~3 为主）。"
+            )
+        else:
+            difficulty_note = "难度：对应教材基础巩固（建议难度 1~3 为主）。"
         extended_prefix = ""
     ability = _format_ability_dimensions(kp.get("ability_dimensions"))
     return _QUESTION_USER_TEMPLATE.format(
@@ -483,6 +569,7 @@ async def _generate_questions(
     count: int,
     extended: bool = False,
     extended_band: str = "",
+    exam_error_tip: str = "",
 ) -> list[dict]:
     """调用 LLM_SUMMARY_MODEL 基于知识点生成 count 道练习题（JSON 解析失败重试 1 次）
 
@@ -499,6 +586,7 @@ async def _generate_questions(
         count=count,
         extended=extended,
         extended_band=extended_band,
+        exam_error_tip=exam_error_tip,
     )
     client = _get_llm_client()
     last_err: Exception | None = None
@@ -573,6 +661,8 @@ async def _persist_sheet(
     source: str,
     knowledge_points: list,
     include_extended_points: bool,
+    skill_weakness: list,
+    include_exam_variants: bool,
     warnings: list,
     signature: str,
 ) -> dict:
@@ -596,6 +686,9 @@ async def _persist_sheet(
         "source": source,
         "knowledge_points": knowledge_points or [],
         "include_extended_points": bool(include_extended_points),
+        # M14 双源出题：技能条弱信号回显 + 真题同款变式开关
+        "skill_weakness": skill_weakness or [],
+        "include_exam_variants": bool(include_exam_variants),
         # 非契约内部字段：幂等签名 / 提示
         "idempotency_signature": signature,
         "warnings": warnings,
@@ -645,11 +738,27 @@ def _to_public_sheet(sheet: dict) -> dict:
         "primary_errors": sheet.get("primary_errors") or [],
         "difficulty_bands": sheet.get("difficulty_bands") or [],
         "items": [
-            {k: it.get(k) for k in ("item_id", "question", "node_code", "target_error", "variant_level", "difficulty", "source_kp") if it.get(k) not in (None, "")}
+            {
+                k: it.get(k)
+                for k in (
+                    "item_id",
+                    "question",
+                    "node_code",
+                    "target_error",
+                    "variant_level",
+                    "difficulty",
+                    "source_kp",
+                    "source_type",
+                )
+                if it.get(k) not in (None, "")
+            }
             for it in (sheet.get("items") or [])
         ],
         "qrcode_ref": sheet.get("qrcode_ref"),
         "file_refs": sheet.get("file_refs"),
+        # M14 双源出题：技能条弱信号 / 真题同款变式开关 回显（存量 sheet 缺省空/False）
+        "skill_weakness": sheet.get("skill_weakness") or [],
+        "include_exam_variants": bool(sheet.get("include_exam_variants")),
     }
 
 
@@ -702,10 +811,20 @@ async def generatePracticeSheet(
     source: str = SHEET_SOURCE_WRONG_BOOK,
     knowledge_points: list | None = None,
     include_extended_points: bool = False,
+    skill_weakness: list | None = None,
+    include_exam_variants: bool = False,
     wrong_book_ratio: float = DEFAULT_WRONG_BOOK_RATIO,
     actor: str = "",
 ) -> dict:
-    """生成 A4 练习纸（三种选题源）
+    """生成 A4 练习纸（三种选题源 + M14 双源出题）
+
+    M14 双源出题（契约：skill_weakness / include_exam_variants / items[].source_type）：
+    - skill_weakness：技能条弱信号（[{display_group, kp_ids?}]），契约化后随 sheet 落库/出参
+      回显并纳入幂等签名（真题库就绪后可作为技能条级弱信号驱动的出题入参；当前为透传口径）。
+    - include_exam_variants=True：按学者真题（exam_paper）错题 exam_backlink_to 回链到本次
+      选中教材点的记录出「真题同款变式」（同考点同错因），items[].source_type='exam_paper'；
+      其余教材母题恒标 'textbook'。无真题证据 / 回链不命中 → 仅教材母题（零行为差）。
+    
 
     前置校验：
     - 缺 scholar_id → MissingScholarError（路由层映射 400）
@@ -727,6 +846,8 @@ async def generatePracticeSheet(
     if ai_used and not knowledge_points:
         raise KnowledgePointNotMatchedError("ai_knowledge / mixed 需要提供 knowledge_points")
 
+    skill_weakness = _normalize_skill_weakness(skill_weakness)
+
     signature = _sheet_signature(
         scholar_id=scholar_id,
         source=source,
@@ -734,6 +855,8 @@ async def generatePracticeSheet(
         node_codes=node_codes,
         knowledge_points=knowledge_points,
         include_extended_points=include_extended_points,
+        skill_weakness=skill_weakness,
+        include_exam_variants=include_exam_variants,
     )
     recent = await _find_recent_sheet(db, scholar_id, signature)
     if recent:
@@ -781,6 +904,7 @@ async def generatePracticeSheet(
         source_kp: str = "",
         difficulty: int | None = None,
         extended: bool = False,
+        source_type: str = ITEM_SOURCE_TEXTBOOK,
     ) -> dict:
         """题目记录 → practice_sheet_item（奥数题打内部标记，落库前剥离）"""
         item = {
@@ -794,6 +918,7 @@ async def generatePracticeSheet(
             "variant_level": VARIANT_LEVEL_L1,
             "difficulty": q["difficulty"] if difficulty is None else difficulty,
             "source_kp": source_kp,
+            "source_type": source_type,  # M14：教材母题 / 真题同款变式
             "sim_check": {"status": "skipped"},  # 防背题相似度校验：渲染任务阶段启用
         }
         if extended:
@@ -986,6 +1111,56 @@ async def generatePracticeSheet(
     if not items:
         raise NoQuestionsAvailableError("无可用选题（出题结果为空）")
 
+    # M14 双源出题：include_exam_variants 时按学者真题错题 exam_backlink_to 回链到本次选中
+    # 教材点的记录出「真题同款变式」（每命中教材点 ≤1 道，同考点同错因），随后与母题同池洗牌。
+    if include_exam_variants and ai_kps:
+        ctx_by_name = {
+            (entry.get("kp") or {}).get("name"): entry
+            for entry in ai_kps
+            if (entry.get("kp") or {}).get("name")
+        }
+        targets = await _select_exam_variant_targets(db, scholar_id, set(ctx_by_name))
+
+        async def _gen_exam_variant(rec: dict, ctx: dict) -> list[dict]:
+            node = ctx.get("node") or {}
+            kp = ctx.get("kp") or {}
+            backlink = rec.get("exam_backlink_to") or {}
+            name = kp.get("name") or backlink.get("kp_name") or ""
+            target_error = (rec.get("primary_error") or "").strip()
+            async with _llm_sem:
+                questions = await _generate_questions(
+                    kp={
+                        "name": name,
+                        "summary": kp.get("summary") or "",
+                        "ability_dimensions": kp.get("ability_dimensions") or [],
+                    },
+                    node=node,
+                    count=1,
+                    exam_error_tip=target_error,
+                )
+            node_code = node.get("code") or name
+            return [
+                _make_item(
+                    q,
+                    node_code=node_code,
+                    target_error=target_error,
+                    source_kp=name,
+                    source_type=ITEM_SOURCE_EXAM_PAPER,
+                )
+                for q in questions[:1]
+            ]
+
+        batches = await asyncio.gather(
+            *(
+                _gen_exam_variant(
+                    rec, ctx_by_name[(rec.get("exam_backlink_to") or {}).get("kp_name")]
+                )
+                for rec in targets
+            )
+        )
+        for batch in batches:
+            items.extend(batch)
+
     # 防背题（ADR-0010）：主练习题洗牌，奥数扩展题保持列在主练习后
     rng = random.Random(int(time.time() * 1000))
     main_pool = [it for it in items if not it.get(_EXTENDED_ITEM_FLAG)]
@@ -1017,6 +1192,8 @@ async def generatePracticeSheet(
         source=source,
         knowledge_points=knowledge_points or [],
         include_extended_points=include_extended_points,
+        skill_weakness=skill_weakness,
+        include_exam_variants=include_exam_variants,
         warnings=warnings,
         signature=signature,
     )
@@ -1033,6 +1210,8 @@ async def generatePracticeSheet(
                 {"name": kp.get("name", "")} for kp in (knowledge_points or [])
             ],
             "include_extended_points": bool(include_extended_points),
+            "skill_weakness": skill_weakness,
+            "include_exam_variants": bool(include_exam_variants),
             "template_type": template_type,
             "nodes": nodes,
             "primary_errors": primary_errors,

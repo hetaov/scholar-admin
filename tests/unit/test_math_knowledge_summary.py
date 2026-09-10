@@ -32,10 +32,15 @@ from services.math import (
     knowledge_summary,
 )
 from services.math.knowledge_summary import (
+    DISPLAY_GROUP_LABEL_MAX_LEN,
+    DISPLAY_GROUP_MAX,
     KnowledgeSummaryError,
     LLMResponseError,
     NoDescriptionError,
     NodeNotFoundError,
+    _finalize_display_groups,
+    _kp_display_group_label,
+    _validate_summary_result,
     empty_ai_summary,
     summary_idempotency_key,
 )
@@ -372,3 +377,216 @@ async def test_get_summary_generated_returns_full_ai_summary():
     assert result["knowledge_points"][0]["name"] == "整数加减法"
     assert result["extended_points"][0]["difficulty_band"] == "入门"
     assert result["idempotency_key"] == "k1"
+    assert result["display_groups"] == []  # 存量 ai_summary 无 display_groups → [] 兼容
+
+
+# ---------------------------------------------------------------------------
+# M11 ① display_group 确定性收敛（方案 §3.3 · O4=D）
+# ---------------------------------------------------------------------------
+
+
+def _kp(name, *, dims=("arithmetic",), display_group="", source_node_id=None,
+        **extra) -> dict:
+    kp = {
+        "name": name,
+        "summary": f"{name} 一句话总结",
+        "ability_dimensions": list(dims),
+        "source_lesson_id": "l1",
+    }
+    if source_node_id is not None:
+        kp["source_node_id"] = source_node_id
+    if display_group:
+        kp["display_group"] = display_group
+    kp.update(extra)
+    return kp
+
+
+def test_finalize_display_groups_unit_groups_by_label_keeps_order_and_kp_ids():
+    """unit 收敛：同 display_group 细点聚成一条技能条，保首现序；kp_ids 取 source_node_id"""
+    kps = [
+        _kp("整数加法", display_group="进位加法", source_node_id="kp1"),
+        _kp("整数减法", display_group="进位加法", source_node_id="kp2"),
+        _kp("竖式对齐", display_group="竖式计算", source_node_id=None),
+        _kp("应用题阅读", dims=("reasoning",), display_group="应用题"),
+    ]
+    out_kps, groups = _finalize_display_groups(kps, node_type="unit")
+    assert [g["display_group"] for g in groups] == ["进位加法", "竖式计算", "应用题"]
+    first = groups[0]
+    assert first["kp_names"] == ["整数加法", "整数减法"]
+    assert first["kp_ids"] == ["kp1", "kp2"]
+    assert first["count"] == 2
+    # 无 source_node_id 的细点不计 kp_ids（count 以 kp_names 为准）
+    assert groups[1]["kp_ids"] == []
+    assert groups[1]["count"] == 1
+    # 每项 kp 均回写 display_group
+    assert {kp["display_group"] for kp in out_kps} == {"进位加法", "竖式计算", "应用题"}
+
+
+def test_finalize_display_groups_merges_beyond_max_to_limit_deterministically():
+    """>DISPLAY_GROUP_MAX 组 → 确定性合并到上限内；两次调用结果一致"""
+    kps = [
+        _kp(f"点{i}", dims=("arithmetic",), display_group=f"技能条{i}")
+        for i in range(DISPLAY_GROUP_MAX + 2)
+    ]
+    out1, groups1 = _finalize_display_groups(kps, node_type="unit")
+    out2, groups2 = _finalize_display_groups(kps, node_type="unit")
+    assert len(groups1) == DISPLAY_GROUP_MAX
+    assert len(groups2) == DISPLAY_GROUP_MAX
+    assert groups1 == groups2  # 确定性：同入参同出参
+    # 合并后成员总数不丢（count 守恒）
+    assert sum(g["count"] for g in groups1) == len(kps)
+    # 每项细点归属到最终技能条
+    assert {kp["display_group"] for kp in out1} == {g["display_group"] for g in groups1}
+
+
+def test_finalize_display_groups_non_unit_and_empty_are_noop():
+    """非 unit（lesson/knowledge_point）与空清单 → display_groups=[] 且细点零变化"""
+    kps = [
+        _kp("整数加法", display_group="进位加法"),
+        _kp("整数减法"),
+    ]
+    for node_type in ("lesson", "knowledge_point"):
+        out_kps, groups = _finalize_display_groups(kps, node_type=node_type)
+        assert groups == []
+        assert out_kps == kps  # 原样返回，不新增 display_group 归属
+    assert _finalize_display_groups([], node_type="unit") == ([], [])
+    assert _finalize_display_groups(None, node_type="unit") == ([], [])
+
+
+def test_finalize_display_groups_fallback_to_ability_plain_label():
+    """LLM 未打 display_group → 按能力维度大白话兜底聚类；无能力维度 → 单元综合"""
+    kps = [
+        _kp("进位加法", dims=("arithmetic",)),
+        _kp("笔算竖式", dims=("computation",)),
+        _kp("生活应用", dims=("modeling",)),
+        _kp("无名细点", dims=()),
+    ]
+    _, groups = _finalize_display_groups(kps, node_type="unit")
+    assert [g["display_group"] for g in groups] == [
+        "数与运算", "计算", "应用与建模", "单元综合",
+    ]
+
+
+def test_kp_display_group_label_prefers_llm_and_trims_overlong():
+    """display_group 值优先；缺失按能力兜底；超长截断到 DISPLAY_GROUP_LABEL_MAX_LEN"""
+    kp = {"name": "x", "ability_dimensions": ["arithmetic"],
+          "display_group": "进位换算" * 20}
+    assert len(_kp_display_group_label(kp)) == DISPLAY_GROUP_LABEL_MAX_LEN
+    assert _kp_display_group_label({"name": "x", "ability_dimensions": ["arithmetic"]}) == "数与运算"
+    assert _kp_display_group_label({"name": "x", "ability_dimensions": []}) == "单元综合"
+
+
+def test_display_group_overlong_raises_validation_error():
+    """LLM 输出 display_group 超长 → 校验拒绝（LLMResponseError，禁止罗列细点名词）"""
+    kps = {
+        "knowledge_points": [
+            _kp("整数加法", display_group="超长技能条名" * 10),
+        ],
+        "extended_points": [],
+    }
+    with pytest.raises(LLMResponseError, match="display_group 超长"):
+        _validate_summary_result(kps, include_extended_points=False)
+
+
+@pytest.mark.asyncio
+async def test_generate_unit_summary_persists_display_groups_and_idempotent_hit(
+    monkeypatch,
+):
+    """unit 节点生成 → ai_summary 写 display_groups + kp.display_group；幂等命中同样透传"""
+    monkeypatch.setattr(knowledge_summary, "USE_LANGGRAPH_SUMMARY", False)
+    db = FakeDB()
+    db.add(
+        CURRICULUM_NODE_COLLECTION,
+        _node(node_id="u1", node_type="unit", unit_id="u1", lesson_id="",
+              lesson_title="", title="进位加法",
+              unit_title="万以内的加法和减法"),
+    )
+    calls: list[str] = []
+
+    async def fake_llm(node, *, include_extended_points):
+        calls.append(node["node_id"])
+        return {
+            "knowledge_points": [
+                _kp("整数加法", display_group="进位加法", source_node_id="kp1",
+                    source_lesson_id="l1"),
+                _kp("整数减法", display_group="退位减法", source_node_id="kp2",
+                    source_lesson_id="l1"),
+            ],
+            "extended_points": [],
+        }
+
+    monkeypatch.setattr(knowledge_summary, "_call_summary_llm", fake_llm)
+
+    first = await knowledge_summary.generateKnowledgeSummary(db, curriculum_node_id="u1")
+    assert calls == ["u1"]
+    assert first["status"] == SUMMARY_STATUS_SUCCESS
+    assert [g["display_group"] for g in first["display_groups"]] == ["进位加法", "退位减法"]
+    assert first["knowledge_points"][0]["display_group"] == "进位加法"
+
+    ai_summary = db.all(CURRICULUM_NODE_COLLECTION)[0]["ai_summary"]
+    assert ai_summary["display_groups"] == first["display_groups"]
+    assert ai_summary["knowledge_points"][0]["display_group"] == "进位加法"
+
+    # 幂等命中：LLM 不再调用，返回体同样带 display_groups
+    second = await knowledge_summary.generateKnowledgeSummary(db, curriculum_node_id="u1")
+    assert calls == ["u1"]
+    assert second["idempotency_key"] == first["idempotency_key"]
+    assert second["display_groups"] == first["display_groups"]
+
+
+@pytest.mark.asyncio
+async def test_get_summary_unit_returns_display_groups_when_present(monkeypatch):
+    """GET 已生成 unit 总结 → display_groups 透出（存量缺省已由上面 legacy 用例覆盖）"""
+    db = FakeDB()
+    node = _node(node_id="u1", node_type="unit", unit_id="u1", lesson_id="",
+                 lesson_title="")
+    node["ai_summary"] = {
+        "status": SUMMARY_STATUS_SUCCESS,
+        "generated_at": 111,
+        "model": "summary-model-test",
+        "knowledge_points": [
+            {"name": "整数加法", "ability_dimensions": ["arithmetic"],
+             "display_group": "进位加法", "source_node_id": "kp1", "source_lesson_id": "l1"},
+        ],
+        "extended_points": [],
+        "idempotency_key": "k1",
+        "display_groups": [
+            {"display_group": "进位加法", "kp_names": ["整数加法"], "kp_ids": ["kp1"], "count": 1},
+        ],
+    }
+    db.add(CURRICULUM_NODE_COLLECTION, node)
+    result = await knowledge_summary.getKnowledgeSummary(db, curriculum_node_id="u1")
+    assert result["display_groups"] == node["ai_summary"]["display_groups"]
+
+
+@pytest.mark.asyncio
+async def test_graph_persist_summary_with_eval_converges_display_groups(monkeypatch):
+    """graph 路径持久化（_persist_ai_summary_with_eval）unit 收敛与 direct 同口径"""
+    from services.math.summary_graph import _persist_ai_summary_with_eval
+
+    db = FakeDB()
+    db.add(
+        CURRICULUM_NODE_COLLECTION,
+        _node(node_id="u1", node_type="unit", unit_id="u1", lesson_id="",
+              lesson_title="", unit_title="万以内的加法和减法"),
+    )
+    kps = [
+        _kp("整数加法", display_group="进位加法", source_node_id="kp1"),
+        _kp("整数减法", display_group="退位减法", source_node_id="kp2"),
+    ]
+    summary = await _persist_ai_summary_with_eval(
+        db, "u1", status=SUMMARY_STATUS_SUCCESS, idempotency_key="k",
+        model="m", knowledge_points=kps, extended_points=[], node_type="unit",
+    )
+    assert [g["display_group"] for g in summary["display_groups"]] == ["进位加法", "退位减法"]
+    stored = db.all(CURRICULUM_NODE_COLLECTION)[0]["ai_summary"]
+    assert stored["display_groups"] == summary["display_groups"]
+    assert stored["knowledge_points"][0]["display_group"] == "进位加法"
+    # 非 unit：graph 持久化零变化（display_groups 不落）
+    db2 = FakeDB()
+    db2.add(CURRICULUM_NODE_COLLECTION, _node(node_id="l1"))
+    summary2 = await _persist_ai_summary_with_eval(
+        db2, "l1", status=SUMMARY_STATUS_SUCCESS, idempotency_key="k",
+        model="m", knowledge_points=kps, extended_points=[], node_type="lesson",
+    )
+    assert "display_groups" not in summary2

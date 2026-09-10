@@ -1160,3 +1160,206 @@ class TestCorrectAudit:
         assert correct_audits[0]["object_ref"] == SCAN_ID
         assert correct_audits[0]["context"]["items_count"] == 1
         assert correct_audits[0]["context"]["created_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# M13 双源知识锚：kp_source / exam_backlink_to（方案 §3.2，Phase 2-b，O3=A）
+# ---------------------------------------------------------------------------
+
+
+class TestMathExamPaperSource:
+    """M13：真题/图谱外（EXTRA_AI 锚定）题簇落 kp_source='exam_paper' +
+    教材点软回链 exam_backlink_to；正式教材链零脏数据（不写双源字段）。"""
+
+    def _candidates_with_decimal_mult(self) -> list[dict]:
+        return [
+            {
+                "node_id": "n-formal-a",
+                "node_code": "ua1",
+                "kp_name": "小数乘整数",
+                "grade": "5",
+                "textbook_id": "tb-multi",
+                "title": "小数乘整数",
+                "unit_title": "第3单元 小数乘法",
+                "lesson_title": "课时1 小数乘整数",
+            },
+            {
+                "node_id": "n-formal-b",
+                "node_code": "u2",
+                "kp_name": "小数乘除的实际应用",
+                "grade": "5",
+                "textbook_id": "tb1",
+                "title": "小数乘除的实际应用",
+                "unit_title": "",
+                "lesson_title": "",
+            },
+            {
+                "node_id": "n-formal-c",
+                "node_code": "u1",
+                "kp_name": "加法运算",
+                "grade": "3",
+                "textbook_id": "tb1",
+                "title": "加法运算",
+                "unit_title": "",
+                "lesson_title": "",
+            },
+        ]
+
+    def test_exam_backlink_resolves_judge_hint_first(self):
+        """真题 kp 的 candidate_hits 命中教材候选 → 回链取 hint 解析（不改锚）"""
+        bl = error_scanner._exam_backlink_to(
+            "鸡兔同笼",
+            self._candidates_with_decimal_mult(),
+            hint_names=["小数乘整数"],
+        )
+        assert bl == {
+            "node_code": "ua1",
+            "kp_name": "小数乘整数",
+            "textbook_id": "tb-multi",
+            "unit_title": "第3单元 小数乘法",
+            "lesson_title": "课时1 小数乘整数",
+        }
+
+    def test_exam_backlink_falls_back_to_semantic_nearest(self):
+        """hint 全未命中 → 按 kp_name 语义就近解析教材点（覆盖人工新建场景）"""
+        bl = error_scanner._exam_backlink_to(
+            "小数乘法的实际应用",
+            self._candidates_with_decimal_mult(),
+            hint_names=["不在教材候选"],
+        )
+        assert bl is not None
+        assert bl["kp_name"] == "小数乘除的实际应用"
+        assert bl["node_code"] == "u2"
+        assert bl["textbook_id"] == "tb1"
+
+    def test_exam_backlink_miss_and_operator_conflict_return_none(self):
+        """无教材点可回链（单位换算）与操作符互斥（减法 vs 乘除）→ None 不写"""
+        assert error_scanner._exam_backlink_to("单位换算", []) is None
+        assert (
+            error_scanner._exam_backlink_to(
+                "单位换算", self._candidates_with_decimal_mult()
+            )
+            is None
+        )
+        # 操作符互斥护栏同 B1.5a：减法 vs 乘除 → 不就近、不误回链
+        assert (
+            error_scanner._exam_backlink_to(
+                "小数减法的实际应用", self._candidates_with_decimal_mult()
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_exam_branch_writes_kp_source_and_backlink(self, monkeypatch):
+        """classify：真题/图谱外（鸡兔同笼 + candidate_hits 小数乘整数）
+        → error_record kp_source='exam_paper' + exam_backlink_to 教材点；
+        正式链命中记录不写双源字段（正式教材链零脏数据）"""
+        db = FakeDB()
+        _seed_scan(db)
+        _seed_knowledge_nodes(db)  # tb1：加法运算 / 质数与合数
+        db.add(
+            CURRICULUM_NODE_COLLECTION,
+            {
+                "node_id": "n-unit-a",
+                "code": "ua1",
+                "grade": "5",
+                "semester": "up",
+                "textbook_id": "tb-multi",
+                "title": "小数乘整数",
+                "unit_title": "第3单元 小数乘法",
+                "lesson_title": "课时1 小数乘整数",
+                "ai_summary": {
+                    "status": "success",
+                    "knowledge_points": [{"name": "小数乘整数"}],
+                },
+            },
+        )
+
+        async def fake_judge(ocr_text, candidates):
+            return {
+                "items": [
+                    # 正式链命中 → 教材锚（不写双源字段）
+                    {
+                        "knowledge_point_name": "加法运算",
+                        "error_type": "computation",
+                        "confidence": 0.9,
+                        "ocr_block_id": "blk_0001",
+                    },
+                    # 真题/图谱外 → EXTRA_AI 题簇 + 教材点软回链
+                    {
+                        "knowledge_point_name": "鸡兔同笼",
+                        "error_type": "method",
+                        "confidence": 0.85,
+                        "ocr_block_id": "blk_0002",
+                        "candidate_hits": ["小数乘整数"],
+                    },
+                ]
+            }
+
+        monkeypatch.setattr(error_scanner, "_call_classify_judge", fake_judge)
+
+        result = await classify_scan_upload(db, scan_id=SCAN_ID, actor="u1")
+        assert result["status"] == "success"
+        records = db.all(ERROR_RECORD_COLLECTION)
+        assert len(records) == 2
+
+        formal = next(r for r in records if r["knowledge_point_name"] == "加法运算")
+        assert formal["textbook_id"] == "tb1"
+        assert "kp_source" not in formal          # 教材锚不写（读取层缺省 textbook）
+        assert "exam_backlink_to" not in formal    # 正式教材链零脏数据
+
+        exam = next(r for r in records if r["knowledge_point_name"] == "鸡兔同笼")
+        assert exam["textbook_id"] == "EXTRA_AI"
+        assert exam["kp_source"] == "exam_paper"
+        assert exam["exam_backlink_to"] == {
+            "node_code": "ua1",
+            "kp_name": "小数乘整数",
+            "textbook_id": "tb-multi",
+            "unit_title": "第3单元 小数乘法",
+            "lesson_title": "课时1 小数乘整数",
+        }
+
+    @pytest.mark.asyncio
+    async def test_correct_create_extra_ai_writes_exam_source_and_backlink(self):
+        """correct：人工「图谱外新建」（new_kp_name 名近教材点）
+        → EXTRA_AI 记录 kp_source='exam_paper' + exam_backlink_to（不硬挂正式链）"""
+        db = FakeDB()
+        _seed_scan(db, classify_status=CLASSIFY_STATUS_NEEDS_REVIEW)
+        _seed_knowledge_nodes(db)
+        db.add(
+            CURRICULUM_NODE_COLLECTION,
+            {
+                "node_id": "n2",
+                "code": "u2",
+                "grade": "5",
+                "textbook_id": "tb1",
+                "ai_summary": {
+                    "status": "success",
+                    "knowledge_points": [{"name": "小数乘除的实际应用"}],
+                },
+            },
+        )
+
+        result = await correct_scan_classify(
+            db,
+            scan_id=SCAN_ID,
+            items=[
+                {
+                    "new_kp_name": "小数乘法的实际应用",
+                    "error_type": "concept",
+                }
+            ],
+            actor="actor_001",
+        )
+        assert len(result["corrected"]) == 1
+        rec = db.all(ERROR_RECORD_COLLECTION)[0]
+        assert rec["textbook_id"] == "EXTRA_AI"
+        assert rec["kp_source"] == "exam_paper"
+        # 名近教材点 → 软回链教材点（不改锚、不落正式链）
+        assert rec["exam_backlink_to"] == {
+            "node_code": "u2",
+            "kp_name": "小数乘除的实际应用",
+            "textbook_id": "tb1",
+            "unit_title": "",
+            "lesson_title": "",
+        }

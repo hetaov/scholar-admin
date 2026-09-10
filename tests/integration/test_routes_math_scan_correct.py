@@ -72,7 +72,9 @@ def _seed_knowledge_nodes(fake_db) -> None:
     )
 
 
-def _seed_error_record(fake_db, record_id="er_auto_001") -> dict:
+def _seed_error_record(
+    fake_db, record_id="er_auto_001", photo_context=None
+) -> dict:
     doc = {
         "record_id": record_id,
         "scholar_id": SCHOLAR_ID,
@@ -89,6 +91,8 @@ def _seed_error_record(fake_db, record_id="er_auto_001") -> dict:
         "source": "auto_scan",
         "confidence": 0.3,
     }
+    if photo_context is not None:
+        doc["photo_context"] = photo_context  # M9：拍照教材上下文（沿用）
     fake_db.add(ERROR_RECORD_COLLECTION, doc)
     return doc
 
@@ -272,3 +276,45 @@ class TestScanCorrectSuccess:
         ]
         assert len(correct_audits) == 1
         assert correct_audits[0]["object_ref"] == SCAN_ID
+
+    def test_correct_update_keeps_photo_context(self, make_client, fake_db):
+        """M9：仅改错因/题干的修正（不动知识节点）→ error_record.photo_context
+        字段沿用（$set 只动提交字段，拍照教材上下文不丢）"""
+        _seed_scan(fake_db, classify_status="success")
+        _seed_knowledge_nodes(fake_db)
+        _seed_error_record(
+            fake_db,
+            "er_ctx_001",
+            photo_context={
+                "textbook_id": "tb-multi",
+                "unit_title": "第3单元 小数乘法",
+                "picked_from_unit": True,
+            },
+        )
+
+        client = make_client(math_router)
+        res = client.post(
+            f"/math/scan/{SCAN_ID}/correct",
+            json={
+                "items": [
+                    {
+                        "error_record_id": "er_ctx_001",
+                        "error_type": "concept",
+                        "question_text": "修正题干",
+                    }
+                ]
+            },
+        )
+        assert res.status_code == 200, res.text
+
+        records = fake_db.all(ERROR_RECORD_COLLECTION)
+        assert len(records) == 1
+        assert records[0]["classify_method"] == "manual_corrected"
+        assert records[0]["primary_error"] == "concept"
+        assert records[0]["question_text"] == "修正题干"
+        # photo_context 沿用，未被 correct 更新抹掉
+        assert records[0]["photo_context"] == {
+            "textbook_id": "tb-multi",
+            "unit_title": "第3单元 小数乘法",
+            "picked_from_unit": True,
+        }

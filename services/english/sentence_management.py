@@ -566,6 +566,260 @@ async def _cascade_delete_sentence(
     return deleted
 
 
+# ---------------------------------------------------------------------------
+# 批量级联清理（E-API-12 去重执行阶段专用；与 _cascade_delete_sentence 逐句同语义）
+# ---------------------------------------------------------------------------
+
+
+async def _scan_all(db, collection: str, select: dict) -> list[dict]:
+    """分页全量拉取单集合（5000/页 offset 翻页，直到取完），供全表扫描型级联复用。"""
+    out: list[dict] = []
+    offset = 0
+    while True:
+        res = await db.query(
+            collection,
+            where={},
+            offset=offset,
+            limit=5000,
+            select=select,
+        )
+        page = res.get("records") or []
+        out.extend(page)
+        if len(page) < 5000:
+            break
+        offset += 5000
+    return out
+
+
+async def _cascade_delete_sentences(
+    db, *, sentence_ids: list[str], delete_audio_asset: bool = False
+) -> dict:
+    """批量级联清理多条语句（与 `_cascade_delete_sentence` 语义逐条一致）。
+
+    逐句版瓶颈：N 句 ×（4 次物理删 + conversation_turn/sentence_group 各 1 次
+    全表扫描 + registry 1~3 次往返）。批量版把 DB 往返压到"常数次分页全表扫 +
+    按命中量更新"，语义保持对齐：
+
+    - 4 张物理删表（study_attempt/skill_state/speech_evaluation/learning_attempt）：
+      每表 `sentence_id $in` 分块删除（500/块）；
+    - audio_asset：仅当 delete_audio_asset=true（默认保留，与单句版一致）；
+    - conversation_turn：全表分页扫 **1 次**，内存子串匹配 → 仅命中 turn 批量置
+      `deleted_sentence_ref=True`（不物理删，保留会话上下文）；
+    - sentence_group：全表分页扫 **1 次**，内存过滤 → 仅受影响组写回 `sentence_ids`
+      （摘引用，不删组）；
+    - sentence_semantic_key：`$in` 分批拉待删句快照 + 相关 registry（_id=semantic_key），
+      内存重算 canonical 提升 / duplicate_sentence_ids 摘除后按命中 registry 写回；
+      句子无 semantic_key 或 registry 缺失 → 跳过（与单句版幂等口径一致）。
+
+    Returns: 与 `_cascade_delete_sentence` 完全同构的 8 键汇总计数（不含 sentence_v2）。
+    """
+    sids = [s for s in (sentence_ids or []) if s]
+    deleted: dict[str, int] = {
+        "study_attempt": 0,
+        "skill_state": 0,
+        "speech_evaluation": 0,
+        "learning_attempt": 0,
+        "audio_asset": 0,
+        "conversation_turn_marked": 0,
+        "sentence_group_refs_removed": 0,
+        "semantic_registry_refs_removed": 0,
+    }
+    if not sids:
+        return deleted
+    delete_set = set(sids)
+
+    # ---- 1) 4 张物理删表：$in 分块（原逐句 N×4 次 → 常数次）---- #
+    for coll in _CASCADE_DELETE_COLLECTIONS:
+        try:
+            for i in range(0, len(sids), 500):
+                res = await db.delete(
+                    coll, where={"sentence_id": {"$in": sids[i : i + 500]}}
+                )
+                deleted[coll] += int(res.get("deleted_count", 0) or 0)
+        except Exception as exc:
+            logger.warning(
+                f"[english.delete] 批量级联删除 {coll!r} 失败: {exc!r}"
+            )
+
+    # ---- 2) audio_asset：仅当 delete_audio_asset=true（默认保留，其他句可能复用音频）---- #
+    if delete_audio_asset:
+        try:
+            for i in range(0, len(sids), 500):
+                res = await db.delete(
+                    "audio_asset", where={"sentence_id": {"$in": sids[i : i + 500]}}
+                )
+                deleted["audio_asset"] += int(res.get("deleted_count", 0) or 0)
+        except Exception as exc:
+            logger.warning(
+                f"[english.delete] 批量级联删除 audio_asset 失败: {exc!r}"
+            )
+
+    # ---- 3) conversation_turn：全表分页扫 1 次，内存子串匹配，仅命中 turn 批量标记 ---- #
+    try:
+        to_mark: list[str] = []
+        turns = await _scan_all(
+            db,
+            "conversation_turn",
+            select={"turn_id": 1, "utterance": 1, "reply": 1, "deleted_sentence_ref": 1},
+        )
+        for t in turns:
+            if t.get("deleted_sentence_ref"):
+                continue
+            text = f"{t.get('utterance') or ''}{t.get('reply') or ''}"
+            if text and any(sid in text for sid in sids):
+                tid = t.get("turn_id")
+                if tid:
+                    to_mark.append(tid)
+        for i in range(0, len(to_mark), 500):
+            await db.update(
+                "conversation_turn",
+                where={"turn_id": {"$in": to_mark[i : i + 500]}},
+                data={"$set": {"deleted_sentence_ref": True}},
+            )
+        deleted["conversation_turn_marked"] = len(to_mark)
+    except Exception as exc:
+        logger.warning(
+            f"[english.delete] conversation_turn 批量标记失败: {exc!r}"
+        )
+
+    # ---- 4) sentence_group：全表分页扫 1 次，仅受影响组写回（不删组）---- #
+    try:
+        affected: list[tuple[str, list[str]]] = []
+        groups = await _scan_all(
+            db, SENTENCE_GROUP, select={"group_id": 1, "sentence_ids": 1}
+        )
+        for g in groups:
+            old_sids = list(g.get("sentence_ids") or [])
+            new_sids = [sid for sid in old_sids if sid not in delete_set]
+            if len(new_sids) != len(old_sids):
+                gid = g.get("group_id")
+                if gid:
+                    affected.append((gid, new_sids))
+        now_ms = int(time.time() * 1000)
+        for gid, new_sids in affected:
+            await db.update(
+                SENTENCE_GROUP,
+                where={"group_id": gid},
+                data={"$set": {"sentence_ids": new_sids, "updated_at": now_ms}},
+            )
+        deleted["sentence_group_refs_removed"] = len(affected)
+    except Exception as exc:
+        logger.warning(
+            f"[english.delete] sentence_group 批量摘引用失败: {exc!r}"
+        )
+
+    # ---- 5) sentence_semantic_key：$in 拉快照+registry，内存重算 canonical/dup ---- #
+    try:
+        # 5.1 待删句快照（semantic_key 由 M3/M5 维护；无 semantic_key 的存量句
+        #     跳过 registry 维护——与单句版 _unlink_from_semantic_registry 口径一致）
+        doc_by_sid: dict[str, dict] = {}
+        for i in range(0, len(sids), 200):
+            res = await db.query(
+                SENTENCE_V2,
+                where={"sentence_id": {"$in": sids[i : i + 200]}},
+                select={
+                    "sentence_id": 1,
+                    "semantic_key": 1,
+                    "canonical_sentence_id": 1,
+                    "created_at": 1,
+                },
+                limit=5000,
+            )
+            for r in res.get("records", []):
+                sid = r.get("sentence_id")
+                if sid:
+                    doc_by_sid[sid] = r
+        keys = sorted(
+            {
+                d.get("semantic_key")
+                for d in doc_by_sid.values()
+                if d.get("semantic_key")
+            }
+        )
+        if keys:
+            # 5.2 相关 registry（_id = semantic_key）
+            registries: dict[str, dict] = {}
+            for i in range(0, len(keys), 200):
+                res = await db.query(
+                    SENTENCE_SEMANTIC_KEY,
+                    where={"_id": {"$in": keys[i : i + 200]}},
+                    limit=5000,
+                )
+                for r in res.get("records", []):
+                    kid = r.get("_id") or r.get("semantic_key")
+                    if kid:
+                        registries[kid] = r
+            # 5.3 canonical 被删需提升剩余最早者 → 预取剩余 dup 的 created_at
+            need_created: list[str] = []
+            for reg in registries.values():
+                if reg.get("canonical_sentence_id") in delete_set:
+                    need_created.extend(
+                        d
+                        for d in (reg.get("duplicate_sentence_ids") or [])
+                        if d not in delete_set
+                    )
+            members_created = await _load_members_by_ids(db, need_created)
+            # 5.4 内存重算 + 写回（canonical 不入 duplicate_sentence_ids，与建簇口径一致）
+            now_ms = int(time.time() * 1000)
+            for key, reg in registries.items():
+                involved = [
+                    sid
+                    for sid, d in doc_by_sid.items()
+                    if d.get("semantic_key") == key and sid in delete_set
+                ]
+                if not involved:
+                    continue
+                old_dup = list(reg.get("duplicate_sentence_ids") or [])
+                new_dup = [d for d in old_dup if d not in delete_set]
+                canonical = reg.get("canonical_sentence_id")
+                if canonical in delete_set:
+                    # canonical 被删：剩余 earliest 者提升；簇空 → 删 registry
+                    if new_dup:
+                        new_canonical = min(
+                            new_dup, key=lambda x: members_created.get(x) or 0
+                        )
+                        rest = [d for d in new_dup if d != new_canonical]
+                        await db.update(
+                            SENTENCE_SEMANTIC_KEY,
+                            where={"_id": key},
+                            data={"$set": {
+                                "canonical_sentence_id": new_canonical,
+                                "duplicate_sentence_ids": rest,
+                                "updated_at": now_ms,
+                            }},
+                        )
+                        await db.update(
+                            SENTENCE_V2,
+                            where={"sentence_id": new_canonical},
+                            data={"$set": {
+                                "canonical_sentence_id": new_canonical,
+                                "updated_at": now_ms,
+                            }},
+                        )
+                    else:
+                        await db.delete(
+                            SENTENCE_SEMANTIC_KEY, where={"_id": key}
+                        )
+                    deleted["semantic_registry_refs_removed"] += 1
+                elif new_dup != old_dup:
+                    # 仅重复句被摘除
+                    await db.update(
+                        SENTENCE_SEMANTIC_KEY,
+                        where={"_id": key},
+                        data={"$set": {
+                            "duplicate_sentence_ids": new_dup,
+                            "updated_at": now_ms,
+                        }},
+                    )
+                    deleted["semantic_registry_refs_removed"] += 1
+    except Exception as exc:
+        logger.warning(
+            f"[english.delete] sentence_semantic_key 批量清理失败: {exc!r}"
+        )
+
+    return deleted
+
+
 # ===========================================================================
 # 5. M5 — ensureSentenceSemanticKey（Lazy dedup + sentence_semantic_key 落表）
 # ===========================================================================

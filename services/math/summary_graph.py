@@ -260,6 +260,7 @@ async def _graph_generate_summary(db, state: KnowledgeSummaryState) -> dict:
             model=_ks.LLM_SUMMARY_MODEL,
             knowledge_points=[],
             extended_points=[],
+            node_type=node.get("node_type") or "",
             quality_score=QUALITY_SCORE_NOT_EVALUATED,
             evaluation_feedback=f"LLM 生成失败: {e}",
             evaluation_model="",
@@ -319,6 +320,7 @@ async def _graph_persist_summary(db, state: KnowledgeSummaryState) -> dict:
         model=_ks.LLM_SUMMARY_MODEL,
         knowledge_points=parsed.get("knowledge_points") or [],
         extended_points=parsed.get("extended_points") or [],
+        node_type=state["node"].get("node_type", ""),
         quality_score=quality_score,
         evaluation_feedback=evaluation_feedback,
         evaluation_model=eval_model,
@@ -360,12 +362,23 @@ async def _persist_ai_summary_with_eval(
     model: str,
     knowledge_points: list,
     extended_points: list,
+    node_type: str = "",
     quality_score: float = QUALITY_SCORE_NOT_EVALUATED,
     evaluation_feedback: str = "",
     evaluation_model: str = "",
     graph_version: int = _GRAPH_VERSION,
 ) -> dict:
-    """写回 curriculum_node.ai_summary（契约 §4.12.8(b) 含评估新字段）"""
+    """写回 curriculum_node.ai_summary（契约 §4.12.8(b) 含评估新字段）
+
+    M11：node_type='unit' 时先做 display_group 收敛——knowledge_points 每项补
+    display_group、ai_summary 顶层增 display_groups[]（方案 §3.3 / O4=D），
+    与 direct 路径 _ks._persist_ai_summary 行为完全一致。
+    """
+    display_groups: list = []
+    if node_type == "unit":
+        knowledge_points, display_groups = _ks._finalize_display_groups(
+            knowledge_points, node_type=node_type
+        )
     now = int(time.time() * 1000)
     ai_summary = {
         "status": status,
@@ -380,6 +393,8 @@ async def _persist_ai_summary_with_eval(
         "evaluation_model": evaluation_model,
         "graph_version": graph_version,
     }
+    if node_type == "unit":
+        ai_summary["display_groups"] = display_groups
     result = await db.update(
         CURRICULUM_NODE_COLLECTION,
         where={"node_id": node_id},
@@ -548,6 +563,7 @@ async def _run_summary_graph(
             "idempotency_key": existing.get("idempotency_key") or "",
             "knowledge_points": existing.get("knowledge_points") or [],
             "extended_points": existing.get("extended_points") or [],
+            "display_groups": existing.get("display_groups") or [],
             "generated_at": existing.get("generated_at") or 0,
         }
 
@@ -571,5 +587,6 @@ async def _run_summary_graph(
         "idempotency_key": final_state.get("idempotency_key", ""),
         "knowledge_points": ai_summary.get("knowledge_points") or [],
         "extended_points": ai_summary.get("extended_points") or [],
+        "display_groups": ai_summary.get("display_groups") or [],
         "generated_at": ai_summary.get("generated_at") or 0,
     }

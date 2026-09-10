@@ -254,6 +254,69 @@ class TestExecute:
         assert result["deleted_count"] == 0
         assert db.all("audit_log") == []  # 无重复不写审计
 
+    def test_execute_bulk_cascade_with_group_turn_registry(self):
+        """批量级联执行端到端：组引用摘除、turn 标记、registry dup 摘除、
+        canonical 关联记录保留——验证执行分支走 _cascade_delete_sentences。"""
+        db = FakeDB()
+        _seed_textbook(db)
+        _add_sentence(
+            db, sentence_id="s1", text="Hello!", lesson_id="ls_1", created_at=100,
+            extra={"semantic_key": "h_dedup", "canonical_sentence_id": "s1"},
+        )
+        _add_sentence(
+            db, sentence_id="s2", text="hello", lesson_id="ls_1", created_at=200,
+            extra={"semantic_key": "h_dedup"},
+        )
+        _add_sentence(
+            db, sentence_id="s3", text="HELLO", lesson_id="ls_1", created_at=300,
+            extra={"semantic_key": "h_dedup"},
+        )
+        db.add(
+            "sentence_semantic_key",
+            {
+                "_id": "h_dedup",
+                "semantic_key": "h_dedup",
+                "canonical_sentence_id": "s1",
+                "duplicate_sentence_ids": ["s2", "s3"],
+            },
+        )
+        # canonical s1 有关联记录，必须保留
+        db.add("learning_attempt", {"sentence_id": "s1", "scholar_id": "u0"})
+        db.add("study_attempt", {"sentence_id": "s2", "scholar_id": "u1"})
+        db.add("sentence_group", {"group_id": "g1", "sentence_ids": ["s1", "s2", "s3"]})
+        db.add("conversation_turn", {"turn_id": "t1", "utterance": "引用 s2", "reply": ""})
+
+        result = _run(
+            deduplicateEnglishSentences(
+                db, textbook_id="tb_dedup", lesson_id="ls_1", dry_run=False
+            )
+        )
+
+        assert result["deleted_count"] == 2
+        # 状态表：canonical 关联保留
+        assert {r["sentence_id"] for r in db.all("learning_attempt")} == {"s1"}
+        assert db.all("study_attempt") == []
+        # 组：摘引用不删组
+        g = db.all("sentence_group")[0]
+        assert g["sentence_ids"] == ["s1"]
+        # turn：标记不物理删
+        assert db.all("conversation_turn")[0]["deleted_sentence_ref"] is True
+        # registry：dup 摘除，canonical 保持
+        reg = db.all("sentence_semantic_key")[0]
+        assert reg["canonical_sentence_id"] == "s1"
+        assert reg["duplicate_sentence_ids"] == []
+        # 汇总计数不含 sentence_v2 键（与单句版 8 键结构一致）
+        assert set(result["deleted"].keys()) == {
+            "study_attempt",
+            "skill_state",
+            "speech_evaluation",
+            "learning_attempt",
+            "audio_asset",
+            "conversation_turn_marked",
+            "sentence_group_refs_removed",
+            "semantic_registry_refs_removed",
+        }
+
 
 # ===========================================================================
 # 异常语义（404）

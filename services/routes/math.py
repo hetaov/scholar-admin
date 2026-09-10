@@ -57,7 +57,11 @@ from services.math.practice_sheet import (
     getPracticeSheetById,
     listKnowledgeSummaries,
 )
+from services.math.skill_progress import build_skill_progress
 from services.math.error_scanner import (
+    EXTRA_AI_TEXTBOOK_ID,
+    KP_SOURCE_EXAM_PAPER,
+    KP_SOURCE_TEXTBOOK,
     ImageTooLargeError,
     ImageValidationError,
     JudgeNotConfiguredError,
@@ -445,6 +449,14 @@ class GeneratePracticeSheetRequest(BaseModel):
     include_extended_points: bool = Field(
         False, description="是否含奥数扩展题（仅 source=ai_knowledge/mixed 生效）"
     )
+    skill_weakness: list[dict] | None = Field(
+        None,
+        description="技能条弱信号（M14 双源出题驱动入参，[{display_group, kp_ids?}]；落库/出参回显并纳入幂等签名）",
+    )
+    include_exam_variants: bool = Field(
+        False,
+        description="真题同款变式开关（M14 双源：按学者真题错题 exam_backlink_to 回链本次选中教材点出变式，items[].source_type=exam_paper）",
+    )
     wrong_book_ratio: float = Field(
         0.5, description="错题占比（source=mixed 时有效，默认 0.5）"
     )
@@ -488,6 +500,8 @@ async def math_generate_practice_sheet(
             source=body.source,
             knowledge_points=body.knowledge_points,
             include_extended_points=body.include_extended_points,
+            skill_weakness=body.skill_weakness,
+            include_exam_variants=body.include_exam_variants,
             wrong_book_ratio=body.wrong_book_ratio,
             actor=actor,
         )
@@ -586,6 +600,12 @@ class ClassifyScanRequest(BaseModel):
     force_reclassify: bool = Field(
         False, description="是否强制重新归类（默认 false）"
     )
+    photo_context: str = Field(
+        "",
+        description="拍照携带的教材上下文（可选，M9）：JSON 字符串 "
+        '{"textbook_id": "...", "unit_title": "...", "lesson_title": "..."}；'
+        "存在且链校验通过时作为归类优先锚点，缺省不携带 = 现状自动猜",
+    )
 
 
 def _scan_classify_error_to_http(exc: ScanClassifyError) -> HTTPException:
@@ -623,6 +643,7 @@ async def math_scan_classify(
             db,
             scan_id=body.scan_id,
             force_reclassify=body.force_reclassify,
+            photo_context=body.photo_context,
             actor=actor,
         )
         return {"success": True, "data": data}
@@ -769,6 +790,17 @@ async def math_error_stats(
             "lesson_title": r.get("lesson_title") or "",
             "node_title": r.get("node_title") or "",
             "node_code": r.get("node_code") or "",
+            # ── M13：双源透传（knowledge_point 双源治理，方案 §3.2 / O3=A）──
+            # kp_source 缺省按数据事实兜底：EXTRA_AI 真题/图谱外锚定记录 = exam_paper，
+            # 正式教材链/无链 = textbook——存量 EXTRA_AI 记录零回填即可识别，前端零改动。
+            # exam_backlink_to 软回链透传（真题题簇命中教材点才落库，缺省 None）。
+            "kp_source": r.get("kp_source")
+            or (
+                KP_SOURCE_EXAM_PAPER
+                if (r.get("textbook_id") or "") == EXTRA_AI_TEXTBOOK_ID
+                else KP_SOURCE_TEXTBOOK
+            ),
+            "exam_backlink_to": r.get("exam_backlink_to") or None,
             "drill_stats": r.get("drill_stats") or {},
             "last_drill_result": r.get("last_drill_result") or {},
         }
@@ -779,7 +811,20 @@ async def math_error_stats(
         total = await db.count(ERROR_RECORD_COLLECTION, where=where) or len(items)
     except Exception:
         total = len(items)
-    return {"success": True, "data": {"items": items, "total": total}}
+    # M11 ②：学者维度技能条统计（与 items 同源同批；无单元技能条/无可映射记录 → [] 兼容存量）
+    try:
+        skill_progress = await build_skill_progress(db, records)
+    except Exception:
+        logger.warning("error-stats skill_progress 聚合失败，降级空数组", exc_info=True)
+        skill_progress = []
+    return {
+        "success": True,
+        "data": {
+            "items": items,
+            "total": total,
+            "skill_progress": skill_progress,
+        },
+    }
 
 
 # ===========================================================================

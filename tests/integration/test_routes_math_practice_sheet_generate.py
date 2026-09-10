@@ -126,6 +126,37 @@ def _seed_error_record(fake_db, *, scholar_id=SCHOLAR, code: str, occurrence: in
     return doc
 
 
+def _seed_exam_error_record(
+    fake_db,
+    *,
+    scholar_id=SCHOLAR,
+    kp_name: str,
+    backlink_kp: str,
+    code: str = "c1",
+    occurrence: int = 3,
+    primary_error: str = "concept",
+) -> dict:
+    """M13 双源落库形态的真题（exam_paper）错题：EXTRA_AI 锚 + exam_backlink_to 回链教材点"""
+    doc = {
+        "scholar_id": scholar_id,
+        "node_code": code,
+        "occurrence": occurrence,
+        "primary_error": primary_error,
+        "knowledge_point_name": kp_name,
+        "textbook_id": "EXTRA_AI",
+        "kp_source": "exam_paper",
+        "exam_backlink_to": {
+            "kp_name": backlink_kp,
+            "node_code": code,
+            "textbook_id": "TB_MATH_5",
+            "unit_title": "分数",
+            "lesson_title": f"课时·{backlink_kp}",
+        },
+    }
+    fake_db.add("error_record", doc)
+    return doc
+
+
 class TestGenerateAiKnowledge:
     def test_ai_knowledge_generates_two_per_point(self, make_client, fake_db, stub_llm):
         _seed_summary_node(fake_db, kp_name="分数加减法", code="c1", node_id="n1")
@@ -268,3 +299,157 @@ class TestGenerateWrongBook:
         # scholar_id 为必填 → Pydantic 校验 422（不触达业务层）
         res = make_client(math_router).post("/math/practice-sheet", json={})
         assert res.status_code == 422, res.text
+
+
+class TestGenerateDualSource:
+    """M14 双源出题：skill_weakness 透传回显 + include_exam_variants 真题同款变式
+
+    口径（设计 §4.4 路线 2-c）：
+    - 教材母题 = source_type 'textbook'（默认，每选中教材点 2 道）；
+    - 真题同款变式 = source_type 'exam_paper'：学者真题错题 exam_backlink_to 回链到本次选中
+      教材点 → 同考点同错因各 1 道；无真题证据 / 回链不命中 → 零行为差；
+    - 缺省请求（不带 M14 新字段）→ 与现状一致（兼容锁）。
+    """
+
+    def test_exam_variants_mix_into_textbook_mother_questions(
+        self, make_client, fake_db, stub_llm
+    ):
+        _seed_summary_node(fake_db, kp_name="分数加减法", code="c1", node_id="n1")
+        _seed_exam_error_record(
+            fake_db,
+            kp_name="分数加减法·真题A",
+            backlink_kp="分数加减法",
+            occurrence=3,
+            primary_error="computation",
+        )
+        _seed_exam_error_record(
+            fake_db,
+            kp_name="分数加减法·真题B",
+            backlink_kp="分数加减法",
+            occurrence=5,
+            primary_error="concept",
+        )
+        # 回链未命中的真题记录（回链选中点之外的教材点）→ 不入卷
+        _seed_exam_error_record(
+            fake_db,
+            kp_name="分数比较·真题",
+            backlink_kp="分数比较",
+            occurrence=9,
+            primary_error="reading",
+        )
+
+        res = make_client(math_router).post(
+            "/math/practice-sheet",
+            json={
+                "scholar_id": SCHOLAR,
+                "source": "ai_knowledge",
+                "knowledge_points": [{"name": "分数加减法"}],
+                "include_exam_variants": True,
+            },
+        )
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        assert data["include_exam_variants"] is True
+        sources = [it["source_type"] for it in data["items"]]
+        assert sources.count("textbook") == 2  # 母题：每点 2 道
+        assert sources.count("exam_paper") == 2  # 命中回链 2 条真题 → 各 1 道
+        assert stub_llm.calls == 3  # 1 次母题 + 2 次真题变式
+        exam_items = [it for it in data["items"] if it["source_type"] == "exam_paper"]
+        assert {it["target_error"] for it in exam_items} == {"computation", "concept"}
+        for it in exam_items:
+            assert it["node_code"] == "c1"  # 同考点（教材点）出题，非 EXTRA 挂靠
+            assert it["source_kp"] == "分数加减法"
+        # 落库 sheet 含双源字段（真题同款变式随 sheet 持久化）
+        sheet = fake_db.all("practice_sheet")[0]
+        assert sheet["include_exam_variants"] is True
+        assert {it["source_type"] for it in sheet["items"]} == {"textbook", "exam_paper"}
+
+    def test_exam_variants_require_flag_and_backlink_hit(
+        self, make_client, fake_db, stub_llm
+    ):
+        _seed_summary_node(fake_db, kp_name="分数加减法", code="c1", node_id="n1")
+        _seed_exam_error_record(
+            fake_db, kp_name="分数加减法·真题", backlink_kp="分数加减法"
+        )
+
+        # 未开 include_exam_variants → 纯教材母题（双源零行为差）
+        res = make_client(math_router).post(
+            "/math/practice-sheet",
+            json={
+                "scholar_id": SCHOLAR,
+                "source": "ai_knowledge",
+                "knowledge_points": [{"name": "分数加减法"}],
+            },
+        )
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        assert len(data["items"]) == 2
+        assert {it["source_type"] for it in data["items"]} == {"textbook"}
+        assert stub_llm.calls == 1
+
+        # 开了开关但回链未命中选中点 → 同样无真题变式
+        _seed_summary_node(fake_db, kp_name="分数比较", code="c2", node_id="n2")
+        stub_llm.calls = 0
+        res = make_client(math_router).post(
+            "/math/practice-sheet",
+            json={
+                "scholar_id": SCHOLAR,
+                "source": "ai_knowledge",
+                "knowledge_points": [{"name": "分数比较"}],
+                "include_exam_variants": True,
+            },
+        )
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        assert {it["source_type"] for it in data["items"]} == {"textbook"}
+        assert stub_llm.calls == 1
+
+    def test_skill_weakness_normalized_echo_and_defaults(
+        self, make_client, fake_db, stub_llm
+    ):
+        _seed_summary_node(fake_db, kp_name="分数加减法", code="c1", node_id="n1")
+        payload = {
+            "scholar_id": SCHOLAR,
+            "source": "ai_knowledge",
+            "knowledge_points": [{"name": "分数加减法"}],
+            "skill_weakness": [
+                {
+                    "display_group": "分数计算",
+                    "kp_ids": ["n1"],
+                    "mastery_avg": 0.3,
+                    "weakness_signal": True,
+                },
+                {"kp_ids": ["x"]},  # 无 display_group → 契约化剔除
+            ],
+        }
+        res = make_client(math_router).post("/math/practice-sheet", json=payload)
+        assert res.status_code == 200, res.text
+        data = res.json()["data"]
+        # 契约化回显：仅 {display_group, kp_ids}
+        assert data["skill_weakness"] == [{"display_group": "分数计算", "kp_ids": ["n1"]}]
+        assert data["include_exam_variants"] is False
+        assert fake_db.all("practice_sheet")[0]["skill_weakness"] == [
+            {"display_group": "分数计算", "kp_ids": ["n1"]}
+        ]
+
+    def test_legacy_default_request_has_no_behavioral_change(
+        self, make_client, fake_db, stub_llm
+    ):
+        # 缺省（不带 M14 新字段）→ 无真题变式、skill_weakness 空、开关 False，且幂等签名稳定
+        _seed_summary_node(fake_db, kp_name="分数加减法", code="c1", node_id="n1")
+        payload = {
+            "scholar_id": SCHOLAR,
+            "source": "ai_knowledge",
+            "knowledge_points": [{"name": "分数加减法"}],
+        }
+        first = make_client(math_router).post("/math/practice-sheet", json=payload)
+        assert first.status_code == 200, first.text
+        data = first.json()["data"]
+        assert data["skill_weakness"] == []
+        assert data["include_exam_variants"] is False
+        assert len(data["items"]) == 2
+        assert all(it["source_type"] == "textbook" for it in data["items"])
+
+        second = make_client(math_router).post("/math/practice-sheet", json=payload)
+        assert second.status_code == 200
+        assert second.json()["data"]["sheet_id"] == data["sheet_id"]  # 幂等命中

@@ -419,37 +419,6 @@ async def english_group_edit(
 
 
 # ===========================================================================
-# 12. POST /english/textbook/{textbook_id}/deduplicate — 批量去重（E-API-12）
-# ===========================================================================
-
-
-@router.post("/textbook/{textbook_id}/deduplicate")
-async def english_textbook_deduplicate(
-    textbook_id: str,
-    body: EnglishDeduplicateRequest,
-    request: Request,
-    db: CloudBaseNoSQLClient = Depends(get_db),
-):
-    """POST 批量去重（E-API-12）：扫描 text_hash 重复组 → dry_run 预览 / 确认清理。
-
-    两段式：先 dry_run=true 预览（含关联计数，零写入），确认后 dry_run=false
-    执行级联清理（保留 canonical = 组内 created_at 最早 / 已有 canonical 自指者）。
-    """
-    actor = get_request_openid(request) or "anonymous"
-    try:
-        data = await deduplicateEnglishSentences(
-            db,
-            textbook_id=textbook_id,
-            lesson_id=body.lesson_id,
-            dry_run=body.dry_run,
-            editor_id=actor,
-        )
-        return {"success": True, "data": data}
-    except (TextbookNotFoundError, LessonNotFoundError, EnglishManagementError) as e:
-        raise _english_error_to_http(e) from e
-
-
-# ===========================================================================
 # 11. DELETE /english/group/{group_id} — 删除分组（E-API-11，M3 G1.3）
 # ===========================================================================
 

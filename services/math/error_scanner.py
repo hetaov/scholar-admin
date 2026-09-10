@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import secrets
 import time
@@ -83,6 +84,17 @@ EXTRA_AI_TEXTBOOK_TITLE = "课外补充 · AI 归类"
 EXTRA_AI_UNCLASSIFIED = "未分类"
 EXTRA_AI_NODE_CODE_PREFIX = "xai_"
 EXTRA_AI_CANDIDATE_HITS_LIMIT = 3  # 疑似正式教材匹配候选 ≤3（契约 §1.2b）
+
+# ---------------------------------------------------------------------------
+# M13 双源知识锚（方案 §3.2，Phase 2-b；O3=A 复用 knowledge_point 语义）
+#   kp_source：'textbook'（教材锚，正式教材链）| 'exam_paper'（真题锚，EXTRA_AI
+#   真题/图谱外题簇）。真题/图谱外 error_record 落 kp_source='exam_paper'；
+#   命中（Judge candidate_hits 解析或语义就近）教材知识点时写 exam_backlink_to
+#   软引用（仅引用不改锚、不落正式教材链，供「真题易错 → 教材点权重」回链统计）。
+#   教材锚记录不写该字段（存量零差），读取层按数据事实缺省推导（routes/math.py）。
+# ---------------------------------------------------------------------------
+KP_SOURCE_TEXTBOOK = "textbook"
+KP_SOURCE_EXAM_PAPER = "exam_paper"
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +435,8 @@ async def _load_knowledge_point_candidates(
         "semester": 1,
         "textbook_id": 1,
         "title": 1,
+        "unit_title": 1,  # M9：photo_context 单元/课时锚点过滤与链锚点冗余
+        "lesson_title": 1,
         "ai_summary": 1,
     }
     textbook_ids = await _load_scholar_textbook_ids(db, scholar_id)
@@ -476,6 +490,8 @@ async def _load_knowledge_point_candidates(
                     "semester": node.get("semester") or "",
                     "textbook_id": node.get("textbook_id") or "",
                     "title": node.get("title") or "",
+                    "unit_title": node.get("unit_title") or "",
+                    "lesson_title": node.get("lesson_title") or "",
                 }
             )
     return candidates
@@ -794,6 +810,50 @@ def _candidate_hits_struct(
     return out[:EXTRA_AI_CANDIDATE_HITS_LIMIT]
 
 
+def _exam_backlink_to(
+    kp_name: str,
+    candidates: list[dict[str, Any]],
+    hint_names: list[str] | None = None,
+) -> dict | None:
+    """M13：真题题簇 → 教材知识点软回链（exam_backlink_to，方案 §3.2）
+
+    真题/图谱外（EXTRA_AI 锚定）kp 未命中正式教材候选集时，找对应的教材知识点
+    引用（**仅引用不改锚**：error_record 仍锚 EXTRA_AI 真题簇，不落正式教材链），
+    供「真题易错 → 教材点权重」回链统计。教材点解析顺序：
+      1) Judge 疑似匹配（candidate_hits，契约 §1.2b）逐名精确/就近解析（≤3 取首）；
+      2) 无命中或无 hint 时，回退 kp_name 本身语义就近（_nearest_candidates，
+         B1.5a 同口径护栏）——覆盖人工修正「图谱外新建」且名近教材点的场景。
+    返回 {node_code, kp_name, textbook_id, unit_title, lesson_title}（软引用，
+    空字段为 ''）；无教材点命中返回 None（不写，不与任何正式链产生关联）。
+    """
+    def _resolve(name: str) -> dict | None:
+        nm = (name or "").strip()
+        if not nm:
+            return None
+        exact = _match_candidate(nm, candidates)
+        if exact:
+            return exact
+        near = _nearest_candidates(nm, candidates, limit=1)
+        return near[0] if near else None
+
+    hit: dict | None = None
+    for nm in hint_names or []:
+        hit = _resolve(nm)
+        if hit:
+            break
+    if not hit:
+        hit = _resolve(kp_name)
+    if not hit:
+        return None
+    return {
+        "node_code": hit.get("node_code") or "",
+        "kp_name": hit.get("kp_name") or (kp_name or "").strip(),
+        "textbook_id": hit.get("textbook_id") or "",
+        "unit_title": hit.get("unit_title") or "",
+        "lesson_title": hit.get("lesson_title") or "",
+    }
+
+
 # ---------------------------------------------------------------------------
 # B1.5 EXTRA_AI 虚拟教材与图谱外节点（主文档 §4.3，幂等）
 # ---------------------------------------------------------------------------
@@ -931,6 +991,9 @@ async def _write_error_record(
     knowledge_point_name: str = "",
     question_text: str = "",
     original_kp_name: str = "",
+    photo_context: dict | None = None,
+    kp_source: str = "",
+    exam_backlink_to: dict | None = None,
 ) -> str:
     """写一条 error_record（契约 §4.12.2 + §4.12.9(b) 扩展字段）
 
@@ -946,6 +1009,16 @@ async def _write_error_record(
     因为 classify_result 项里存的已是改名后标准名，原判名需在记录上保留追踪）。
 
     question_text：题干原文（Judge 从 OCR 截取，B1 契约 §1.2a）；允许为空。
+
+    photo_context：M9 拍照教材上下文（优先锚点命中时随库落，含
+    picked_from_unit:true；命中正式教材链的记录才携带，EXTRA_AI 图谱外不写）。
+
+    kp_source：M13 双源值（'textbook' 教材锚 / 'exam_paper' 真题锚）。
+    真题/图谱外（EXTRA_AI 锚定）记录传 'exam_paper'；教材锚记录不传
+    （读取层按数据事实缺省），存量零差。
+
+    exam_backlink_to：M13 真题题簇 → 教材知识点软回链（仅引用不改锚，见
+    _exam_backlink_to；真题/图谱外记录命中教材点时写，教材锚记录不写）。
 
     链锚点冗余（textbook_id/grade/semester/unit_title/lesson_title/node_title）
     与 drill_stats/last_drill_result 初始化随库落（B1.5 §4.1，B2 免 join 聚合）。
@@ -986,6 +1059,15 @@ async def _write_error_record(
     }
     if original_kp_name:
         record["original_kp_name"] = original_kp_name  # B1.5a 就近改名追踪
+    if photo_context:
+        # M9：拍照教材上下文（优先锚点命中正式教材链时落库，含 picked_from_unit:true）
+        record["photo_context"] = photo_context
+    if kp_source:
+        # M13：双源知识锚（'textbook' 教材锚 / 'exam_paper' 真题锚）
+        record["kp_source"] = kp_source
+    if exam_backlink_to:
+        # M13：真题题簇 → 教材知识点软回链（供「真题易错 → 教材点权重」回链统计）
+        record["exam_backlink_to"] = exam_backlink_to
     await db.insert(ERROR_RECORD_COLLECTION, record)
     return record_id
 
@@ -1011,6 +1093,92 @@ def _to_public_classify(
 
 
 # ---------------------------------------------------------------------------
+# M9：photo_context 优先锚点（拍照教材上下文 → 归类候选收敛）
+# ---------------------------------------------------------------------------
+
+
+def _parse_photo_context(raw: str | None) -> dict | None:
+    """解析请求 photo_context（JSON 字符串）→ 归一化 dict；缺省/非法返回 None。
+
+    契约：photo_context = {textbook_id?, unit_title?, lesson_title?}（可选字段）。
+    值逐 key 去空白，空字段剔除；全部为空/非对象/JSON 非法 → None（调用方走
+    现状自动猜，不回堵不报错——老后端零影响，前端缺省不携带该字段）。
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning(f"[scan] photo_context JSON 解析失败，回退自动猜: {raw[:200]}")
+        return None
+    if not isinstance(data, dict):
+        return None
+    ctx: dict[str, str] = {}
+    for key in ("textbook_id", "unit_title", "lesson_title"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            ctx[key] = val.strip()
+    return ctx or None
+
+
+def _photo_context_anchor(
+    candidates: list[dict[str, Any]], ctx: dict | None
+) -> list[dict[str, Any]]:
+    """按 photo_context 过滤候选集 → 优先锚点候选（链校验 + 单元/课时收敛）。
+
+    链校验口径：textbook_id 必填且非 EXTRA_AI 虚拟教材；unit_title / lesson_title
+    提供时须在该教材候选内精确命中（全匹配才算链校验通过）。
+    返回 [] = 校验失败或无该链知识点（调用方回退全量自动猜，与现状一致）。
+    """
+    if not ctx or not ctx.get("textbook_id"):
+        return []
+    textbook_id = ctx["textbook_id"]
+    if textbook_id == EXTRA_AI_TEXTBOOK_ID:
+        # 拍照教材上下文只面向正式教材链；EXTRA_AI 虚拟教材不作优先锚点
+        return []
+    unit = ctx.get("unit_title")
+    lesson = ctx.get("lesson_title")
+    anchor = [
+        c
+        for c in candidates
+        if c.get("textbook_id") == textbook_id
+        and (not unit or (c.get("unit_title") or "") == unit)
+        and (not lesson or (c.get("lesson_title") or "") == lesson)
+    ]
+    return anchor
+
+
+def _anchored_judge_confident(
+    judge_result: dict, anchor_candidates: list[dict[str, Any]]
+) -> bool:
+    """锚点归类是否产生可用命中（至少一项 Judge 输出可落入锚点单元）。
+
+    口径与 F4.3 落库门控对称：knowledge_point_name 精确命中锚点候选或可就近
+    锚定（_nearest_candidates，含操作符互斥/模板尾剥离护栏），且 confidence ≥
+    阈值、有错因。任一命中即认为该链可用；全部低置信/题面落不进该单元 →
+    调用方回退全量自动猜（M9「confidence 低于阈值 → 回退自动猜」）。
+    """
+    for it in judge_result.get("items") or []:
+        name = (it.get("knowledge_point_name") or "").strip()
+        if not name or not it.get("error_type"):
+            continue
+        try:
+            conf = float(it.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < EVAL_CONFIDENCE_THRESHOLD:
+            continue
+        if _match_candidate(name, anchor_candidates):
+            return True
+        if _nearest_candidates(name, anchor_candidates, limit=1):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # F4.3 主入口：classify_scan_upload
 # ---------------------------------------------------------------------------
 
@@ -1021,6 +1189,7 @@ async def classify_scan_upload(
     scan_id: str,
     force_reclassify: bool = False,
     actor: str = "",
+    photo_context: str = "",
 ) -> dict:
     """扫描归类（F4.3 主流程，契约 §3.10 POST /math/scan/classify）
 
@@ -1032,10 +1201,18 @@ async def classify_scan_upload(
     幂等：classify_status ∈ {success, needs_review} 且非 force_reclassify
     → 直接返回已有结果（不重复调用 Judge，不重复写 error_record）。
 
+    photo_context（M9，可选）：拍照携带的教材上下文 JSON 字符串
+    {textbook_id?, unit_title?, lesson_title?}。存在且链校验通过（正式教材 +
+    单元/课时在候选集内精确命中）→ 候选集收敛为该链的优先锚点参与归类
+    （先匹配该链）；锚点归类无高置信命中（题面与所选单元不符）或链校验失败
+    → 回退全量自动猜（与现状一致）。缺省不携带该字段 = 现状行为。
+
     流程：
     1. 加载知识点候选集（F1 ai_summary，按学者教材过滤）
-    2. 调用 LLM_JUDGE_MODEL 归类（题目识别 + 知识点定位 + 错因判定）
-    3. 置信度门控：confidence >= 0.6 且知识点匹配 → 写 error_record；
+    2. photo_context 优先锚点：链校验通过 → 候选收敛该链后调 Judge；
+       无高置信命中/校验失败 → 全量候选调 Judge（回退自动猜）
+    3. 置信度门控：confidence >= 0.6 且知识点匹配 → 写 error_record
+       （锚点命中项随库落 photo_context + picked_from_unit:true）；
        否则不写 error_record（needs_review）
     4. 更新 math_scan_upload.classify_status
     5. 写审计 scan_classify（成功/失败均落库）
@@ -1097,10 +1274,41 @@ async def classify_scan_upload(
     )
     logger.info(f"[scan] classify 标记 classifying scan_id={scan_id}，开始调 Judge")
 
-    # 5. 加载知识点候选 + 调用 Judge
+    # 5. 加载知识点候选 + 调用 Judge（M9：photo_context 优先锚点）
     try:
         candidates = await _load_knowledge_point_candidates(db, scholar_id)
-        judge_result = await _call_classify_judge(ocr_text, candidates)
+        # M13：真题回链基准 = 全量正式教材候选（photo_context 收敛只影响主归类
+        # 锚点；真题题簇的教材点软回链解析始终对全量候选进行）
+        textbook_candidates = candidates
+        ctx = _parse_photo_context(photo_context)
+        anchor_candidates = _photo_context_anchor(candidates, ctx)
+        used_photo_context: dict | None = None
+        if anchor_candidates:
+            # 优先锚点：候选收敛为该教材链/单元（先匹配该链再 Judge 兜底）
+            anchored_result = await _call_classify_judge(ocr_text, anchor_candidates)
+            if _anchored_judge_confident(anchored_result, anchor_candidates):
+                judge_result = anchored_result
+                candidates = anchor_candidates
+                used_photo_context = ctx
+                logger.info(
+                    f"[scan] photo_context 优先锚点生效 scan_id={scan_id} "
+                    f"textbook_id={ctx.get('textbook_id')} "
+                    f"unit_title={ctx.get('unit_title') or ''} 锚点候选={len(anchor_candidates)}"
+                )
+            else:
+                # 锚点归类无高置信命中（题面与所选单元不符/低置信）→ 回退自动猜
+                logger.info(
+                    f"[scan] photo_context 锚点归类无高置信命中，回退全量自动猜 "
+                    f"scan_id={scan_id} 全量候选={len(candidates)}"
+                )
+                judge_result = await _call_classify_judge(ocr_text, candidates)
+        else:
+            if ctx:
+                logger.warning(
+                    f"[scan] photo_context 链校验失败，回退全量自动猜 "
+                    f"scan_id={scan_id} ctx={ctx}"
+                )
+            judge_result = await _call_classify_judge(ocr_text, candidates)
     except (JudgeNotConfiguredError, JudgeResponseError) as e:
         # Judge 不可用/解析失败 → classify_status=failed + 失败审计
         logger.warning(
@@ -1171,6 +1379,27 @@ async def classify_scan_upload(
             )
 
         if matched and confidence >= EVAL_CONFIDENCE_THRESHOLD and error_type:
+            # M9：优先锚点命中正式教材链的记录随库落 photo_context（含
+            # picked_from_unit:true）；EXTRA_AI 图谱外节点不标记（非正式链）
+            record_photo_context = None
+            if used_photo_context and not _is_extra_ai_anchor(matched):
+                record_photo_context = {
+                    **used_photo_context,
+                    "picked_from_unit": True,
+                }
+            # M13：双源知识锚 —— 真题/图谱外（EXTRA_AI 锚定）题簇落
+            # kp_source='exam_paper'；命中教材知识点时写 exam_backlink_to 软引用
+            # （仅引用不改锚、不落正式教材链）。正式教材链锚定记录不写该两字段
+            # （读取层按数据事实缺省 'textbook'），存量记录零差。
+            record_kp_source = ""
+            record_backlink = None
+            if extra_ai:
+                record_kp_source = KP_SOURCE_EXAM_PAPER
+                record_backlink = _exam_backlink_to(
+                    kp_name,
+                    textbook_candidates,
+                    hint_names=item.get("candidate_hits"),
+                )
             record_id = await _write_error_record(
                 db,
                 scan_id=scan_id,
@@ -1182,6 +1411,9 @@ async def classify_scan_upload(
                 knowledge_point_name=final_kp,
                 question_text=question_text,
                 original_kp_name=renamed_from,
+                photo_context=record_photo_context,
+                kp_source=record_kp_source,
+                exam_backlink_to=record_backlink,
             )
             public_item: dict[str, Any] = {
                 "error_record_id": record_id,
@@ -1251,6 +1483,8 @@ async def classify_scan_upload(
                 "items_count": len(public_items),
                 "candidates_count": len(candidates),
                 "force_reclassify": bool(force_reclassify),
+                # M9：本次归类是否走 photo_context 优先锚点（审计沿用 scan_classify 动作）
+                "photo_context_anchored": bool(used_photo_context),
             },
         )
     except Exception as e:
@@ -1429,6 +1663,15 @@ async def correct_scan_classify(
                 for k in ("textbook_id", "grade", "semester",
                           "unit_title", "lesson_title", "node_title"):
                     update_data[k] = anchor_fields[k]
+                # M13：锚点变更时同步双源字段（真题/图谱外 → kp_source=exam_paper +
+                # 教材点软回链；正式锚 → 显式 textbook 并清空回链，读取层零歧义）
+                if _is_extra_ai_anchor(matched):
+                    update_data["kp_source"] = KP_SOURCE_EXAM_PAPER
+                    backlink = _exam_backlink_to(final_kp, candidates)
+                    update_data["exam_backlink_to"] = backlink if backlink else None
+                else:
+                    update_data["kp_source"] = KP_SOURCE_TEXTBOOK
+                    update_data["exam_backlink_to"] = None
             if error_type:
                 update_data["primary_error"] = error_type
             if merged_text:
@@ -1487,6 +1730,13 @@ async def correct_scan_classify(
                 "drill_stats": {},
                 "last_drill_result": {},
             }
+            # M13：人工修正「图谱外新建」= 真题/课外题簇 → 源标记 exam_paper +
+            # 教材点软回链（用户显式选新建，即使名近教材点也不硬挂正式链）
+            if matched and _is_extra_ai_anchor(matched):
+                record["kp_source"] = KP_SOURCE_EXAM_PAPER
+                backlink = _exam_backlink_to(final_kp or kp_name, candidates)
+                if backlink:
+                    record["exam_backlink_to"] = backlink
             await db.insert(ERROR_RECORD_COLLECTION, record)
             corrected.append(
                 {

@@ -78,6 +78,27 @@ ABILITY_DIMENSIONS = ("arithmetic", "computation", "modeling", "reasoning")
 # extended_points[].difficulty_band 三档（奥数扩展，契约 §4.12.8(b)）
 EXTENDED_DIFFICULTY_BANDS = ("入门", "普及", "竞赛")
 
+# ---------------------------------------------------------------------------
+# M11 display_group 收敛（方案 §3.3 · O4=D：F1 生成时产出 + 图谱维护可改，2026-09-09）
+# ---------------------------------------------------------------------------
+# - 仅在 node_type='unit' 的 ai_summary 上收敛：knowledge_points[].display_group
+#   （细点归属技能条）+ ai_summary.display_groups[]（技能条列表）。
+# - 收敛键 = 「display_group 相同或属同一能力维度」；上限 DISPLAY_GROUP_MAX 条/单元。
+# - 图谱维护人可经 manual-edit-summary 的 display_groups 入参覆盖（O4=B 部分）。
+DISPLAY_GROUP_MAX = 6  # 技能条上限（方案 §3.3：一屏 4~6 条，超出继续合并）
+
+# 确定性兜底命名：能力维度 → 大白话能力前缀（LLM 未打 display_group 时使用）
+DISPLAY_GROUP_ABILITY_LABELS = {
+    "arithmetic": "数与运算",
+    "computation": "计算",
+    "modeling": "应用与建模",
+    "reasoning": "推理",
+}
+DISPLAY_GROUP_FALLBACK_LABEL = "单元综合"  # 无能力维度/混合兜底组标签
+
+# display_group 文本长度上限（大白话技能条名，禁止罗列细点名词）
+DISPLAY_GROUP_LABEL_MAX_LEN = 24
+
 
 # ---------------------------------------------------------------------------
 # 业务异常（供路由层映射 HTTP 状态码）
@@ -216,12 +237,29 @@ _SUMMARY_USER_TEMPLATE = """请为以下数学教材节点生成 AI 知识总结
 要求：
 1. knowledge_points：核心知识点清单，每项 {{"name": "知识点名", "summary": "一句话总结", "ability_dimensions": ["arithmetic|computation|modeling|reasoning"], "source_node_id": "来源节点ID", "source_lesson_id": "来源课时ID"}}。
 2. extended_points：奥数扩展点清单（{include_extended_points}），每项 {{"name": "扩展点名", "summary": "说明", "difficulty_band": "入门|普及|竞赛", "related_knowledge_name": "关联知识点名", "source_lesson_id": "来源课时ID"}}。
-
+{unit_display_group_rule}
 输出 JSON 结构：
 {{
   "knowledge_points": [...],
   "extended_points": [...]
 }}"""
+
+
+def _unit_display_group_rule(node_type: str) -> str:
+    """node_type=unit 时追加 display_group 收敛要求（M11，方案 §3.3）。
+
+    仅单元总结需要「细点 → 技能条」上卷归属；lesson / knowledge_point 总结不要求。
+    收敛键与上限见 DISPLAY_GROUP_MAX 常量；标签须为大白话技能条名（禁止罗列细点名词）。
+    """
+    if node_type != "unit":
+        return ""
+    return (
+        "3. display_group 收敛（node_type=unit 必需）：为每个 knowledge_points 项额外生成 "
+        f'"display_group" 字段——大白话技能条名（口语化 + 能力口吻前缀，如「进位换算」「加减巧算」，'
+        f"不超过 {DISPLAY_GROUP_LABEL_MAX_LEN} 字）；同一单元的不同 display_group 最多 "
+        f"{DISPLAY_GROUP_MAX} 个（超出会由后端按能力维度合并到上限内）；"
+        "禁止用 AI 细点名词逐字罗列作为 display_group。"
+    )
 
 
 def _call_chat_sync(client: OpenAI, model: str, prompt: str) -> str:
@@ -259,6 +297,16 @@ def _validate_summary_result(result: dict, *, include_extended_points: bool) -> 
         dims = kp.get("ability_dimensions") or []
         if not isinstance(dims, list) or any(d not in ABILITY_DIMENSIONS for d in dims):
             raise LLMResponseError("ability_dimensions 必须为合法枚举子集")
+        # M11：display_group 可选（unit 级收敛标签）。存在则须为长度受限的非空字符串；
+        # 超长视为非法（大白话技能条名，禁止罗列细点名词）
+        dg = kp.get("display_group")
+        if dg is not None:
+            if not isinstance(dg, str) or not dg.strip():
+                raise LLMResponseError("knowledge_points.display_group 必须为非空字符串")
+            if len(dg.strip()) > DISPLAY_GROUP_LABEL_MAX_LEN:
+                raise LLMResponseError(
+                    f"knowledge_points.display_group 超长（>{DISPLAY_GROUP_LABEL_MAX_LEN} 字）：{dg[:20]}"
+                )
     if include_extended_points:
         eps = result.get("extended_points") or []
         if not isinstance(eps, list):
@@ -288,6 +336,7 @@ async def _call_summary_llm(node: dict, *, include_extended_points: bool) -> dic
         lesson_title=node.get("lesson_title") or "",
         description=json.dumps(node.get("description") or {}, ensure_ascii=False),
         include_extended_points="是" if include_extended_points else "否",
+        unit_display_group_rule=_unit_display_group_rule(node.get("node_type") or ""),
     )
     client = _get_llm_client()
     last_err: Exception | None = None
@@ -310,6 +359,106 @@ async def _call_summary_llm(node: dict, *, include_extended_points: bool) -> dic
     raise LLMResponseError(f"AI 知识总结生成失败: {last_err}")
 
 
+# ---------------------------------------------------------------------------
+# M11 display_group 确定性收敛（方案 §3.3 · O4=D：F1 产出 + 图谱维护可改）
+# ---------------------------------------------------------------------------
+
+
+def _kp_primary_ability(kp: dict) -> str:
+    """kp 主能力维度（ability_dimensions 首项，非法/缺失返回 ""）"""
+    dims = kp.get("ability_dimensions") or []
+    first = dims[0] if dims else ""
+    return first if first in ABILITY_DIMENSIONS else ""
+
+
+def _kp_display_group_label(kp: dict) -> str:
+    """kp 归属技能条标签：LLM/人工 display_group 优先；缺省按主能力维度大白话兜底"""
+    label = (kp.get("display_group") or "").strip()
+    if label:
+        return label[:DISPLAY_GROUP_LABEL_MAX_LEN]
+    primary = _kp_primary_ability(kp)
+    return DISPLAY_GROUP_ABILITY_LABELS.get(primary, DISPLAY_GROUP_FALLBACK_LABEL)
+
+
+def _merge_groups_to_limit(kps: list[dict], groups: list[dict]) -> list[dict]:
+    """确定性合并到 DISPLAY_GROUP_MAX：每次并掉最小组，目标 = 能力交集最大的组。
+
+    - 合并后标签沿用目标组 display_group（保留大白话，避免拼贴细点名词）；
+    - 组内 kp 归属由调用方按 kp_names 回写，故此处无需改 kps。
+    """
+    gs = [dict(g) for g in groups]
+
+    def _ability_set(g: dict) -> set[str]:
+        names = set(g["kp_names"])
+        return {_kp_primary_ability(k) for k in kps if (k.get("name") or "") in names}
+
+    while len(gs) > DISPLAY_GROUP_MAX:
+        # 最小组（count 升序，display_group 字典序兜底）
+        smallest = min(gs, key=lambda g: (g["count"], g["display_group"]))
+        s_ab = _ability_set(smallest)
+        # 目标：能力交集最大 → 成员最多 → 标签字典序最小（确定性 tie-break）
+        candidates = [g for g in gs if g is not smallest]
+        target = max(
+            candidates,
+            key=lambda g: (len(s_ab & _ability_set(g)), g["count"], -len(g["display_group"])),
+        )
+        target["kp_names"] = list(target["kp_names"]) + list(smallest["kp_names"])
+        target["kp_ids"] = list(target["kp_ids"]) + list(smallest["kp_ids"])
+        target["count"] = target["count"] + smallest["count"]
+        gs = [g for g in gs if g is not smallest]
+    return gs
+
+
+def _finalize_display_groups(
+    knowledge_points: list[dict],
+    *,
+    node_type: str = "",
+) -> tuple[list[dict], list[dict]]:
+    """unit 级 ai_summary 收敛：细点补 display_group 归属 + 产出 display_groups[]。
+
+    入参：knowledge_points（LLM 原始输出 / 人工修正后的清单，可带 display_group）。
+    出参：(knowledge_points（每项补 display_group）, display_groups[])。
+
+    display_groups[] 每项：{display_group, kp_names[], kp_ids[], count}——
+    kp_ids 取成员 kp.source_node_id（缺失不计入，count 以 kp_names 为准）。
+    非 unit 节点直接原样返回（display_groups=[]），保证 lesson / knowledge_point
+    总结与存量数据零变化。
+    """
+    kps = [dict(kp) for kp in knowledge_points] if knowledge_points else []
+    if node_type != "unit" or not kps:
+        return kps, []
+
+    # 1) 细点打标签（LLM/人工值优先，能力维度大白话兜底）
+    for kp in kps:
+        kp["display_group"] = _kp_display_group_label(kp)
+
+    # 2) 按标签分组（保持首现顺序，稳定可测）
+    by_label: dict[str, dict] = {}
+    for kp in kps:
+        label = kp["display_group"]
+        g = by_label.get(label)
+        if g is None:
+            g = {"display_group": label, "kp_names": [], "kp_ids": [], "count": 0}
+            by_label[label] = g
+        g["kp_names"].append(str(kp.get("name") or ""))
+        sid = str(kp.get("source_node_id") or "")
+        if sid:
+            g["kp_ids"].append(sid)
+        g["count"] += 1
+    groups = _merge_groups_to_limit(kps, list(by_label.values()))
+
+    # 3) 按最终组 kp_names 回写每项 display_group（合并后归属收敛到目标组）
+    name_to_label: dict[str, str] = {}
+    for g in groups:
+        for name in g["kp_names"]:
+            name_to_label.setdefault(name, g["display_group"])
+    for kp in kps:
+        label = name_to_label.get(str(kp.get("name") or ""))
+        if label:
+            kp["display_group"] = label
+    return kps, groups
+
+
 async def _persist_ai_summary(
     db,
     node_id: str,
@@ -319,8 +468,18 @@ async def _persist_ai_summary(
     model: str,
     knowledge_points: list,
     extended_points: list,
+    node_type: str = "",
 ) -> dict:
-    """写回 curriculum_node.ai_summary（契约 §4.12.8(b) 字段）"""
+    """写回 curriculum_node.ai_summary（契约 §4.12.8(b) 字段）
+
+    M11：node_type='unit' 时先做 display_group 收敛——knowledge_points 每项补
+    display_group、ai_summary 顶层增 display_groups[]（方案 §3.3 / O4=D）。
+    """
+    display_groups: list = []
+    if node_type == "unit":
+        knowledge_points, display_groups = _finalize_display_groups(
+            knowledge_points, node_type=node_type
+        )
     now = int(time.time() * 1000)
     ai_summary = {
         "status": status,
@@ -330,6 +489,8 @@ async def _persist_ai_summary(
         "extended_points": extended_points,
         "idempotency_key": idempotency_key,
     }
+    if node_type == "unit":
+        ai_summary["display_groups"] = display_groups
     result = await db.update(
         CURRICULUM_NODE_COLLECTION,
         where={"node_id": node_id},
@@ -417,6 +578,7 @@ async def generateKnowledgeSummary(
             "idempotency_key": existing.get("idempotency_key") or key,
             "knowledge_points": existing.get("knowledge_points") or [],
             "extended_points": existing.get("extended_points") or [],
+            "display_groups": existing.get("display_groups") or [],
             "generated_at": existing.get("generated_at") or 0,
         }
 
@@ -434,6 +596,7 @@ async def generateKnowledgeSummary(
             model=LLM_SUMMARY_MODEL,
             knowledge_points=[],
             extended_points=[],
+            node_type=node_type,
         )
         await write_audit(
             db,
@@ -456,6 +619,7 @@ async def generateKnowledgeSummary(
         model=LLM_SUMMARY_MODEL,
         knowledge_points=result.get("knowledge_points") or [],
         extended_points=result.get("extended_points") or [],
+        node_type=node_type,
     )
     await write_audit(
         db,
@@ -475,6 +639,7 @@ async def generateKnowledgeSummary(
         "idempotency_key": key,
         "knowledge_points": ai_summary["knowledge_points"],
         "extended_points": ai_summary["extended_points"],
+        "display_groups": ai_summary.get("display_groups") or [],
         "generated_at": ai_summary["generated_at"],
     }
 
@@ -496,6 +661,7 @@ async def getKnowledgeSummary(db, *, curriculum_node_id: str) -> dict:
             "model": "",
             "knowledge_points": [],
             "extended_points": [],
+            "display_groups": [],
             "idempotency_key": "",
         }
     return {
@@ -505,6 +671,7 @@ async def getKnowledgeSummary(db, *, curriculum_node_id: str) -> dict:
         "model": ai_summary.get("model") or "",
         "knowledge_points": ai_summary.get("knowledge_points") or [],
         "extended_points": ai_summary.get("extended_points") or [],
+        "display_groups": ai_summary.get("display_groups") or [],
         "idempotency_key": ai_summary.get("idempotency_key") or "",
     }
 

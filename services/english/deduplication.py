@@ -6,9 +6,10 @@
   扫描 `text_hash` 重复组 → `dry_run` 预览（含关联计数）→ 确认后级联清理（保留 canonical）。
 - canonical 保留口径与 M3 建簇完全一致（复用 `_pick_canonical_id`：组内已有
   canonical 自指优先，否则 `created_at` 最早者）；
-- 删除语义与 E-API-5 一致（复用 `_cascade_delete_sentence`：6 表级联 + 组引用移除 +
-  sentence_semantic_key registry 维护），每次执行去重写一条审计
-  `deduplicate_english_sentences`（必审 24）。
+- 删除语义与 E-API-5 一致（执行阶段走 `_cascade_delete_sentences` 批量级联：
+  4 状态表 `$in` 分块物理删、conversation_turn/sentence_group 各全表扫 1 次
+  内存过滤、sentence_semantic_key registry 批量维护，避免逐句 N 次全表扫描），
+  每次执行去重写一条审计 `deduplicate_english_sentences`（必审 24）。
 
 契约：api-contract.md §3.11 E-API-12；service-contract.md §8.1（E-API-12 行）。
 """
@@ -23,7 +24,7 @@ from services.database import SENTENCE_V2, TEXTBOOK_V2
 from services.english import LessonNotFoundError, TextbookNotFoundError
 from services.english.sentence_management import (
     _RELATED_COUNT_COLLECTIONS,
-    _cascade_delete_sentence,
+    _cascade_delete_sentences,
     _find_lesson,
     _pick_canonical_id,
 )
@@ -185,29 +186,19 @@ async def deduplicateEnglishSentences(
     if dry_run or not pending_delete:
         return result
 
-    # ---- 4) 执行：逐句级联删除（E-API-5 同款语义；audio_asset 默认保留）---- #
-    deleted: dict[str, int] = {
-        "study_attempt": 0,
-        "skill_state": 0,
-        "speech_evaluation": 0,
-        "learning_attempt": 0,
-        "audio_asset": 0,
-        "conversation_turn_marked": 0,
-        "sentence_group_refs_removed": 0,
-        "semantic_registry_refs_removed": 0,
-    }
-    for sid in pending_delete:
-        sub = await _cascade_delete_sentence(
-            db, sentence_id=sid, delete_audio_asset=False
+    # ---- 4) 执行：批量级联清理（与 E-API-5 逐句语义一致，批量版常数次扫描；
+    #            audio_asset 默认保留）---- #
+    sids = [sid for sid in pending_delete if sid]
+    deleted = await _cascade_delete_sentences(
+        db, sentence_ids=sids, delete_audio_asset=False
+    )
+    for i in range(0, len(sids), 500):
+        await db.delete(
+            SENTENCE_V2, where={"sentence_id": {"$in": sids[i : i + 500]}}
         )
-        await db.delete(SENTENCE_V2, where={"sentence_id": sid})
-        sub["sentence_v2"] = 1
-        for k, v in sub.items():
-            if k != "sentence_v2":
-                deleted[k] = deleted.get(k, 0) + v
 
     result["deleted"] = deleted
-    result["deleted_count"] = len(pending_delete)
+    result["deleted_count"] = len(sids)
 
     await write_audit(
         db,
