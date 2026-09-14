@@ -246,3 +246,79 @@ TRANSLATION_LLM_TIMEOUT_SECONDS = int(
 SESSION_LLM_TIMEOUT_SECONDS = int(
     os.environ.get("SESSION_LLM_TIMEOUT_SECONDS", 300)
 )
+
+# ==================== AI 对话生成 v1 配置（批量生成面 /ai/dialogue/v1） ====================
+# 设计稿：docs_v1/AI会话/AI英语对话生成设计.md §4.1 / §5 / §6
+
+# 对话生成（A/B/C 批量内容生成）单次 LLM 调用超时上限（秒，默认 300s，可配置）：
+# 达到上限强制取消 → 任务 failed + error_code=LLM_TIMEOUT（同 SESSION_LLM_TIMEOUT_SECONDS 语义）。
+# 卡死判定（recover 巡检）默认阈值取本常量，保证合法长调用（≤300s）不被巡检误杀。
+DIALOGUE_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("DIALOGUE_LLM_TIMEOUT_SECONDS", 300)
+)
+
+# 批量对话生成总开关（默认 0 关闭）：置 1 后 /ai/dialogue/v1/* 才接受提交，
+# 关闭时提交返回 200 + success=false + code=DIALOGUE_GEN_DISABLED（零侵入、可一键回退）。
+DIALOGUE_GEN_ENABLED = int(os.environ.get("DIALOGUE_GEN_ENABLED", 0))
+
+# 本地 NC2 语料目录（T2 / 设计稿 §3.1）：仅本地调试用，文件化落盘，不写真实库。
+# 相对路径按项目根解析（config.py 所在目录），避免受进程 cwd 影响。
+DIALOGUE_CORPUS_DIR = os.environ.get("DIALOGUE_CORPUS_DIR", "data/nc2")
+
+# 本地调试默认学者（读取 learners/<scholar_id>.json 的模拟指标，§3.1/§3.3）。
+DIALOGUE_LOCAL_SCHOLAR_ID = os.environ.get(
+    "DIALOGUE_LOCAL_SCHOLAR_ID", "scholar_debug_01"
+)
+
+# 生成图开关（T3 / §4.3）：置 1 → 走 LangGraph StateGraph（v2 流程：
+# 装载 → Send(evaluate_per_sentence × N) → select_best → summarize → 覆盖校验
+# →重试/降级→评估→落盘）；置 0 → 回退 T1 单函数直连生成（同 CONVERSATION_GRAPH_ENABLED
+# 兜底范式；默认 0 保证既有行为逐断言不变）。
+DIALOGUE_GEN_GRAPH_ENABLED = os.environ.get("DIALOGUE_GEN_GRAPH_ENABLED", "0") != "0"
+
+# 扇出并行开关（v2 / 调整稿 §2.2）：置 1 → 走 LangGraph `Send` 多分支并行评估；
+# 置 0 → 退化为 `for ls in sentences: evaluate_per_sentence(...)` 顺序执行
+# （仅用于本地调试 / 控成本）。
+DIALOGUE_GEN_PARALLEL_ENABLED = (
+    os.environ.get("DIALOGUE_GEN_PARALLEL_ENABLED", "1") != "0"
+)
+
+# 扇出并发上限（v2 调整稿 §9）：并行 LLM 调用 asyncio.Semaphore 上限，超出排队。
+DIALOGUE_GEN_MAX_CONCURRENCY = int(
+    os.environ.get("DIALOGUE_GEN_MAX_CONCURRENCY", 3)
+)
+
+# 覆盖校验重试预算（§4.3）：校验不通过且 retry_count < MAX_RETRY → refine_prompt 重生成；
+# 用尽 → 非对话形态降级（规则兜底，保证可产出）。单任务 LLM 调用上限 = N + 1 + 本值（默认 2）。
+DIALOGUE_GEN_MAX_RETRY = int(os.environ.get("DIALOGUE_GEN_MAX_RETRY", 2))
+
+# 断点续写开关（T4 / §4.3.1）：置 1 且 DIALOGUE_GEN_GRAPH_ENABLED=1 时接
+# NoSQLCheckpointSaver（独立集合 ai_dialogue_checkpoint）。
+DIALOGUE_GEN_CHECKPOINT_ENABLED = (
+    os.environ.get("DIALOGUE_GEN_CHECKPOINT_ENABLED", "0") != "0"
+)
+
+# 断点续写 checkpointer 持久化集合（T4 / §6.1）：独立于 conversation_graph_checkpoint，
+# 避免与 ADR-0015 会话级语义混用（thread_id = dg_<task_id>，字段与 0015 同构）。
+DIALOGUE_CHECKPOINT_COLLECTION = os.environ.get(
+    "DIALOGUE_CHECKPOINT_COLLECTION", "ai_dialogue_checkpoint"
+)
+
+# ==================== 沉浸式 AI 会话 v3 配置（新引擎面 /ai/session/v3） ====================
+# 设计稿：docs_v1/AI会话/AI英语对话生成设计.md §11（v2 → v3 迁移）
+
+# 会话新面总开关（默认 0 关闭）：置 1 后 /ai/session/v3 才接受提交，
+# 关闭时提交返回 200 + success=false + code=SESSION_V3_DISABLED（零侵入、可一键回退）。
+# `/ai/session/v2` 无开关、无改动（§9-7 零侵入边界）。
+SESSION_V3_ENABLED = int(os.environ.get("SESSION_V3_ENABLED", 0))
+
+# v3 三集合（§11.2 / §11.6）：同构复制 v2 语义、集合名参数化，**不写 v2 集合**。
+SESSION_V3_TASK_COLLECTION = os.environ.get(
+    "SESSION_V3_TASK_COLLECTION", "ai_session_v3_task"
+)
+SESSION_V3_STATE_COLLECTION = os.environ.get(
+    "SESSION_V3_STATE_COLLECTION", "ai_session_v3"
+)
+SESSION_V3_CHECKPOINT_COLLECTION = os.environ.get(
+    "SESSION_V3_CHECKPOINT_COLLECTION", "ai_session_v3_checkpoint"
+)

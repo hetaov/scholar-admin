@@ -8,8 +8,10 @@
 
 - start_translation_cleanup_loop : 启动 translation_task 巡检循环（每 60s 恢复卡死 + 清理过期）
 - start_dialogue_cleanup_loop    : 启动 dialogue_task 巡检循环（同上）
-- start_session_cleanup_loop     : 启动 ai_session_task/ai_session 巡检循环
+- start_session_cleanup_loop     : 启动 ai_session_task/ai_session 巡检循环（v2）
                                   （恢复卡死生成任务并释放会话在途位 + 清理过期任务与会话）
+- start_session_v3_cleanup_loop  : 启动 ai_session_v3_task/ai_session_v3 巡检循环（v3，§11.2）
+                                  （同 v2 口径，独立轮次，不改既有时序）
 - _loops 模块级强引用（按名字）  : 防止 asyncio 任务被 GC 回收（同 eval.py 后台任务模式）
 - 单轮失败仅记日志               : 巡检是尽力而为，不影响后续轮与正常请求
 """
@@ -20,7 +22,15 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from services.dependencies import get_db
-from services.learning import dialogue_task, session_state, session_task, translation_task
+from services.learning import (
+    dialogue_gen_task,
+    dialogue_task,
+    session_state,
+    session_state_v3,
+    session_task,
+    session_task_v3,
+    translation_task,
+)
 
 logger = logging.getLogger("scholar-admin.background")
 
@@ -54,6 +64,28 @@ async def _run_session_cleanup_round() -> None:
     await session_task.recover_stale_tasks(db)
     await session_task.cleanup_expired(db)
     await session_state.cleanup_expired(db)
+
+
+async def _run_session_v3_cleanup_round() -> None:
+    """执行一轮 AI 会话 v3（ai_session_v3_task/ai_session_v3）巡检。
+
+    恢复卡死生成任务（recover_stale_tasks 内部会释放会话在途位）+ 清理过期任务；
+    最后清理过期会话态。**独立轮次**，不改动既有时序（§9-7 零侵入）。
+    """
+    db = get_db()
+    await session_task_v3.recover_stale_tasks(db)
+    await session_task_v3.cleanup_expired(db)
+    await session_state_v3.cleanup_expired(db)
+
+
+async def _run_dialogue_gen_cleanup_round() -> None:
+    """执行一轮 AI 对话生成（ai_dialogue_task）巡检：恢复卡死 + 清理过期。
+
+    独立轮次，不改动既有时序（§9-7 零侵入）。
+    """
+    db = get_db()
+    await dialogue_gen_task.recover_stale_tasks(db)
+    await dialogue_gen_task.cleanup_expired(db)
 
 
 async def _cleanup_loop(
@@ -108,6 +140,20 @@ def start_session_cleanup_loop(
 ) -> asyncio.Task:
     """启动 AI 会话（ai_session_task/ai_session）巡检循环（幂等）。"""
     return _start_loop("session", _run_session_cleanup_round, interval)
+
+
+def start_dialogue_gen_cleanup_loop(
+    interval: float = CLEANUP_INTERVAL_SECONDS,
+) -> asyncio.Task:
+    """启动 AI 对话生成（ai_dialogue_task）巡检循环（幂等）。"""
+    return _start_loop("dialogue_gen", _run_dialogue_gen_cleanup_round, interval)
+
+
+def start_session_v3_cleanup_loop(
+    interval: float = CLEANUP_INTERVAL_SECONDS,
+) -> asyncio.Task:
+    """启动 AI 会话 v3（ai_session_v3_task/ai_session_v3）巡检循环（幂等）。"""
+    return _start_loop("session_v3", _run_session_v3_cleanup_round, interval)
 
 
 async def stop_all_loops() -> None:

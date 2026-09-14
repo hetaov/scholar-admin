@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from main import app
 
-# 小程序端实际依赖的关键路由（缺一即线上 404）
+# 关键路由（缺一即线上 404 / 未挂载）
 EXPECTED_ROUTES = {
     ("GET", "/health"),
     ("POST", "/eval/translate"),          # 4.6.5b 翻译评估（routes_eval）
     ("POST", "/match/dialogue"),          # 对话匹配（routes_dialogue）
     ("POST", "/tracking/state"),          # 单句状态上报 / Skill Attempt（routes_state）
     ("GET", "/tracking/{scholar_id}"),    # 单学员掌握度查询（routes_tracking）
+    ("POST", "/ai/session/v3"),           # §11.2 沉浸式会话 v3 新面（routes_ai_v3）
+    ("GET", "/ai/session/v3/task/{task_id}"),
 }
 
 

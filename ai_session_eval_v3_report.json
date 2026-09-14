@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "generated_at": "2026-09-13T17:04:58",
+    "judge_model": "hy3",
+    "pass_threshold": 0.7,
+    "scholar_id": "(未指定)",
+    "engine": "v3",
+    "source_docs": [
+      "scholar-skill/docs_v1/沉浸式学习页中的AI会话功能优化.md",
+      "scholar-skill/docs_v1/沉浸式AI会话域接口混元评估方案.md",
+      "scholar-skill/docs_v1/AI会话/AI英语对话生成设计.md"
+    ]
+  },
+  "availability": [
+    {
+      "id": "ai_session_v2_submit",
+      "label": "沉浸式会话 v2 提交（契约 §3.12①）",
+      "method": "POST",
+      "path": "/ai/session/v2",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "ai_session_v2_task",
+      "label": "沉浸式会话 v2 查询（契约 §3.12②）",
+      "method": "GET",
+      "path": "/ai/session/v2/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "ai_session_v3_submit",
+      "label": "沉浸式会话 v3 提交（新引擎面，契约 §3.13①）",
+      "method": "POST",
+      "path": "/ai/session/v3",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "ai_session_v3_task",
+      "label": "沉浸式会话 v3 查询（新引擎面，契约 §3.13②）",
+      "method": "GET",
+      "path": "/ai/session/v3/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "match_dialogue",
+      "label": "对话匹配（现状会话回复 /match/dialogue）",
+      "method": "POST",
+      "path": "/match/dialogue",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 400",
+      "available": true
+    },
+    {
+      "id": "match_dialogue_task",
+      "label": "对话匹配异步提交 /match/dialogue/task",
+      "method": "POST",
+      "path": "/match/dialogue/task",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 400",
+      "available": true
+    },
+    {
+      "id": "match_dialogue_task_query",
+      "label": "对话匹配异步查询 /match/dialogue/task/{task_id}",
+      "method": "GET",
+      "path": "/match/dialogue/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "eval_translate",
+      "label": "评估 v1 同步（语音转写现状 /eval/translate）",
+      "method": "POST",
+      "path": "/eval/translate",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "eval_translate_v2",
+      "label": "评估 v2 异步提交 /eval/translate/v2",
+      "method": "POST",
+      "path": "/eval/translate/v2",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "eval_translate_v2_query",
+      "label": "评估 v2 异步查询 /eval/translate/v2/task/{task_id}",
+      "method": "GET",
+      "path": "/eval/translate/v2/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "conversation_scenario",
+      "label": "会话链路 开场 /conversation/scenario",
+      "method": "POST",
+      "path": "/conversation/scenario",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "conversation_turn",
+      "label": "会话链路 续轮 /conversation/turn",
+      "method": "POST",
+      "path": "/conversation/turn",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "conversation_history",
+      "label": "会话链路 历史 /conversation/history",
+      "method": "GET",
+      "path": "/conversation/history",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=NOT_FOUND",
+      "available": true
+    }
+  ],
+  "functions": [
+    {
+      "case": "C6_ai_session_v3_start",
+      "session_id": "s_9b7f5531eb2146e48af897613f6ab0b1",
+      "task_id": "st_97ccf4cc15a942ec8d956a0a4ea41491",
+      "submit_ms": 229.93487498024479,
+      "status": "success",
+      "result": {
+        "session_id": "s_9b7f5531eb2146e48af897613f6ab0b1",
+        "content_type": "fill",
+        "ai_text": "Buyer: We’re looking at a large volume order with us, but our finance team is pushing back on the price. What could you offer to help us get this approved?\n\nLearner: ______",
+        "hint": {
+          "levels": [
+            "L1: 愿意考虑折扣 (W_ _ _ _ _ _ t_ c_ _ _ _ _ _ a d_ _ _ _ _ _ _)；如果订单量可观 (i_ t_ o_ _ _ _ _ _ v_ _ _ _ _ i_ s_ _ _ _ _ _ _ _).",
+            "L2: We _ _ _ _ _ _ to _ _ _ _ _ _ _ _ a _ _ _ _ _ _ _ if the order _ _ _ _ _ _ is _ _ _ _ _ _ _ _ _.",
+            "L3: 中文：如果订单量可观，我们愿意考虑给予折扣。\n逐段：如果订单量可观 / 我们愿意 / 考虑给予折扣 / 。\n句式开头：We are..."
+          ],
+          "max_level": 3
+        },
+        "suggested_targets": [
+          "tg_discount"
+        ]
+      }
+    },
+    {
+      "case": "C7_ai_session_v3_turn",
+      "session_id": "s_9b7f5531eb2146e48af897613f6ab0b1",
+      "task_id": "st_9964c80328b145d5accf4e49f1d35e14",
+      "submit_ms": 328.5700830165297,
+      "status": "success",
+      "result": {
+        "session_id": "s_9b7f5531eb2146e48af897613f6ab0b1",
+        "content_type": "fill",
+        "ai_text": "That’s the right idea, but we need a formal statement for the finance team. Instead of saying 'talk about a discount', could you use a clearer phrase—something with 'be willing to consider' and tie it to a substantial order volume? How would you phrase that as a full sentence?",
+        "hint": {
+          "levels": [
+            "愿意考虑折扣 = be willing to consider a discount; 订单量可观 = order volume is substantial. 首字母: B_w_t_c_a_d; o_v_i_s.",
+            "句式骨架: We are ______ to ______ a discount ______ the order volume ______.",
+            "中文整句：如果订单量可观，我们愿意考虑折扣。逐段：We are willing / to consider a discount / if the order volume / is substantial. 开头：We are..."
+          ],
+          "max_level": 3
+        },
+        "suggested_targets": [
+          "tg_discount"
+        ]
+      }
+    }
+  ],
+  "judgments": [],
+  "summary": {
+    "availability_ok": true,
+    "implemented_count": 13,
+    "draft_count": 0,
+    "function_ok": true,
+    "needs_data_count": 0,
+    "judge_count": 0,
+    "judge_pass_count": 0
+  },
+  "pass": true,
+  "reasons": []
+}

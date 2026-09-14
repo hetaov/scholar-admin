@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "generated_at": "2026-09-14T13:55:20",
+    "base_url": "http://127.0.0.1:18923",
+    "scholar_id": "scholar_debug_01",
+    "prompt_lang": "zh",
+    "judge_model": "hy3",
+    "pass_threshold": 0.7,
+    "dialogue_gen_enabled": 0,
+    "graph_enabled": false,
+    "checkpoint_enabled": false,
+    "max_retry": 2,
+    "source_docs": [
+      "scholar-skill/docs_v1/AI会话/AI英语对话生成设计.md"
+    ],
+    "server_app": "main:app"
+  },
+  "availability": [
+    {
+      "id": "dialogue_gen_submit",
+      "label": "提交批量对话生成（§5 ①）",
+      "method": "POST",
+      "path": "/ai/dialogue/v1/generate",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_submit_guard",
+      "label": "提交护栏 · task_group 必填（TASK_GROUP_REQUIRED）",
+      "method": "POST",
+      "path": "/ai/dialogue/v1/generate",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=TASK_GROUP_REQUIRED",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_type_guard",
+      "label": "提交护栏 · preferred_type 白名单（TYPE_NOT_SUPPORTED）",
+      "method": "POST",
+      "path": "/ai/dialogue/v1/generate",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=TYPE_NOT_SUPPORTED",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_task",
+      "label": "查询生成任务（§5 ②）",
+      "method": "GET",
+      "path": "/ai/dialogue/v1/task/{task_id}",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_checkpoints",
+      "label": "断点轨迹（§5 ②'，T4）",
+      "method": "GET",
+      "path": "/ai/dialogue/v1/task/{task_id}/checkpoints",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_resume",
+      "label": "断点续写（§5 ③，T4）",
+      "method": "POST",
+      "path": "/ai/dialogue/v1/task/{task_id}/resume",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 404",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_user_input",
+      "label": "用户作答评测（§5 ④，T5）",
+      "method": "POST",
+      "path": "/ai/dialogue/v1/task/{task_id}/user-input",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=INVALID_INPUT",
+      "available": true
+    },
+    {
+      "id": "dialogue_gen_corpus",
+      "label": "本地 NC2 语料（§3.2，T2）",
+      "method": "GET",
+      "path": "/ai/dialogue/v1/corpus",
+      "status": "implemented",
+      "probe": "OK",
+      "detail": "HTTP 200 code=OK",
+      "available": true
+    }
+  ],
+  "live": {
+    "ran": false
+  },
+  "checklist": [
+    {
+      "num": 1,
+      "item": "本地语料",
+      "expected": "20 篇结构，corpus.json 与线上同构",
+      "status": "PASS",
+      "detail": "corpus.json lessons=20"
+    },
+    {
+      "num": 2,
+      "item": "模拟学习",
+      "expected": "有指标",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 3,
+      "item": "必用任务组",
+      "expected": "coverage.required_used 覆盖或降级留痕",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 4,
+      "item": "召回 2-6",
+      "expected": "recalled 条数∈[2,6] 或 RECALL_INSUFFICIENT 留痕",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 5,
+      "item": "形态",
+      "expected": "dialogue 优先；否则 non_dialogue + sub_type",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 6,
+      "item": "提示语言",
+      "expected": "prompts[].lang == 请求 prompt_lang",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 7,
+      "item": "异步契约",
+      "expected": "提交毫秒级；状态可轮询；失败不静默",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 8,
+      "item": "本地可调试",
+      "expected": "pytest 全绿不触网；前端可降级演示",
+      "status": "PASS",
+      "detail": "落盘目录可写=True；pytest 全量需另行执行（见 --report 汇总的 regression 说明）"
+    },
+    {
+      "num": 9,
+      "item": "页面优先",
+      "expected": "页面 mock 可演示 + 真实接口渲染",
+      "status": "PASS",
+      "detail": "dialogue-gen.tsx / dialogueGen.ts 存在"
+    },
+    {
+      "num": 10,
+      "item": "断点续写",
+      "expected": "checkpoint 可续跑",
+      "status": "SKIP",
+      "detail": "未跑 L2"
+    },
+    {
+      "num": 11,
+      "item": "零侵入",
+      "expected": "既有接口逐断言不变；既有全量测试零失败",
+      "status": "MANUAL",
+      "detail": "由 `pytest` 全量回归覆盖（本脚本不改既有路径/集合）"
+    },
+    {
+      "num": 16,
+      "item": "两面隔离",
+      "expected": "批量面不写 ai_session*",
+      "status": "MANUAL",
+      "detail": "由 tests/integration/test_routes_dialogue_gen.py 断言覆盖"
+    }
+  ],
+  "judgments": [],
+  "artifacts": [],
+  "summary": {
+    "routes_total": 8,
+    "routes_ok": 8,
+    "routes_missing": 0,
+    "live_ran": false,
+    "checklist_pass": 3,
+    "checklist_warn": 0,
+    "checklist_fail": 0,
+    "checklist_manual": 2,
+    "judge_count": 0,
+    "judge_pass_count": 0,
+    "implemented_count": 8
+  },
+  "pass": true,
+  "reasons": []
+}

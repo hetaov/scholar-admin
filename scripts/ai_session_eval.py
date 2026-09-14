@@ -10,6 +10,7 @@
                  → 保证接口可用：已实现接口必须 READY；尚未实现的草案接口
                    如实标记 NOT_REGISTERED(待实现)，默认不阻断评估
   L2 功能链路   —— 已实现接口端到端：/ai/session/v2（C6 开场→轮询 / C7 续轮→轮询）、
+                 （--engine v3）改跑 /ai/session/v3 的 C6/C7 全链路（路径/集合不同、结构对齐 v2，§11）、
                  /match/dialogue.task 异步、/eval/translate/v2 异步、
                  /conversation/scenario→turn×2→history，收集 AI 产物与耗时
   L3 混元质量   —— LLM-as-Judge（Judge≠Generator：生成=火山方舟，评分=混元），
@@ -33,6 +34,11 @@
 
   # 限制混元 Judge 调用次数（成本控制）
   python scripts/ai_session_eval.py --port 8080 --scholar-id xxx --judge-limit 5
+
+  # T7：会话新面 v3 全链路（start→turn）本地冒烟（§11.5）
+  #   素材/场景/角色自包含（scholar_id 仅留痕），无需真实学者；只跑 v3 一条链路；
+  #   自启服务时脚本自动注入 SESSION_V3_ENABLED=1；默认报告另存 ai_session_eval_v3_report.json
+  python scripts/ai_session_eval.py --engine v3 --port 8099 --no-judge
 
 退出码：0=通过；1=必需门禁失败；2=Judge 等环境配置缺失
 """
@@ -107,6 +113,22 @@ INTERFACES = [
         "path": "/ai/session/v2/task/{task_id}",
         "status": "implemented",
         "family": "ai_session_v2",
+    },
+    {
+        "id": "ai_session_v3_submit",
+        "label": "沉浸式会话 v3 提交（新引擎面，契约 §3.13①）",
+        "method": "POST",
+        "path": "/ai/session/v3",
+        "status": "implemented",
+        "family": "ai_session_v3",
+    },
+    {
+        "id": "ai_session_v3_task",
+        "label": "沉浸式会话 v3 查询（新引擎面，契约 §3.13②）",
+        "method": "GET",
+        "path": "/ai/session/v3/task/{task_id}",
+        "status": "implemented",
+        "family": "ai_session_v3",
     },
     {
         "id": "match_dialogue",
@@ -334,7 +356,21 @@ def probe_endpoint(client: httpx.Client, base_url: str, entry: dict) -> dict:
             ok = body.get("success") is False and body.get("code") == "INVALID_INPUT"
             return {"probe_status": "OK" if ok else "CONTRACT_ERR",
                     "detail": f"HTTP {resp.status_code} code={body.get('code')}"}
+        if entry["id"] == "ai_session_v3_submit":
+            # 契约 §3.13：字段可选化 + 手动校验，{} → 200 + success=false；
+            # code ∈ {INVALID_INPUT（开关开）, SESSION_V3_DISABLED（开关关）}，二者均属契约就绪。
+            resp = client.post(f"{base_url}{path}", json={}, timeout=10)
+            body = resp.json()
+            code = body.get("code")
+            ok = body.get("success") is False and code in ("INVALID_INPUT", "SESSION_V3_DISABLED")
+            return {"probe_status": "OK" if ok else "CONTRACT_ERR",
+                    "detail": f"HTTP {resp.status_code} code={code}"}
         if entry["id"] == "ai_session_v2_task":
+            resp = client.get(f"{base_url}{path.format(task_id=MISSING_ID)}", timeout=10)
+            ok = resp.status_code == 404  # 任务不存在/过期 → 404
+            return {"probe_status": "OK" if ok else "CONTRACT_ERR",
+                    "detail": f"HTTP {resp.status_code}"}
+        if entry["id"] == "ai_session_v3_task":
             resp = client.get(f"{base_url}{path.format(task_id=MISSING_ID)}", timeout=10)
             ok = resp.status_code == 404  # 任务不存在/过期 → 404
             return {"probe_status": "OK" if ok else "CONTRACT_ERR",
@@ -628,6 +664,102 @@ def run_ai_session_v2_flow(
     return out
 
 
+def run_ai_session_v3_flow(
+    client: httpx.Client,
+    base_url: str,
+    *,
+    poll_interval: float,
+    max_wait: float,
+) -> list[dict]:
+    """C6/C7(v3)：会话新面 /ai/session/v3 异步链路（start 开场 → 轮询 → turn 续轮 → 轮询）。
+
+    T7（§11.5）：请求/响应结构与 v2 **完全对齐**（§11.4），差异仅在路径与集合
+    （`/ai/session/v3` + `ai_session_v3*`）；复用与 v2 相同的自包含素材（SESSION_V2_*），
+    scholar_id 仅留痕，无需真实学者已学句——同 context 便于后续 T8 双跑对照。
+    产物含 ai_text/hint/suggested_targets，供 L3 混元按 ai_session_v3 维度评分。
+    """
+    print("\n----- [L2/C6/C7] /ai/session/v3 会话 v3 异步链路（新引擎面） -----")
+    out: list[dict] = []
+
+    # C6 start：场景/角色/素材注入 → 提交毫秒级返回 → 轮询到终态
+    t0 = time.perf_counter()
+    try:
+        resp = client.post(f"{base_url}/ai/session/v3", json={
+            "scholar_id": "eval_smoke",
+            "mode": "start",
+            "scenario": SESSION_V2_SCENARIO,
+            "roles": SESSION_V2_ROLES,
+            "groups": SESSION_V2_GROUPS,
+            "preferred_type": "auto",
+        }, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return [{"case": "C6_ai_session_v3_start", "status": "REQUEST_FAIL", "error": str(e)}]
+    submit_ms = (time.perf_counter() - t0) * 1000
+    body = resp.json()
+    if not body.get("success"):
+        return [{"case": "C6_ai_session_v3_start", "status": "BIZ_FAIL",
+                 "error": f"{body.get('code')} {body.get('message')}"}]
+    data = body["data"]
+    session_id = data["session_id"]
+    print(f"    [start 提交] HTTP {resp.status_code} 耗时={ms(submit_ms / 1000)} "
+          f"task_id={data['task_id']} session_id={session_id}")
+    polled = poll_task(
+        client, base_url, data["task_id"], "/ai/session/v3/task/{task_id}",
+        poll_interval=poll_interval, max_wait=max_wait,
+        result_key="result", task_id_key="task_id", status_key="status",
+    )
+    if polled is None:
+        out.append({"case": "C6_ai_session_v3_start", "task_id": data["task_id"],
+                    "status": "POLL_TIMEOUT", "submit_ms": submit_ms})
+        return out
+    out.append({
+        "case": "C6_ai_session_v3_start", "session_id": session_id,
+        "task_id": data["task_id"], "submit_ms": submit_ms,
+        "status": polled["status"], "result": polled["result"],
+    })
+    if polled["status"] != "success":
+        return out  # 开场失败不再续轮
+
+    # C7 turn：续轮（带本轮作答 + assisted 上报）→ 提交 → 轮询
+    t0 = time.perf_counter()
+    try:
+        resp = client.post(f"{base_url}/ai/session/v3", json={
+            "scholar_id": "eval_smoke",
+            "mode": "turn",
+            "session_id": session_id,
+            "user_input": "If you increase the volume, we can talk about a discount.",
+            "preferred_type": "auto",
+            "assisted": False,
+        }, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        out.append({"case": "C7_ai_session_v3_turn", "status": "REQUEST_FAIL", "error": str(e)})
+        return out
+    submit_ms = (time.perf_counter() - t0) * 1000
+    body = resp.json()
+    if not body.get("success"):
+        out.append({"case": "C7_ai_session_v3_turn", "status": "BIZ_FAIL",
+                    "error": f"{body.get('code')} {body.get('message')}"})
+        return out
+    data = body["data"]
+    print(f"    [turn 提交] HTTP {resp.status_code} 耗时={ms(submit_ms / 1000)} "
+          f"task_id={data['task_id']}")
+    polled = poll_task(
+        client, base_url, data["task_id"], "/ai/session/v3/task/{task_id}",
+        poll_interval=poll_interval, max_wait=max_wait,
+        result_key="result", task_id_key="task_id", status_key="status",
+    )
+    if polled is None:
+        out.append({"case": "C7_ai_session_v3_turn", "task_id": data["task_id"],
+                    "status": "POLL_TIMEOUT", "submit_ms": submit_ms})
+        return out
+    out.append({
+        "case": "C7_ai_session_v3_turn", "session_id": session_id,
+        "task_id": data["task_id"], "submit_ms": submit_ms,
+        "status": polled["status"], "result": polled["result"],
+    })
+    return out
+
+
 def run_match_dialogue_flow(
     client: httpx.Client,
     base_url: str,
@@ -829,6 +961,21 @@ RUBRICS: dict[str, dict] = {
             ("结构化契约", 0.15, "content_type 合法(dialogue/retell/fill/task)、ai_text/hint/suggested_targets/assisted 字段语义正确"),
         ],
     },
+    "ai_session_v3": {
+        "system": (
+            "你是 scholar-admin「沉浸式英语会话域」质量评审专家。"
+            "输出由会话新面（dialogue_engine 适配层）产生，出口结构与 v2 对齐，"
+            "你按沉浸式功能设计稿做独立质量评分。只输出合法 JSON。"
+        ),
+        "dimensions": [
+            ("场景/角色三要素生效", 0.20, "开场/回复是否体现 scenario.title/scene/goal 与 roles 人设，不跳出角色直接点评语法"),
+            ("素材绑定与新句必用", 0.20, "AI 是否制造语境让学习者用出 new(kind=new) 目标句，开场不直接展示句子原文"),
+            ("复习句埋伏", 0.15, "kind=review 旧句是否被 AI 自然埋伏引诱学习者说回（若本轮含复习素材）"),
+            ("提示不给整句答案", 0.15, "hint 为词块/骨架/对照等渐进引导，不得直接给整句答案"),
+            ("语言自然度与正确性", 0.15, "英文自然、语法正确、符合 ai_role.style"),
+            ("结构化契约", 0.15, "content_type 合法(dialogue/fill)、ai_text/hint/suggested_targets 字段语义正确（对齐 v2）"),
+        ],
+    },
 }
 
 _JUDGE_USER_TEMPLATE = """请评估以下 AI 产物质量。
@@ -943,16 +1090,24 @@ def build_artifacts(
         if case == "C3_history":
             continue  # 无 AI 文本
         if case.startswith("C6") or case.startswith("C7"):
-            family = "ai_session_v2"
-            label = (
-                "POST /ai/session/v2（start 开场）"
-                if case == "C6_ai_session_v2_start"
-                else "POST /ai/session/v2（turn 续轮）"
-            )
+            if "v3" in case:
+                family = "ai_session_v3"
+                label = (
+                    "POST /ai/session/v3（start 开场）"
+                    if case.endswith("start")
+                    else "POST /ai/session/v3（turn 续轮）"
+                )
+            else:
+                family = "ai_session_v2"
+                label = (
+                    "POST /ai/session/v2（start 开场）"
+                    if case == "C6_ai_session_v2_start"
+                    else "POST /ai/session/v2（turn 续轮）"
+                )
             summary = (
                 "scenario=商务谈判·折扣条件；roles=Buyer/Sales Rep；"
                 "groups=new(折扣目标句)+review(付款条款)；preferred_type=auto"
-                if case == "C6_ai_session_v2_start"
+                if case.startswith("C6")
                 else "续轮 session_id 装载上下文；user_input=…volume…discount…；assisted=false"
             )
             output = r.get("result") or {}
@@ -1045,6 +1200,9 @@ def main() -> None:
     parser.add_argument("--no-live", action="store_true", help="跳过 L2 功能链路（只跑可用性门禁）")
     parser.add_argument("--no-judge", action="store_true", help="跳过 L3 混元质量评分")
     parser.add_argument("--judge-limit", type=int, default=8, help="混元 Judge 最多调用数（默认 8）")
+    parser.add_argument("--engine", choices=("v2", "v3"), default="v2",
+                        help="会话引擎面：v2=旧面 /ai/session/v2（默认，行为不变）；"
+                             "v3=新面 /ai/session/v3（T7，跑 start→turn 全链路并落盘）")
     parser.add_argument("--require-ai-session-v2", action="store_true",
                         help="v2 草案接口必须注册可用（落地后 CI 门禁用）")
     parser.add_argument("--strict", action="store_true", help="将 NEEDS_DATA/JUDGE_SKIPPED 视为失败")
@@ -1053,6 +1211,15 @@ def main() -> None:
     parser.add_argument("--no-autostart", action="store_true", help="服务不可达时不自动拉起")
     parser.add_argument("--keep-server", action="store_true", help="自拉起的服务测试完不关闭")
     args = parser.parse_args()
+
+    # T7：--engine v3 → 自启的子进程需开启 v3 总开关（仅对脚本自启的服务生效；
+    # 指向已运行服务时须该服务自行以 SESSION_V3_ENABLED=1 启动，否则 L2 如实记为失败）；
+    # 默认报告名另存，避免覆盖 v2 基线（便于 T8 双跑对照取数）。
+    if args.engine == "v3":
+        if os.environ.get("SESSION_V3_ENABLED") != "1":
+            os.environ["SESSION_V3_ENABLED"] = "1"
+        if args.report_path == Path("ai_session_eval_report.json"):
+            args.report_path = Path("ai_session_eval_v3_report.json")
 
     print("===== [L0 环境门禁] =====")
     print(f"  AUTH_MODE={AUTH_MODE or 'dev(默认，无需鉴权头)'}")
@@ -1073,7 +1240,10 @@ def main() -> None:
         if not os.environ.get("HUNYUAN_SECRET_KEY") and os.environ.get("TENCENTCLOUD_SECRETKEY"):
             print("[WARN] HUNYUAN_SECRET_KEY 未显式配置（回落 TENCENTCLOUD_SECRETKEY）："
                   "Bearer 鉴权需混元控制台 API 密钥，云 SecretKey 不可用于该网关，L3 将 401/403")
-    if not args.scholar_id and not args.no_live:
+    if args.engine == "v3":
+        print(f"  [engine=v3] 会话新面 /ai/session/v3（自包含素材，无需真实学者）；"
+              f"报告 → {args.report_path}")
+    elif not args.scholar_id and not args.no_live:
         print("[WARN] 未指定 --scholar-id，L2 功能链路将标记 NEEDS_DATA（可用性门禁不受影响）")
 
     report: dict = {
@@ -1082,9 +1252,11 @@ def main() -> None:
             "judge_model": HUNYUAN_EVAL_MODEL,
             "pass_threshold": HUNYUAN_EVAL_PASS_THRESHOLD,
             "scholar_id": args.scholar_id or "(未指定)",
+            "engine": args.engine,
             "source_docs": [
                 "scholar-skill/docs_v1/沉浸式学习页中的AI会话功能优化.md",
                 "scholar-skill/docs_v1/沉浸式AI会话域接口混元评估方案.md",
+                "scholar-skill/docs_v1/AI会话/AI英语对话生成设计.md",
             ],
         },
         "availability": [],
@@ -1119,8 +1291,31 @@ def main() -> None:
                 print("\n[L1] 提示：/ai/session/v2* 为 docs_v1 §3.3 草案，尚未实现（预期状态，不阻断）。"
                       "契约落 docs_v2 并实现后，请加 --require-ai-session-v2 验收。")
 
-            # L2 功能链路（仅当学者 ID 给定；可用性 READY 的已实现接口才跑）
-            if not args.no_live and args.scholar_id:
+            # L2 功能链路
+            if not args.no_live and args.engine == "v3":
+                # T7：会话新面 v3 全链路（start→turn）。素材/场景/角色自包含（scholar_id 仅留痕），
+                # 无需真实学者；只跑 v3 一条链路（隔离 legacy 成本，行为与 v2 引擎面互不影响）。
+                v3_ready = all(
+                    any(r["id"] == i and r["available"] for r in availability)
+                    for i in ("ai_session_v3_submit", "ai_session_v3_task")
+                )
+                v3_disabled = any(
+                    r["id"] == "ai_session_v3_submit"
+                    and "SESSION_V3_DISABLED" in str(r.get("detail") or "")
+                    for r in availability
+                )
+                if not v3_ready:
+                    reasons.append("会话 v3 接口不可用（--engine v3）：/ai/session/v3 未注册")
+                elif v3_disabled:
+                    reasons.append(
+                        "会话 v3 总开关关闭（SESSION_V3_ENABLED=0）："
+                        "请以 SESSION_V3_ENABLED=1 启动服务（或去掉 --no-autostart 让脚本自启注入）"
+                    )
+                else:
+                    report["functions"].extend(run_ai_session_v3_flow(
+                        client, base_url, poll_interval=args.poll_interval,
+                        max_wait=args.max_wait))
+            elif not args.no_live and args.scholar_id:
                 ai_v2_ready = all(
                     any(r["id"] == i and r["available"] for r in availability)
                     for i in ("ai_session_v2_submit", "ai_session_v2_task")
@@ -1170,7 +1365,7 @@ def main() -> None:
     if not args.no_judge:
         artifacts = build_artifacts(report["functions"])
         if not artifacts:
-            if args.scholar_id:
+            if args.scholar_id or args.engine == "v3":
                 print("\n[L3] 无可用产物（L2 均未产出 AI 文本），跳过评分")
         else:
             sem = asyncio.Semaphore(2)
