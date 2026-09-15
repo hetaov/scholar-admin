@@ -322,3 +322,19 @@ SESSION_V3_STATE_COLLECTION = os.environ.get(
 SESSION_V3_CHECKPOINT_COLLECTION = os.environ.get(
     "SESSION_V3_CHECKPOINT_COLLECTION", "ai_session_v3_checkpoint"
 )
+
+# ==================== 数学错题识别 Admin 调试干跑配置（api-contract §3.15） ====================
+# 设计稿：docs_v1/AI错题/数学AI错题识别-设计文档.md
+# 实施拆分：docs_v1/AI错题/数学AI错题识别-任务拆分与断点.md（B01 步）
+# 定位：管理台调试干跑面 POST /math/scan/debug/recognize；与 §3.10 生产错题扫描链路
+# （/math/scan/upload → /math/scan/classify → /math/scan/{scan_id}/correct）严格隔离，
+# 小程序零接线、生产 26 接口零改动；开关关闭则路由不注册（main.py 条件注册）。
+
+# 门控 1（启动期）：调试干跑总开关，默认关闭。置 1 后 math_debug_router 才会被 include。
+# 关闭时端点不存在（404），避免信息泄露。生产部署默认保持 0。
+MATH_SCAN_DEBUG_ENABLED = os.environ.get("MATH_SCAN_DEBUG_ENABLED", "0") == "1"
+
+# 门控 2（运行期）：管理台调试 token，请求头 X-Debug-Token 比对（hmac.compare_digest 防时序攻击）。
+# AUTH_MODE=dev + 未配 token 时放行（本地调试）；生产必须配置强随机 token。
+# 高敏凭据：仅在管理台环境注入，**不进代码库**；泄露等价于持有付费 AI 调用权。
+MATH_SCAN_DEBUG_TOKEN = os.environ.get("MATH_SCAN_DEBUG_TOKEN", "")
