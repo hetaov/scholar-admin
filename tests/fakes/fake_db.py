@@ -71,6 +71,9 @@ class FakeDB:
 
     def __init__(self, seed: dict[str, list[dict]] | None = None):
         self._data: dict[str, list[dict]] = {}
+        # A02 写操作探针：记录被测代码的写调用（不影响 add 测试辅助方法）
+        self.write_log: list[tuple[str, str]] = []  # (op, collection)
+        self.write_calls = {"insert": 0, "update": 0, "delete": 0}
         for name, rows in (seed or {}).items():
             self._data[name] = [copy.deepcopy(r) for r in rows]
 
@@ -159,6 +162,8 @@ class FakeDB:
     # ---------------- 写操作 ----------------
 
     async def insert(self, collection: str, data: dict | list[dict]) -> dict:
+        self.write_log.append(("insert", collection))
+        self.write_calls["insert"] += 1
         docs = [data] if isinstance(data, dict) else data
         ids: list[str] = []
         for doc in docs:
@@ -174,6 +179,8 @@ class FakeDB:
         upsert: bool = False,
         multi: bool = True,
     ) -> dict:
+        self.write_log.append(("update", collection))
+        self.write_calls["update"] += 1
         changes = _changes(data)
         pool = self._data.setdefault(collection, [])
         matched = modified = 0
@@ -195,6 +202,8 @@ class FakeDB:
         return {"matched_count": matched, "modified_count": modified, "upserted_id": upserted_id}
 
     async def delete(self, collection: str, where: dict, multi: bool = True) -> dict:
+        self.write_log.append(("delete", collection))
+        self.write_calls["delete"] += 1
         pool = self._data.get(collection, [])
         deleted = 0
         for doc in list(pool):
@@ -208,3 +217,14 @@ class FakeDB:
 
     async def count(self, collection: str, where: dict | None = None) -> int:
         return sum(1 for r in self._data.get(collection, []) if _match(where, r))
+
+    # ---------------- A02 写操作探针 ----------------
+
+    def snapshot(self, collection: str) -> list[dict]:
+        """深拷贝集合当前状态（用于前后对比）。"""
+        return copy.deepcopy(self._data.get(collection, []))
+
+    def reset_write_log(self) -> None:
+        """清空写操作探针（不影响 _data 中的数据）。"""
+        self.write_log.clear()
+        self.write_calls = {"insert": 0, "update": 0, "delete": 0}
