@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.math.error_scan_debug import (
     _assemble_dry_run_items,
+    _call_judge_with_meta,
     _gen_debug_scan_id,
     _load_knowledge_point_candidates_by_textbook,
     _run_ocr_for_debug,
@@ -395,7 +396,7 @@ class TestRecognizeErrorScanDryRun:
     """B04 干跑主干入口集成测试（mock OCR + Judge）。"""
 
     def test_dry_run_returns_items_and_debug(self, monkeypatch):
-        """端到端干跑：mock OCR + Judge，验证 items[] + decisions[] + debug 结构。"""
+        """端到端干跑：mock OCR + Judge，验证 items[] + decisions[] + debug 全段。"""
         db = FakeDB()
         db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
 
@@ -408,16 +409,17 @@ class TestRecognizeErrorScanDryRun:
             return_value=OcrResult(text="0.36 + 2.7 = ?", blocks=[{"block_id": "blk_0001"}])
         )
 
-        # mock Judge
+        # mock Judge（B06 用 _call_judge_with_meta）
         judge_result = {
             "items": [
                 {"knowledge_point_name": "小数加减法", "error_type": "computation",
                  "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "0.36+2.7=?"}
             ]
         }
+        judge_meta = {"prompt_chars": 1234, "attempts": 1}
 
         with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
-             patch("services.math.error_scan_debug._call_classify_judge", new=AsyncMock(return_value=judge_result)):
+             patch("services.math.error_scan_debug._call_judge_with_meta", new=AsyncMock(return_value=(judge_result, judge_meta))):
             result = _run(recognize_error_scan_dry_run(
                 db,
                 image_bytes=b"fake_image_bytes",
@@ -436,12 +438,16 @@ class TestRecognizeErrorScanDryRun:
         assert debug["persisted"] is False
         assert debug["request"]["textbook_id"] == "tb_1"
         assert debug["request"]["image_ext"] == "jpg"
+        assert debug["request"]["compare_all_candidates"] is False
         assert debug["timings"]["ocr_ms"] >= 0
         assert debug["timings"]["judge_ms"] >= 0
         assert debug["candidates"]["source"] == "textbook_id"
         assert debug["candidates"]["count"] == 1
         assert debug["ocr"]["available"] is True
         assert debug["ocr"]["text"] == "0.36 + 2.7 = ?"
+        # B06 judge meta
+        assert debug["judge"]["prompt_chars"] == 1234
+        assert debug["judge"]["attempts"] == 1
         assert debug["judge"]["model"] is not None
         # B05 decisions[]
         assert len(debug["decisions"]) == 1
@@ -450,6 +456,8 @@ class TestRecognizeErrorScanDryRun:
         assert d["passed_gate"] is True
         assert d["would_write_error_record"] is True
         assert d["would_create_extra_ai_node"] is False
+        # B06 compare（关闭时为 None）
+        assert debug["compare"] is None
 
     def test_dry_run_status_needs_review_when_gate_fails(self, monkeypatch):
         """任一 decision 未通过门控 → 顶层 status=needs_review。"""
@@ -472,9 +480,10 @@ class TestRecognizeErrorScanDryRun:
                  "confidence": 0.3, "ocr_block_id": "blk_0002", "question_text": "q2"},
             ]
         }
+        judge_meta = {"prompt_chars": 1000, "attempts": 1}
 
         with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
-             patch("services.math.error_scan_debug._call_classify_judge", new=AsyncMock(return_value=judge_result)):
+             patch("services.math.error_scan_debug._call_judge_with_meta", new=AsyncMock(return_value=(judge_result, judge_meta))):
             result = _run(recognize_error_scan_dry_run(
                 db,
                 image_bytes=b"fake",
@@ -486,6 +495,121 @@ class TestRecognizeErrorScanDryRun:
         assert len(result["debug"]["decisions"]) == 2
         assert result["debug"]["decisions"][0]["passed_gate"] is True
         assert result["debug"]["decisions"][1]["passed_gate"] is False
+
+    def test_dry_run_compare_all_candidates(self, monkeypatch):
+        """compare_all_candidates=true → 再跑全量候选 Judge + compare 段非空。"""
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        db.add("curriculum_node", _kp_node(node_id="n2", textbook_id="tb_2", kp_name="分数"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="0.36 + 2.7 = ?", blocks=[])
+        )
+
+        # baseline Judge（textbook_id=tb_1 过滤候选）
+        baseline_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "0.36+2.7=?"}
+            ]
+        }
+        # all Judge（全量候选）
+        all_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "0.36+2.7=?"}
+            ]
+        }
+        judge_meta = {"prompt_chars": 2000, "attempts": 1}
+
+        call_count = {"judge": 0}
+        async def mock_judge(ocr_text, candidates):
+            call_count["judge"] += 1
+            if call_count["judge"] == 1:
+                return baseline_result, judge_meta
+            return all_result, judge_meta
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_judge_with_meta", new=mock_judge):
+            result = _run(recognize_error_scan_dry_run(
+                db,
+                image_bytes=b"fake",
+                filename="test.jpg",
+                textbook_id="tb_1",
+                compare_all_candidates=True,
+            ))
+
+        assert call_count["judge"] == 2  # baseline + all
+        compare = result["debug"]["compare"]
+        assert compare is not None
+        assert "baseline" in compare
+        assert "all" in compare
+        assert "diff_summary" in compare
+        assert compare["baseline"]["candidates_count"] == 1  # tb_1 过滤
+        assert compare["all"]["candidates_count"] == 2  # 全量
+        assert compare["diff_summary"]["only_in_baseline"] == []
+        assert compare["diff_summary"]["only_in_all"] == []
+        assert compare["diff_summary"]["kp_changed"] == []
+
+    def test_dry_run_compare_diff_summary(self, monkeypatch):
+        """compare 段 diff_summary：baseline 与 all kp 不同时含差异。"""
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        db.add("curriculum_node", _kp_node(node_id="n2", textbook_id="tb_2", kp_name="分数"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="test", blocks=[])
+        )
+
+        # baseline：只命中 tb_1 候选 → kp=小数加减法
+        baseline_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.9, "ocr_block_id": "blk_0001", "question_text": "q1"}
+            ]
+        }
+        # all：全量候选 → kp=分数（改名了）
+        all_result = {
+            "items": [
+                {"knowledge_point_name": "分数", "error_type": "computation",
+                 "confidence": 0.9, "ocr_block_id": "blk_0001", "question_text": "q1"}
+            ]
+        }
+        judge_meta = {"prompt_chars": 1000, "attempts": 1}
+
+        call_count = {"judge": 0}
+        async def mock_judge(ocr_text, candidates):
+            call_count["judge"] += 1
+            if call_count["judge"] == 1:
+                return baseline_result, judge_meta
+            return all_result, judge_meta
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_judge_with_meta", new=mock_judge):
+            result = _run(recognize_error_scan_dry_run(
+                db,
+                image_bytes=b"fake",
+                filename="test.jpg",
+                textbook_id="tb_1",
+                compare_all_candidates=True,
+            ))
+
+        compare = result["debug"]["compare"]
+        assert compare is not None
+        diff = compare["diff_summary"]
+        assert "小数加减法" in diff["only_in_baseline"]
+        assert "分数" in diff["only_in_all"]
+        assert len(diff["kp_changed"]) == 1
+        assert diff["kp_changed"][0]["baseline_kp"] == "小数加减法"
+        assert diff["kp_changed"][0]["all_kp"] == "分数"
 
     def test_dry_run_invalid_image_raises(self):
         """图片格式不合法 → ImageValidationError。"""
@@ -542,9 +666,10 @@ class TestRecognizeErrorScanDryRun:
         )
 
         judge_result = {"items": []}
+        judge_meta = {"prompt_chars": 100, "attempts": 1}
 
         with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
-             patch("services.math.error_scan_debug._call_classify_judge", new=AsyncMock(return_value=judge_result)):
+             patch("services.math.error_scan_debug._call_judge_with_meta", new=AsyncMock(return_value=(judge_result, judge_meta))):
             _run(recognize_error_scan_dry_run(
                 db,
                 image_bytes=b"fake",

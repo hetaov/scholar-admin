@@ -213,6 +213,36 @@ async def _run_ocr_for_debug(image_bytes: bytes) -> dict[str, Any]:
         raise OcrError(f"干跑 OCR 失败: {e}") from e
 
 
+async def _call_judge_with_meta(
+    ocr_text: str, candidates: list[dict[str, Any]]
+) -> tuple[dict, dict[str, Any]]:
+    """干跑专用 Judge 包装：调用生产 _call_classify_judge + 记录 meta 信息。
+
+    返回 (judge_result, meta)，meta 含 prompt_chars / attempts。
+    attempts 记录实际调用次数（_call_classify_judge 内部有重试，但无法从外部
+    获知；此处用 1 表示成功返回，如果抛 JudgeResponseError 则说明重试后仍失败）。
+    """
+    from services.math.error_scanner import _CLASSIFY_USER_TEMPLATE, _format_candidates
+
+    # 计算 prompt_chars（与生产 _call_classify_judge 内部构造一致）
+    truncated_ocr = (ocr_text or "")[:LLM_JUDGE_OCR_TEXT_MAX]
+    prompt = _CLASSIFY_USER_TEMPLATE.format(
+        ocr_text=truncated_ocr or "（OCR 文本为空）",
+        candidates=_format_candidates(candidates),
+    )
+    prompt_chars = len(prompt)
+
+    attempts = 1
+    try:
+        result = await _call_classify_judge(ocr_text, candidates)
+        return result, {"prompt_chars": prompt_chars, "attempts": attempts}
+    except JudgeResponseError:
+        # _call_classify_judge 内部已重试 1 次仍失败 → attempts=2
+        attempts = 2
+        raise
+
+
+
 async def _assemble_dry_run_items(
     judge_result: dict,
     candidates: list[dict[str, Any]],
@@ -353,13 +383,13 @@ async def recognize_error_scan_dry_run(
     compare_all_candidates: bool = False,
     include_ocr_text: bool = True,
 ) -> dict[str, Any]:
-    """B04 干跑主干入口（api-contract §3.15 POST /math/scan/debug/recognize）。
+    """B04~B06 干跑入口（api-contract §3.15 POST /math/scan/debug/recognize）。
 
-    一次调用完成：校验 → OCR → 加载候选 → Judge → 组装 items[]。
+    一次调用完成：校验 → OCR → 加载候选 → Judge → 组装 items[] + decisions[]。
     **不写任何集合、不传云存储、不写审计**；OCR 与 Judge 为真实付费调用。
 
-    B04 仅实现主干（items[] + 基础 debug）；B05 追加门控四分支 + decisions[]；
-    B06 追加 debug 其余段 + compare 段。
+    compare_all_candidates=true 时再跑一次全量候选 Judge（**双倍 Judge 消耗**，
+    风险 R-5），产出 compare.baseline/all/diff_summary。
     """
     from services.math.ocr import OcrError
 
@@ -388,9 +418,9 @@ async def recognize_error_scan_dry_run(
     )
     candidates = cand_result["candidates"]
 
-    # 5. Judge（真实付费调用）
+    # 5. Judge（真实付费调用，B06 用 _call_judge_with_meta 记录 prompt_chars/attempts）
     t_judge_start = time.time()
-    judge_result = await _call_classify_judge(ocr_text, candidates)
+    judge_result, judge_meta = await _call_judge_with_meta(ocr_text, candidates)
     judge_ms = int((time.time() - t_judge_start) * 1000)
 
     # 6. 组装 items[] + decisions[]（B04 主干 + B05 门控四分支）
@@ -402,7 +432,60 @@ async def recognize_error_scan_dry_run(
     all_passed = all(d["passed_gate"] for d in decisions) if decisions else True
     top_status = "success" if all_passed else "needs_review"
 
-    # 8. 组装响应（B04 基础版 + B05 decisions[]）
+    # 8. compare 段（B06：compare_all_candidates=true 时再跑全量候选 Judge）
+    compare_data: dict[str, Any] | None = None
+    if compare_all_candidates:
+        logger.info("[scan][debug] compare_all_candidates=true，启动全量候选对照 Judge（双倍消耗）")
+        # 加载全量候选（textbook_id="" 等价全量）
+        all_cand_result = await _load_knowledge_point_candidates_by_textbook(
+            db, "", scholar_id
+        )
+        all_candidates = all_cand_result["candidates"]
+
+        t_compare_start = time.time()
+        compare_judge_result, compare_judge_meta = await _call_judge_with_meta(
+            ocr_text, all_candidates
+        )
+        compare_judge_ms = int((time.time() - t_compare_start) * 1000)
+
+        compare_items, _ = await _assemble_dry_run_items(
+            compare_judge_result, all_candidates, textbook_id, threshold
+        )
+
+        # diff_summary：对比 baseline（textbook_id 过滤）与 all（全量）的 kp 差异
+        baseline_kps = {it["knowledge_point_name"] for it in items}
+        all_kps = {it["knowledge_point_name"] for it in compare_items}
+        only_in_baseline = sorted(baseline_kps - all_kps)
+        only_in_all = sorted(all_kps - baseline_kps)
+        # kp_changed：同题号但 kp 名变化的（按 index 对齐）
+        kp_changed: list[dict[str, Any]] = []
+        max_idx = min(len(items), len(compare_items))
+        for i in range(max_idx):
+            b_kp = items[i].get("knowledge_point_name", "")
+            a_kp = compare_items[i].get("knowledge_point_name", "")
+            if b_kp and a_kp and b_kp != a_kp:
+                kp_changed.append({"index": i, "baseline_kp": b_kp, "all_kp": a_kp})
+
+        compare_data = {
+            "baseline": {
+                "candidates_count": cand_result["count"],
+                "items_count": len(items),
+                "judge_ms": judge_ms,
+            },
+            "all": {
+                "candidates_count": all_cand_result["count"],
+                "items_count": len(compare_items),
+                "judge_ms": compare_judge_ms,
+                "items": compare_items,
+            },
+            "diff_summary": {
+                "only_in_baseline": only_in_baseline,
+                "only_in_all": only_in_all,
+                "kp_changed": kp_changed,
+            },
+        }
+
+    # 9. 组装响应（B04 基础 + B05 decisions + B06 judge meta + compare）
     data = {
         "scan_id": scan_id,
         "status": top_status,
@@ -419,7 +502,7 @@ async def recognize_error_scan_dry_run(
                 "image_ext": ext,
             },
             "timings": {
-                "total_ms": ocr_ms + judge_ms,
+                "total_ms": ocr_ms + judge_ms + (compare_data["all"]["judge_ms"] if compare_data else 0),
                 "ocr_ms": ocr_ms,
                 "judge_ms": judge_ms,
             },
@@ -441,14 +524,14 @@ async def recognize_error_scan_dry_run(
             },
             "judge": {
                 "model": LLM_JUDGE_MODEL,
-                "prompt_chars": 0,  # B06 填充
+                "prompt_chars": judge_meta["prompt_chars"],  # B06 填充
                 "ocr_text_max": LLM_JUDGE_OCR_TEXT_MAX,
                 "candidate_limit": cand_result["prompt_included"],
-                "attempts": 1,  # B06 填充
+                "attempts": judge_meta["attempts"],  # B06 填充
                 "disable_thinking": LLM_JUDGE_DISABLE_THINKING,
             },
             "decisions": decisions,  # B05 门控四分支
-            "compare": None,  # B06 填充
+            "compare": compare_data,  # B06 填充（null 或 compare 结构）
         },
     }
     return data
