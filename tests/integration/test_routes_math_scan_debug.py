@@ -120,6 +120,28 @@ class TestErrorMapping:
         )
         assert resp.status_code == 400
 
+    def test_txt_file_returns_400(self):
+        """.txt 文件 → 400（不支持的图片格式）。"""
+        client = _make_app_with_debug_router()
+        resp = client.post(
+            "/math/scan/debug/recognize",
+            files={"image": _make_fake_image_bytes("notes.txt", b"hello world")},
+            data={"textbook_id": "tb_1"},
+        )
+        assert resp.status_code == 400
+
+    def test_oversized_image_returns_413(self, monkeypatch):
+        """超大图片 → 413（超过 VOLCANO_MAX_IMAGE_SIZE）。"""
+        # 模拟 VOLCANO_MAX_IMAGE_SIZE=100 字节，发送 200 字节图片
+        monkeypatch.setattr("services.math.error_scanner.VOLCANO_MAX_IMAGE_SIZE", 100)
+        client = _make_app_with_debug_router()
+        resp = client.post(
+            "/math/scan/debug/recognize",
+            files={"image": _make_fake_image_bytes("big.jpg", b"x" * 200)},
+            data={"textbook_id": "tb_1"},
+        )
+        assert resp.status_code == 413
+
     def test_ocr_error_returns_500(self, fake_db):
         """OCR 不可用 → 500。"""
         ocr_provider = MagicMock()

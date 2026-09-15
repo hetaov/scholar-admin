@@ -64,8 +64,10 @@ async def math_scan_debug_recognize(
             include_ocr_text=include_ocr_text,
         )
         return {"success": True, "data": data}
-    except (ImageValidationError, ImageTooLargeError) as e:
+    except ImageValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except ImageTooLargeError as e:
+        raise HTTPException(status_code=413, detail=str(e))
     except OcrError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except (JudgeNotConfiguredError, JudgeResponseError) as e:
