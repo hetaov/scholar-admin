@@ -797,12 +797,30 @@ class TestRecognizeErrorScanDryRun:
         assert result["debug"]["candidates"]["count"] == 2  # 全量候选
 
     def test_dry_run_no_db_writes(self, monkeypatch):
-        """红线：干跑后 FakeDB 任何集合都不应有写操作。"""
+        """B10 核心门禁：干跑后 FakeDB 敏感集合零写操作 + 云存储零上传。
+
+        用 A02 探针（write_calls / write_log / snapshot）自动证明。
+        """
+        from tests.fakes import SENSITIVE_COLLECTIONS
+
         db = FakeDB()
         db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
 
-        # 记录初始数据快照
-        initial_data = {k: [dict(r) for r in v] for k, v in db._data.items()}
+        # 集合快照（前）
+        before = {c: db.snapshot(c) for c in SENSITIVE_COLLECTIONS}
+        # 计数快照（前）
+        before_counts = {c: _run(db.count(c)) for c in SENSITIVE_COLLECTIONS}
+
+        # 重置探针（确保只记录干跑期间的写操作）
+        db.reset_write_log()
+
+        # 云存储上传计数器
+        upload_calls = {"count": 0}
+        original_upload = None
+
+        async def counting_upload(cloud_path, data):
+            upload_calls["count"] += 1
+            return {"url": f"fake://{cloud_path}"}
 
         ocr_provider = MagicMock()
         ocr_provider.__class__.__name__ = "FakeProvider"
@@ -816,7 +834,9 @@ class TestRecognizeErrorScanDryRun:
         judge_meta = {"prompt_chars": 100, "attempts": 1}
 
         with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
-             patch("services.math.error_scan_debug._call_judge_with_meta", new=AsyncMock(return_value=(judge_result, judge_meta))):
+             patch("services.math.error_scan_debug._call_judge_with_meta",
+                   new=AsyncMock(return_value=(judge_result, judge_meta))), \
+             patch("services.infra.tcb_storage.CloudBaseStorageClient.upload_file", new=counting_upload):
             _run(recognize_error_scan_dry_run(
                 db,
                 image_bytes=b"fake",
@@ -824,9 +844,43 @@ class TestRecognizeErrorScanDryRun:
                 textbook_id="tb_1",
             ))
 
-        # 验证：无新集合、无新文档、无修改
-        for coll, rows in initial_data.items():
-            assert len(db._data.get(coll, [])) == len(rows), f"集合 {coll} 文档数变化"
-        # 无新增集合
-        new_collections = set(db._data.keys()) - set(initial_data.keys())
-        assert not new_collections, f"干跑新增了集合: {new_collections}"
+        # 断言 1：write_calls 全零（insert/update/delete 均无）
+        assert db.write_calls == {"insert": 0, "update": 0, "delete": 0}, \
+            f"干跑触发了写操作: {db.write_calls}"
+        # 断言 2：write_log 为空
+        assert db.write_log == [], \
+            f"干跑写日志非空: {db.write_log}"
+        # 断言 3：敏感集合计数不变
+        after_counts = {c: _run(db.count(c)) for c in SENSITIVE_COLLECTIONS}
+        assert before_counts == after_counts, \
+            f"集合计数变化: {before_counts} → {after_counts}"
+        # 断言 4：敏感集合快照不变（深拷贝对比）
+        for coll in SENSITIVE_COLLECTIONS:
+            after_snap = db.snapshot(coll)
+            assert before[coll] == after_snap, \
+                f"集合 {coll} 快照变化"
+        # 断言 5：云存储零上传
+        assert upload_calls["count"] == 0, \
+            f"干跑触发了云存储上传: {upload_calls['count']}"
+
+    def test_probe_detects_writes_in_control(self):
+        """B10 对照用例：证明探针能检测到写操作（不是假绿）。
+
+        在同一 FakeDB 上手动执行 insert/update/delete，
+        验证 write_calls 和 write_log 正确记录。
+        """
+        db = FakeDB()
+        db.reset_write_log()
+
+        # 执行三种写操作
+        _run(db.insert("error_record", {"kp": "test", "error_type": "computation"}))
+        _run(db.update("math_scan_upload", {"scan_id": "s1"}, {"$set": {"status": "done"}}))
+        _run(db.delete("audit_log", {"_id": "old_log"}))
+
+        # 探针应正确记录
+        assert db.write_calls == {"insert": 1, "update": 1, "delete": 1}
+        assert db.write_log == [
+            ("insert", "error_record"),
+            ("update", "math_scan_upload"),
+            ("delete", "audit_log"),
+        ]
