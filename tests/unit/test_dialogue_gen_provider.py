@@ -563,3 +563,16 @@ class TestV2ResultContract:
         )
         assert "周六下午在咖啡店。" in messages[1]["content"]
         assert "A = Tom（student）" in messages[1]["content"]
+
+    def test_dialogue_messages_forbid_verbatim_repeats(self):
+        """终稿硬约束：禁止逐字重复的追问（防整段套用同一句）。"""
+        ctx = _context()
+        roles = [
+            {"code": "A", "name": "Tom", "identity": "student"},
+            {"code": "B", "name": "Lily", "identity": "classmate"},
+        ]
+        system = build_dialogue_messages(
+            ctx, content_type="dialogue", roles=roles, prompt_lang="zh"
+        )[0]["content"]
+        assert "文本不得逐字重复" in system
+        assert "同一句不得在 turns 中出现两次" in system
