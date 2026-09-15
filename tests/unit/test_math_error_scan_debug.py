@@ -340,6 +340,64 @@ class TestAssembleDryRunItems:
         assert d["passed_gate"] is False  # 但无 error_type → 门控不通过
         assert d["would_write_error_record"] is False
 
+    # ---- B09 阈值边界覆盖 ----
+
+    def test_confidence_below_threshold_fails_gate(self):
+        """置信度 0.85 < 阈值 0.9 → passed_gate=false。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "", "semester": "",
+             "title": "", "unit_title": "", "lesson_title": ""}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.85, "ocr_block_id": "blk_0001", "question_text": "q1"}
+            ]
+        }
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.9))
+        d = decisions[0]
+        assert d["match_type"] == "exact"
+        assert d["passed_gate"] is False  # 0.85 < 0.9
+        assert d["would_write_error_record"] is False
+
+    def test_confidence_equal_threshold_passes_gate(self):
+        """置信度 0.9 = 阈值 0.9 → passed_gate=true（边界值 >=）。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "", "semester": "",
+             "title": "", "unit_title": "", "lesson_title": ""}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.9, "ocr_block_id": "blk_0001", "question_text": "q1"}
+            ]
+        }
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.9))
+        d = decisions[0]
+        assert d["match_type"] == "exact"
+        assert d["passed_gate"] is True  # 0.9 >= 0.9
+        assert d["would_write_error_record"] is True
+
+    def test_confidence_above_threshold_passes_gate(self):
+        """置信度 0.95 > 阈值 0.9 → passed_gate=true。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "", "semester": "",
+             "title": "", "unit_title": "", "lesson_title": ""}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.95, "ocr_block_id": "blk_0001", "question_text": "q1"}
+            ]
+        }
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.9))
+        d = decisions[0]
+        assert d["passed_gate"] is True
+        assert d["would_write_error_record"] is True
+
     def test_decision_index_correct(self):
         """decisions[].index 按序号递增。"""
         candidates = [
@@ -648,6 +706,95 @@ class TestRecognizeErrorScanDryRun:
                 assert False, "应抛 OcrError"
             except OcrError:
                 pass
+
+    def test_dry_run_judge_error_propagates(self, monkeypatch):
+        """Judge 抛 JudgeResponseError → 向上传播（端到端）。"""
+        from services.math.error_scanner import JudgeResponseError
+
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="test", blocks=[])
+        )
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_judge_with_meta",
+                   new=AsyncMock(side_effect=JudgeResponseError("Judge 解析失败"))):
+            try:
+                _run(recognize_error_scan_dry_run(
+                    db,
+                    image_bytes=b"fake",
+                    filename="test.jpg",
+                    textbook_id="tb_1",
+                ))
+                assert False, "应抛 JudgeResponseError"
+            except JudgeResponseError:
+                pass
+
+    def test_dry_run_textbook_non_empty_filters_candidates(self, monkeypatch):
+        """教材非空 → candidates.source = "textbook_id" + count = 候选数。"""
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        db.add("curriculum_node", _kp_node(node_id="n2", textbook_id="tb_2", kp_name="分数"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="test", blocks=[])
+        )
+
+        judge_result = {"items": []}
+        judge_meta = {"prompt_chars": 100, "attempts": 1}
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_judge_with_meta",
+                   new=AsyncMock(return_value=(judge_result, judge_meta))):
+            result = _run(recognize_error_scan_dry_run(
+                db,
+                image_bytes=b"fake",
+                filename="test.jpg",
+                textbook_id="tb_1",
+            ))
+
+        assert result["debug"]["candidates"]["source"] == "textbook_id"
+        assert result["debug"]["candidates"]["count"] == 1  # 仅 tb_1 的候选
+
+    def test_dry_run_textbook_empty_loads_all_candidates(self, monkeypatch):
+        """教材空 → candidates.source = "all" + count = 全量候选数。"""
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        db.add("curriculum_node", _kp_node(node_id="n2", textbook_id="tb_2", kp_name="分数"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="test", blocks=[])
+        )
+
+        judge_result = {"items": []}
+        judge_meta = {"prompt_chars": 100, "attempts": 1}
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_judge_with_meta",
+                   new=AsyncMock(return_value=(judge_result, judge_meta))):
+            result = _run(recognize_error_scan_dry_run(
+                db,
+                image_bytes=b"fake",
+                filename="test.jpg",
+                textbook_id="",  # 空 → 全量
+            ))
+
+        assert result["debug"]["candidates"]["source"] == "all"
+        assert result["debug"]["candidates"]["count"] == 2  # 全量候选
 
     def test_dry_run_no_db_writes(self, monkeypatch):
         """红线：干跑后 FakeDB 任何集合都不应有写操作。"""
