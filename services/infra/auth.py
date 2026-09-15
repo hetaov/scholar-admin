@@ -12,11 +12,17 @@ openid 来源：
 """
 from __future__ import annotations
 
+import hmac
 import logging
 
 from fastapi import Depends, HTTPException, Request
 
-from config import AUTH_MODE, WHITELIST_COLLECTION
+from config import (
+    AUTH_MODE,
+    MATH_SCAN_DEBUG_ENABLED,
+    MATH_SCAN_DEBUG_TOKEN,
+    WHITELIST_COLLECTION,
+)
 from services.database import CloudBaseNoSQLClient
 from services.dependencies import get_db
 
@@ -27,6 +33,10 @@ OPENID_HEADER = "X-WX-OPENID"
 
 # 白名单文档固定 _id
 WHITELIST_DOC_ID = "paid"
+
+# 管理台调试干跑接口（api-contract §3.15）的 token 请求头
+# MATH_SCAN_DEBUG_TOKEN 与本头比对（hmac.compare_digest 防时序攻击）
+DEBUG_TOKEN_HEADER = "X-Debug-Token"
 
 
 def get_request_openid(request: Request) -> str:
@@ -80,3 +90,26 @@ async def require_paid_user(
             detail="未授权使用：本小程序仅供授权用户使用",
         )
     return openid
+
+
+async def require_debug_access(request: Request) -> str:
+    """FastAPI 依赖：校验管理台调试干跑接口（api-contract §3.15）的访问权。
+
+    双重门控（不依赖微信 openid，因管理台拿不到）：
+    1. 启动期：MATH_SCAN_DEBUG_ENABLED 关关 → 路由不注册（main.py 条件 include）
+       本函数作为二级保险，防止开关被运行期篡改后端点暴露。
+    2. 运行期：MATH_SCAN_DEBUG_TOKEN 比对请求头 X-Debug-Token。
+       - AUTH_MODE=dev + 未配 token → 放行（本地调试）
+       - token 已配置 + 头匹配 → 放行
+       - token 已配置 + 头不匹配 → 403
+    用 hmac.compare_digest 防时序攻击（风险 R-4）。
+    """
+    if not MATH_SCAN_DEBUG_ENABLED:
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not MATH_SCAN_DEBUG_TOKEN and AUTH_MODE == "dev":
+        return "debug-local"
+    if not hmac.compare_digest(
+        request.headers.get(DEBUG_TOKEN_HEADER) or "", MATH_SCAN_DEBUG_TOKEN
+    ):
+        raise HTTPException(status_code=403, detail="debug 未授权")
+    return "debug"

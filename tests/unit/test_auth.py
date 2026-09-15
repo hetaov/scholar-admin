@@ -14,10 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from starlette.requests import Request
 
 from services.auth import (
+    DEBUG_TOKEN_HEADER,
     OPENID_HEADER,
     WHITELIST_DOC_ID,
     get_request_openid,
     is_whitelisted,
+    require_debug_access,
     require_paid_user,
 )
 from tests.fakes.fake_db import FakeDB
@@ -188,3 +190,66 @@ class TestHttpFlow:
         client = make_client(router)
         resp = client.get("/paid/ping", headers={OPENID_HEADER: "o-stranger"})
         assert resp.status_code == 403
+
+
+# ---------------- require_debug_access（api-contract §3.15） ----------------
+
+
+def _make_debug_request(token: str | None = None) -> Request:
+    """构造带可选 X-Debug-Token 的请求。"""
+    headers = {}
+    if token is not None:
+        headers[DEBUG_TOKEN_HEADER] = token
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/math/scan/debug/recognize",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+    }
+    return Request(scope)
+
+
+class TestRequireDebugAccess:
+    """管理台调试干跑接口鉴权（B02）。
+
+    覆盖：
+    - 开关关 → 404（二级保险，防运行期篡改）
+    - 开关开 + AUTH_MODE=dev + 未配 token → 放行（返回 debug-local）
+    - 开关开 + token 已配 + 头匹配 → 放行（返回 debug）
+    - 开关开 + token 已配 + 头不匹配 → 403
+    - 开关开 + token 已配 + 无头 → 403
+    """
+
+    def test_switch_off_returns_404(self, monkeypatch):
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_ENABLED", False)
+        with pytest.raises(HTTPException) as exc:
+            _run(require_debug_access(_make_debug_request()))
+        assert exc.value.status_code == 404
+
+    def test_switch_on_dev_mode_no_token_allowed(self, monkeypatch):
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_ENABLED", True)
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "")
+        monkeypatch.setattr("services.auth.AUTH_MODE", "dev")
+        result = _run(require_debug_access(_make_debug_request()))
+        assert result == "debug-local"
+
+    def test_switch_on_token_match_allowed(self, monkeypatch):
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_ENABLED", True)
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "secret-token")
+        result = _run(require_debug_access(_make_debug_request("secret-token")))
+        assert result == "debug"
+
+    def test_switch_on_token_mismatch_rejected(self, monkeypatch):
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_ENABLED", True)
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "secret-token")
+        with pytest.raises(HTTPException) as exc:
+            _run(require_debug_access(_make_debug_request("wrong-token")))
+        assert exc.value.status_code == 403
+        assert exc.value.detail == "debug 未授权"
+
+    def test_switch_on_token_configured_no_header_rejected(self, monkeypatch):
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_ENABLED", True)
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "secret-token")
+        with pytest.raises(HTTPException) as exc:
+            _run(require_debug_access(_make_debug_request()))
+        assert exc.value.status_code == 403
