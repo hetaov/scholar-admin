@@ -214,7 +214,7 @@ class TestRunOcrForDebug:
 
 
 class TestAssembleDryRunItems:
-    """_assemble_dry_run_items 组装干跑 items[]。"""
+    """_assemble_dry_run_items 组装干跑 items[] + decisions[]。"""
 
     def test_exact_match_item(self):
         candidates = [
@@ -228,13 +228,23 @@ class TestAssembleDryRunItems:
                  "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "0.36+2.7=?"}
             ]
         }
-        items = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
         assert len(items) == 1
         assert items[0]["knowledge_point_name"] == "小数加减法"
         assert items[0]["error_record_id"] == ""  # 干跑不落库
         assert items[0]["confidence"] == 0.92
         assert "original_kp_name" not in items[0]  # 非 renamed
         assert "new_kp_name" not in items[0]  # 非 extra_ai
+        # B05 decisions[]
+        assert len(decisions) == 1
+        d = decisions[0]
+        assert d["match_type"] == "exact"
+        assert d["passed_gate"] is True
+        assert d["would_write_error_record"] is True
+        assert d["would_create_extra_ai_node"] is False
+        assert d["preview_node_code"] == ""
+        assert d["matched_kp_name"] == "小数加减法"
+        assert d["matched_node_code"] == "5-3-1-kp2"
 
     def test_renamed_item_has_original_kp_name(self):
         candidates = [
@@ -248,10 +258,17 @@ class TestAssembleDryRunItems:
                  "confidence": 0.85, "ocr_block_id": "blk_0001", "question_text": "0.36+2.7=?"}
             ]
         }
-        items = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
         assert len(items) == 1
         assert items[0]["knowledge_point_name"] == "小数加减法"  # 改名为候选标准名
         assert items[0]["original_kp_name"] == "小数的加减运算"
+        # B05 decisions[]
+        d = decisions[0]
+        assert d["match_type"] == "renamed"
+        assert d["passed_gate"] is True
+        assert d["would_write_error_record"] is True
+        assert d["would_create_extra_ai_node"] is False
+        assert d["matched_kp_name"] == "小数加减法"
 
     def test_extra_ai_item_has_new_kp_name(self):
         """无候选匹配且高置信 → extra_ai 预演（不调 _ensure_extra_ai_node）。"""
@@ -262,13 +279,20 @@ class TestAssembleDryRunItems:
                  "confidence": 0.88, "ocr_block_id": "blk_0001", "question_text": "某题"}
             ]
         }
-        items = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
         assert len(items) == 1
         assert items[0]["new_kp_name"] == "全新的知识点"
         assert items[0]["knowledge_point_name"] == "全新的知识点"
+        # B05 decisions[]
+        d = decisions[0]
+        assert d["match_type"] == "extra_ai"
+        assert d["passed_gate"] is True
+        assert d["would_write_error_record"] is True
+        assert d["would_create_extra_ai_node"] is True
+        assert d["preview_node_code"].startswith("xai_")
 
     def test_low_confidence_no_match(self):
-        """低置信无匹配 → 无 original_kp_name / new_kp_name。"""
+        """低置信无匹配 → match_type=none，门控不通过。"""
         candidates = [
             {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
              "textbook_id": "tb_1", "grade": "", "semester": "",
@@ -280,21 +304,98 @@ class TestAssembleDryRunItems:
                  "confidence": 0.3, "ocr_block_id": "blk_0001", "question_text": "?"}
             ]
         }
-        items = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
         assert len(items) == 1
         assert "original_kp_name" not in items[0]
         assert "new_kp_name" not in items[0]
+        # B05 decisions[]
+        d = decisions[0]
+        assert d["match_type"] == "none"
+        assert d["passed_gate"] is False
+        assert d["would_write_error_record"] is False
+        assert d["would_create_extra_ai_node"] is False
 
     def test_empty_judge_items(self):
-        items = _run(_assemble_dry_run_items({}, [], "tb_1", 0.6))
+        items, decisions = _run(_assemble_dry_run_items({}, [], "tb_1", 0.6))
         assert items == []
+        assert decisions == []
+
+    def test_no_error_type_does_not_pass_gate(self):
+        """高置信但无 error_type → 门控不通过（match_type=none）。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "", "semester": "",
+             "title": "", "unit_title": "", "lesson_title": ""}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "",
+                 "confidence": 0.9, "ocr_block_id": "blk_0001", "question_text": "?"}
+            ]
+        }
+        items, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        d = decisions[0]
+        assert d["match_type"] == "exact"  # 精确命中
+        assert d["passed_gate"] is False  # 但无 error_type → 门控不通过
+        assert d["would_write_error_record"] is False
+
+    def test_decision_index_correct(self):
+        """decisions[].index 按序号递增。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "c1", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "", "semester": "",
+             "title": "", "unit_title": "", "lesson_title": ""}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.9, "ocr_block_id": "blk_0001", "question_text": "q1"},
+                {"knowledge_point_name": "小数加减法", "error_type": "concept",
+                 "confidence": 0.8, "ocr_block_id": "blk_0002", "question_text": "q2"},
+            ]
+        }
+        _, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        assert decisions[0]["index"] == 0
+        assert decisions[1]["index"] == 1
+
+    def test_decision_chain_anchor_fields(self):
+        """decision.chain_anchor 含 node_code/textbook_id/grade 等。"""
+        candidates = [
+            {"node_id": "n1", "node_code": "5-3-1-kp2", "kp_name": "小数加减法",
+             "textbook_id": "tb_1", "grade": "五年级", "semester": "up",
+             "title": "小数乘整数", "unit_title": "第3单元", "lesson_title": "小数乘整数"}
+        ]
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "?"}
+            ]
+        }
+        _, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        anchor = decisions[0]["chain_anchor"]
+        assert anchor["node_code"] == "5-3-1-kp2"
+        assert anchor["textbook_id"] == "tb_1"
+        assert anchor["grade"] == "五年级"
+        assert anchor["node_title"] == "小数乘整数"
+
+    def test_decision_exam_backlink_always_none(self):
+        """M13 双源知识锚，干跑不计算 → exam_backlink_to 恒为 None。"""
+        candidates = []
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "全新", "error_type": "concept",
+                 "confidence": 0.88, "ocr_block_id": "blk_0001", "question_text": "?"}
+            ]
+        }
+        _, decisions = _run(_assemble_dry_run_items(judge_result, candidates, "tb_1", 0.6))
+        assert decisions[0]["exam_backlink_to"] is None
 
 
 class TestRecognizeErrorScanDryRun:
     """B04 干跑主干入口集成测试（mock OCR + Judge）。"""
 
     def test_dry_run_returns_items_and_debug(self, monkeypatch):
-        """端到端干跑：mock OCR + Judge，验证 items[] + debug 结构。"""
+        """端到端干跑：mock OCR + Judge，验证 items[] + decisions[] + debug 结构。"""
         db = FakeDB()
         db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
 
@@ -325,7 +426,7 @@ class TestRecognizeErrorScanDryRun:
             ))
 
         assert result["scan_id"].startswith("debug_")
-        assert result["status"] == "success"
+        assert result["status"] == "success"  # 全部门控通过
         assert len(result["items"]) == 1
         assert result["items"][0]["knowledge_point_name"] == "小数加减法"
         assert result["items"][0]["error_record_id"] == ""
@@ -342,6 +443,49 @@ class TestRecognizeErrorScanDryRun:
         assert debug["ocr"]["available"] is True
         assert debug["ocr"]["text"] == "0.36 + 2.7 = ?"
         assert debug["judge"]["model"] is not None
+        # B05 decisions[]
+        assert len(debug["decisions"]) == 1
+        d = debug["decisions"][0]
+        assert d["match_type"] == "exact"
+        assert d["passed_gate"] is True
+        assert d["would_write_error_record"] is True
+        assert d["would_create_extra_ai_node"] is False
+
+    def test_dry_run_status_needs_review_when_gate_fails(self, monkeypatch):
+        """任一 decision 未通过门控 → 顶层 status=needs_review。"""
+        db = FakeDB()
+        db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+
+        ocr_provider = MagicMock()
+        ocr_provider.__class__.__name__ = "FakeProvider"
+        ocr_provider.available = True
+        ocr_provider._engine = "test"
+        ocr_provider.recognize = AsyncMock(
+            return_value=OcrResult(text="test", blocks=[])
+        )
+
+        judge_result = {
+            "items": [
+                {"knowledge_point_name": "小数加减法", "error_type": "computation",
+                 "confidence": 0.92, "ocr_block_id": "blk_0001", "question_text": "q1"},
+                {"knowledge_point_name": "未知点", "error_type": "concept",
+                 "confidence": 0.3, "ocr_block_id": "blk_0002", "question_text": "q2"},
+            ]
+        }
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch("services.math.error_scan_debug._call_classify_judge", new=AsyncMock(return_value=judge_result)):
+            result = _run(recognize_error_scan_dry_run(
+                db,
+                image_bytes=b"fake",
+                filename="test.jpg",
+                textbook_id="tb_1",
+            ))
+
+        assert result["status"] == "needs_review"  # 第二项门控未通过
+        assert len(result["debug"]["decisions"]) == 2
+        assert result["debug"]["decisions"][0]["passed_gate"] is True
+        assert result["debug"]["decisions"][1]["passed_gate"] is False
 
     def test_dry_run_invalid_image_raises(self):
         """图片格式不合法 → ImageValidationError。"""

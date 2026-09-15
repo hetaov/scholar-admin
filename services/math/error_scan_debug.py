@@ -21,6 +21,8 @@ from typing import Any
 from services.database import CURRICULUM_NODE_COLLECTION
 from services.math.error_scanner import (
     EVAL_CONFIDENCE_THRESHOLD,
+    EXTRA_AI_TEXTBOOK_ID,
+    EXTRA_AI_UNCLASSIFIED,
     ImageTooLargeError,
     ImageValidationError,
     JudgeNotConfiguredError,
@@ -216,14 +218,19 @@ async def _assemble_dry_run_items(
     candidates: list[dict[str, Any]],
     textbook_id: str,
     confidence_threshold: float,
-) -> list[dict[str, Any]]:
-    """组装干跑 items[]（与生产 classify_scan_upload 的 items[] 结构对齐）。
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """组装干跑 items[] + decisions[]（与生产 classify_scan_upload 对齐）。
 
     与生产差异：
     - **不调 _ensure_extra_ai_node**（生产会建 EXTRA_AI 节点）；干跑用纯函数
       _extra_ai_node_code 生成预演 node_code（xai_ 前缀），但**不落库**。
     - **不调 _write_error_record**；error_record_id 恒为空串（不落库）。
-    - match_type 四值：exact / renamed / extra_ai / none（B05 门控组装用）。
+    - decisions[] 追加 match_type 四值 + would_write/would_create 预演标志，
+      让管理台直观看到「生产会怎样落库」而不真的落。
+
+    Returns:
+        (items, decisions) —— items 与生产 _to_public_classify 字段对齐；
+        decisions 每项含 judge_* 原始字段 + match_type + 门控结果 + 预演标志。
     """
     from services.math.error_scanner import (
         EXTRA_AI_NODE_CODE_PREFIX,
@@ -234,7 +241,9 @@ async def _assemble_dry_run_items(
     )
 
     items: list[dict[str, Any]] = []
-    for item in judge_result.get("items") or []:
+    decisions: list[dict[str, Any]] = []
+
+    for idx, item in enumerate(judge_result.get("items") or []):
         kp_name = (item.get("knowledge_point_name") or "").strip()
         error_type = item.get("error_type") or ""
         confidence = float(item.get("confidence") or 0)
@@ -246,26 +255,33 @@ async def _assemble_dry_run_items(
         extra_ai = False
         final_kp = kp_name
         renamed_from = ""
+        match_type = "none"
+        preview_node_code = ""
 
-        if not exact and kp_name and confidence >= confidence_threshold and error_type:
+        if exact:
+            match_type = "exact"
+        elif kp_name and confidence >= confidence_threshold and error_type:
             near = _nearest_candidates(kp_name, candidates, limit=1)
             if near:
                 matched = near[0]
                 final_kp = near[0]["kp_name"]
                 renamed_from = kp_name
+                match_type = "renamed"
             else:
                 # 干跑：纯函数预演 EXTRA_AI node_code，不调 _ensure_extra_ai_node
                 extra_ai = True
+                preview_node_code = _extra_ai_node_code(kp_name)
                 matched = {
-                    "node_code": _extra_ai_node_code(kp_name),
+                    "node_code": preview_node_code,
                     "kp_name": kp_name,
                     "title": "未分类",
-                    "textbook_id": EXTRA_AI_NODE_CODE_PREFIX.rstrip("_"),
+                    "textbook_id": EXTRA_AI_TEXTBOOK_ID,
                     "grade": "",
                     "semester": "",
-                    "unit_title": "未分类",
-                    "lesson_title": "未分类",
+                    "unit_title": EXTRA_AI_UNCLASSIFIED,
+                    "lesson_title": EXTRA_AI_UNCLASSIFIED,
                 }
+                match_type = "extra_ai"
 
         # 疑似正式教材改挂候选（与生产同构，不持久化）
         candidate_hits: list[dict[str, Any]] = []
@@ -274,6 +290,9 @@ async def _assemble_dry_run_items(
                 [n for n in (item.get("candidate_hits") or []) if n] or [kp_name],
                 candidates,
             )
+
+        # 门控判定（与生产口径一致）
+        passed_gate = bool(matched) and confidence >= confidence_threshold and bool(error_type)
 
         # 组装 item（与生产 _to_public_classify 字段对齐）
         item_out: dict[str, Any] = {
@@ -297,7 +316,30 @@ async def _assemble_dry_run_items(
 
         items.append(item_out)
 
-    return items
+        # 组装 decision（debug.decisions[] 每项）
+        chain_anchor = _chain_anchor_fields(matched) if matched else {}
+        decisions.append({
+            "index": idx,
+            "judge_kp_name": kp_name,
+            "judge_error_type": error_type,
+            "judge_confidence": confidence,
+            "judge_question_text": question_text,
+            "judge_ocr_block_id": ocr_block_id,
+            "match_type": match_type,
+            "matched_kp_name": matched.get("kp_name") or "" if matched else "",
+            "matched_node_code": matched.get("node_code") or "" if matched else "",
+            "confidence": confidence,
+            "threshold": confidence_threshold,
+            "passed_gate": passed_gate,
+            "would_write_error_record": passed_gate,
+            "would_create_extra_ai_node": extra_ai,
+            "preview_node_code": preview_node_code,
+            "chain_anchor": chain_anchor,
+            "exam_backlink_to": None,  # M13 双源知识锚，干跑不计算
+            "candidate_hits": candidate_hits,
+        })
+
+    return items, decisions
 
 
 async def recognize_error_scan_dry_run(
@@ -351,15 +393,19 @@ async def recognize_error_scan_dry_run(
     judge_result = await _call_classify_judge(ocr_text, candidates)
     judge_ms = int((time.time() - t_judge_start) * 1000)
 
-    # 6. 组装 items[]（B04 主干）
-    items = await _assemble_dry_run_items(
+    # 6. 组装 items[] + decisions[]（B04 主干 + B05 门控四分支）
+    items, decisions = await _assemble_dry_run_items(
         judge_result, candidates, textbook_id, threshold
     )
 
-    # 7. 组装响应（B04 基础版，B05/B06 会补充 debug 段）
+    # 7. 顶层 status：任一 decision 未通过门控 → needs_review
+    all_passed = all(d["passed_gate"] for d in decisions) if decisions else True
+    top_status = "success" if all_passed else "needs_review"
+
+    # 8. 组装响应（B04 基础版 + B05 decisions[]）
     data = {
         "scan_id": scan_id,
-        "status": "success",
+        "status": top_status,
         "items": items,
         "debug": {
             "dry_run": True,
@@ -401,7 +447,7 @@ async def recognize_error_scan_dry_run(
                 "attempts": 1,  # B06 填充
                 "disable_thinking": LLM_JUDGE_DISABLE_THINKING,
             },
-            "decisions": [],  # B05 填充
+            "decisions": decisions,  # B05 门控四分支
             "compare": None,  # B06 填充
         },
     }
