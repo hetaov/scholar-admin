@@ -25,8 +25,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX
-from services.auth import require_paid_user
+from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX, MATH_SCAN_DEBUG_ENABLED
+from services.auth import require_debug_access, require_paid_user
 from services.background_tasks import (
     start_dialogue_cleanup_loop,
     start_dialogue_gen_cleanup_loop,
@@ -53,6 +53,7 @@ from services.routes_training import router as training_router
 from services.routes_tts import router as tts_router
 from services.routes_planner import router as planner_router
 from services.routes_math import router as math_router
+from services.routes_math_debug import router as math_debug_router
 from services.routes_english import router as english_router
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,15 @@ for _router in _FREE_ROUTERS:
 
 for _router in _PAID_ROUTERS:
     app.include_router(_router, dependencies=[Depends(require_paid_user)])
+
+# 数学错题识别 Admin 调试干跑（api-contract §3.15）
+# 开关关 → 路由不注册（404 而非 403，避免信息泄露）
+# 开关开 → require_debug_access 二级门控（token 校验）
+if MATH_SCAN_DEBUG_ENABLED:
+    app.include_router(
+        math_debug_router, dependencies=[Depends(require_debug_access)]
+    )
+    logger.info("[scan][debug] math_debug_router 已条件注册（MATH_SCAN_DEBUG_ENABLED=1）")
 
 # ---------------------------------------------------------------------------
 # F3.2 练习纸渲染产物静态服务（PDF/PNG/预览图；目录启动时创建）

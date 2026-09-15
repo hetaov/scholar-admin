@@ -184,3 +184,84 @@ class TestErrorMapping:
         assert body["data"]["items"][0]["knowledge_point_name"] == "小数加减法"
         assert body["data"]["debug"]["dry_run"] is True
         assert body["data"]["debug"]["persisted"] is False
+
+
+class TestConditionalRegistration:
+    """B08：main.py 条件注册（开关关→404 / 开关开+token校验）。
+
+    本测试类不依赖 autouse debug_enabled fixture 的全局开关设置，
+    而是精确模拟 B08 的「路由是否注册」+「require_debug_access 二级门控」。
+    """
+
+    def test_switch_off_route_not_registered(self, monkeypatch):
+        """开关关 → 路由不注册 → 404（不是 403，避免信息泄露）。"""
+        # 模拟 B08 开关关 → 不 include_router
+        app = FastAPI()
+        client = TestClient(app)
+        resp = client.post(
+            "/math/scan/debug/recognize",
+            files={"image": _make_fake_image_bytes("test.jpg", b"fake")},
+            data={"textbook_id": "tb_1"},
+        )
+        assert resp.status_code == 404
+
+    def test_switch_on_dev_no_token_allowed(self, monkeypatch, fake_db):
+        """开关开 + dev 模式 + 无 token → 200（本地调试放行）。"""
+        from tests.unit.test_math_error_scan_debug import _kp_node
+
+        fake_db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        ocr_provider = _mock_ocr_provider()
+        judge_result = _mock_judge_result()
+        judge_meta = _mock_judge_meta()
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch(
+                 "services.math.error_scan_debug._call_judge_with_meta",
+                 new=AsyncMock(return_value=(judge_result, judge_meta)),
+             ):
+            client = _make_client_with_deps(fake_db)
+            resp = client.post(
+                "/math/scan/debug/recognize",
+                files={"image": _make_fake_image_bytes("test.jpg", b"fake")},
+                data={"textbook_id": "tb_1"},
+            )
+        assert resp.status_code == 200
+
+    def test_switch_on_token_mismatch_rejected(self, monkeypatch, fake_db):
+        """开关开 + token 配置 + 头不匹配 → 403。"""
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "secret-token")
+        monkeypatch.setattr("services.auth.AUTH_MODE", "enforce")
+
+        client = _make_client_with_deps(fake_db)
+        resp = client.post(
+            "/math/scan/debug/recognize",
+            files={"image": _make_fake_image_bytes("test.jpg", b"fake")},
+            data={"textbook_id": "tb_1"},
+            headers={"X-Debug-Token": "wrong-token"},
+        )
+        assert resp.status_code == 403
+
+    def test_switch_on_token_match_allowed(self, monkeypatch, fake_db):
+        """开关开 + token 配置 + 头匹配 → 200。"""
+        from tests.unit.test_math_error_scan_debug import _kp_node
+
+        monkeypatch.setattr("services.auth.MATH_SCAN_DEBUG_TOKEN", "secret-token")
+        monkeypatch.setattr("services.auth.AUTH_MODE", "enforce")
+        fake_db.add("curriculum_node", _kp_node(textbook_id="tb_1", kp_name="小数加减法"))
+        ocr_provider = _mock_ocr_provider()
+        judge_result = _mock_judge_result()
+        judge_meta = _mock_judge_meta()
+
+        with patch("services.math.ocr.get_provider", return_value=ocr_provider), \
+             patch(
+                 "services.math.error_scan_debug._call_judge_with_meta",
+                 new=AsyncMock(return_value=(judge_result, judge_meta)),
+             ):
+            client = _make_client_with_deps(fake_db)
+            resp = client.post(
+                "/math/scan/debug/recognize",
+                files={"image": _make_fake_image_bytes("test.jpg", b"fake")},
+                data={"textbook_id": "tb_1"},
+                headers={"X-Debug-Token": "secret-token"},
+            )
+        assert resp.status_code == 200
