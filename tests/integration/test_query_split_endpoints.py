@@ -65,7 +65,7 @@ class TestGetTextbookLessons:
         # skills: 各能力独立聚合
         assert prog["skills"]["translation"] == pytest.approx(0.5)  # s1=learned, s2=learning
         # listening: l1 共 2 句, 仅 s1 有记录(learning) → 1/(3*2)
-        assert prog["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
+        assert prog["skills"]["speaking"] == pytest.approx(0.1667, abs=1e-4)
 
     def test_lesson_skills_include_conversation(self, make_client, fake_db):
         """每课 progress.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
@@ -140,8 +140,8 @@ class TestGetLessonSentences:
         assert s1["translation"] == "译s1"
         # 乐观聚合 pick: translation(learned, 80) > listening(learning, 30) → learned=2
         assert s1["status"] == 2
-        assert s1["skills"] == {"translation": 2, "listening": 1}
-        assert s1["weakest_skill"] == "listening"
+        assert s1["skills"] == {"translation": 2, "speaking": 1}
+        assert s1["weakest_skill"] == "speaking"
         assert s1["review_count"] == 2
         assert s1["next_review_at"] is not None  # int 时间戳 → ISO
         s2 = data["sentences"][1]
@@ -158,7 +158,7 @@ class TestGetLessonSentences:
         assert summary["mastery"] == pytest.approx(0.5)  # (learning=1 + learned=2)/(3*2)
         assert summary["skills"]["translation"] == pytest.approx(0.5)  # s1=learned, s2=learning
         # listening: 该课 2 句仅 s1 有记录(learning) → 1/(3*2)
-        assert summary["skills"]["listening"] == pytest.approx(0.1667, abs=1e-4)
+        assert summary["skills"]["speaking"] == pytest.approx(0.1667, abs=1e-4)
 
     def test_summary_skills_include_conversation(self, make_client, fake_db):
         """概览 summary.skills 纳入对话能力：与句子级 skills 口径一致（概览不缺对话）。"""
@@ -291,10 +291,11 @@ class TestQueryCountOptimization:
 
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
-        assert calls["n"] == 5  # chapters + lessons + sentences + states + attempts
+        # v4（R2）：+1 次 sentence_group（按组短板候选，book 级一次查询，不按课 N+1）
+        assert calls["n"] == 6  # chapters + lessons + sentences + sentence_group + states + attempts
 
     def test_query_count_scales_with_lessons_only_via_batch(self, make_client, fake_db):
-        """扩大教材规模（3 章 6 课 12 句）查询次数仍为 5，验证批量 $in 生效。"""
+        """扩大教材规模（3 章 6 课 12 句）查询次数仍为 6（v4 起 +1 次 sentence_group），验证批量 $in 生效。"""
         for i in range(1, 4):
             fake_db.add("chapter", {
                 "chapter_id": f"c{i}", "textbook_id": "tb_1", "title": f"Ch{i}", "order": i,
@@ -324,7 +325,7 @@ class TestQueryCountOptimization:
         resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
         assert resp.status_code == 200
         assert len(resp.json()["data"]["lessons"]) == 6
-        assert calls["n"] == 5
+        assert calls["n"] == 6
 
 
 class TestGetLessonGroups:
@@ -396,8 +397,8 @@ class TestGetLessonGroups:
         entries = {s["sentence_id"]: s for g in data["groups"] for s in g["sentences"]}
         s1 = entries["s1"]
         assert s1["status"] == 2  # learned（乐观）
-        assert s1["skills"] == {"translation": 2, "listening": 1}
-        assert s1["weakest_skill"] == "listening"
+        assert s1["skills"] == {"translation": 2, "speaking": 1}
+        assert s1["weakest_skill"] == "speaking"
         assert s1["review_count"] == 2
         assert s1["next_review_at"] is not None
         assert s1["is_canonical"] is True  # 未去重 → canonical
@@ -486,3 +487,100 @@ class TestGetLessonSentencesM3Fields:
         assert s2["group_title"] == "Yes/No 应答组"
         assert s2["is_canonical"] is False  # 重复句
         assert s2["canonical_sentence_id"] == "s1"
+
+class TestLessonsReviewGroups:
+    """v4（R4/V4-5）：lessons 端点 summary.review_groups —— 按组复习推荐候选。
+
+    口径：候选 = 已学过的组（learned_sentence_count >= 1）；纳入 = 未掌握（木桶 < 3）或过半到期；
+    排序 = 未掌握优先 → 到期句数降序 → 木桶升序 → 课内 order；**禁止** min(next_review_at)（D6）。
+    """
+
+    PAST = 1000000000  # 已到期（秒级时间戳，远早于当日末）
+
+    def _seed(self, fake_db):
+        """5 句 / 4 组：
+        - grp_a：s1(learned, 到期) + s2(learning) → 木桶 1、到期 1 句  → 入选（未掌握）
+        - grp_e：s5(learning)                     → 木桶 1、到期 0 句  → 入选（同木桶，排序应在 grp_a 之后）
+        - grp_b：s3(mastered, 到期)               → 木桶 3                  → 仅当「过半到期」可按 R4 入选
+        - grp_c：s4(无学习记录)                   → 未学句                → 不入选
+        """
+        seed_content(
+            fake_db,
+            lesson_ids=("l1",),
+            sentence_ids=("s1", "s2", "s3", "s4", "s5"),
+            include_text=False,
+        )
+        for order, (gid, sids) in enumerate((
+            ("grp_a", ["s1", "s2"]),
+            ("grp_e", ["s5"]),
+            ("grp_b", ["s3"]),
+            ("grp_c", ["s4"]),
+        )):
+            fake_db.add("sentence_group", {
+                "group_id": gid, "_id": gid, "textbook_id": "tb_1", "lesson_id": "l1",
+                "title": gid, "type": "stand_alone", "order_in_lesson": order,
+                "sentence_ids": list(sids),
+            })
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s1", "skill_code": "translation",
+            "status": "learned", "mastery_score": 70, "attempt_count": 2,
+            "next_review_at": self.PAST,
+        })
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s2", "skill_code": "translation",
+            "status": "learning", "mastery_score": 40, "attempt_count": 1,
+        })
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s3", "skill_code": "translation",
+            "status": "mastered", "mastery_score": 95, "attempt_count": 3,
+            "next_review_at": self.PAST,
+        })
+        fake_db.add("skill_state", {
+            "scholar_id": "scholar_1", "sentence_id": "s5", "skill_code": "translation",
+            "status": "learning", "mastery_score": 30, "attempt_count": 1,
+        })
+
+    def _review_groups(self, make_client, fake_db):
+        self._seed(fake_db)
+        client = make_client(tracking_router)
+        resp = client.get("/scholar/scholar_1/textbooks/tb_1/lessons")
+        assert resp.status_code == 200
+        return resp.json()["data"]["summary"]["review_groups"]
+
+    def test_review_groups_include_unmastered_learned_and_exclude_unlearned(self, make_client, fake_db):
+        groups = self._review_groups(make_client, fake_db)
+        by_id = {g["group_id"]: g for g in groups}
+        # 未掌握且已学 → 入选
+        assert "grp_a" in by_id
+        grp_a = by_id["grp_a"]
+        assert grp_a["group_status"] == 1          # 木桶 = min(learned=2, learning=1)
+        assert grp_a["sentence_count"] == 2
+        assert grp_a["learned_sentence_count"] == 2
+        assert grp_a["due_sentence_count"] == 1    # s1 到期
+        # v4 实现期裁定：`half_due` 已撤（已掌握句免于复习 → 该分支不可达），到期句数仅作排序键
+        assert grp_a["lesson_id"] == "l1"
+        assert isinstance(grp_a["group_mastery"], float)
+        # 全未学句的组 → 不入选
+        assert "grp_c" not in by_id
+
+    def test_review_groups_sorted_by_unmastered_then_due_desc(self, make_client, fake_db):
+        groups = self._review_groups(make_client, fake_db)
+        ids = [g["group_id"] for g in groups]
+        # 未掌握优先（两组木桶同为 1）→ 到期句数降序 → grp_a（到期 1）在 grp_e（到期 0）之前
+        assert ids.index("grp_a") < ids.index("grp_e")
+
+    def test_review_groups_mastered_due_group_included(self, make_client, fake_db):
+        """**已掌握但过半到期的组也应入选**（v4 遗忘曲线口径，用户 2026-09-21 拍板）。
+
+        `group_view._is_review_due` **不排除 mastered**（与 `/tracking/review-plan` 的句级
+        「mastered 免复习」谓词显式不同）：已掌握内容随间隔到期同样需要复习——产品目标 = 学习者的遗忘曲线。
+        """
+        groups = self._review_groups(make_client, fake_db)
+        by_id = {g["group_id"]: g for g in groups}
+        assert "grp_b" in by_id, "已掌握但过半到期的组应入选复习推荐"
+        assert by_id["grp_b"]["group_status"] >= 3          # 木桶已达掌握
+        assert by_id["grp_b"]["due_sentence_count"] > 0     # 到期句数含已掌握句
+        # 未掌握优先：未掌握组的排序键（0）小于已掌握组（1）
+        statuses = [g["group_status"] < 3 for g in groups]
+        assert statuses == sorted(statuses, reverse=True)
+

@@ -12,9 +12,11 @@ from fastapi import APIRouter, HTTPException, Query
 
 from services.dependencies import get_db
 from services.english import LessonNotFoundError
-from services.english.group_view import getLessonSentenceGroups
+from services.english.group_view import aggregate_group_progress, getLessonSentenceGroups
 from services.events import STUDY_ATTEMPT
 from services.models_learning import (
+    PUBLIC_SKILL_CODES,
+    canonical_skill_code,
     SKILL_STATE,
     STATUS_LEARNED,
     STATUS_MASTERED,
@@ -30,6 +32,7 @@ from services.models_content import (
     get_sentences_by_lesson,
     get_sentences_by_lesson_ids,
     get_sentence_groups_by_lesson,
+    get_sentence_groups_by_textbook,
     query_all_pages,
 )
 from services.models_scholar_book import (
@@ -285,12 +288,15 @@ async def get_scholar_books(
         #    并记录各教材的句子集合用于内存过滤学习数据
         content_by_book: dict[str, tuple[list[dict], list[dict], list[dict]]] = {}
         sentence_ids_by_book: dict[str, set[str]] = {}
+        # v4（R1）：组维度计数需要句子→组映射；每本书一次查询（不按课 N+1）
+        groups_by_book: dict[str, list[dict]] = {}
         for tid in textbook_ids:
             chapters, lessons, sentences = await _load_book_content(db, tid)
             content_by_book[tid] = (chapters, lessons, sentences)
             sentence_ids_by_book[tid] = {
                 s.get("sentence_id") for s in sentences if s.get("sentence_id")
             }
+            groups_by_book[tid] = await get_sentence_groups_by_textbook(db, tid)
 
         # 2. 书名批量 $in（textbook_v2 一次取回）
         titles = await _fetch_textbook_titles(db, textbook_ids)
@@ -359,7 +365,7 @@ async def get_scholar_books(
             for code in _SKILL_CODES:
                 code_states = [
                     st for st in all_book_states
-                    if st.get("skill_code") == code
+                    if canonical_skill_code(st.get("skill_code")) == code
                 ]
                 if code_states:
                     skills[code] = mastery_ratio(
@@ -367,6 +373,16 @@ async def get_scholar_books(
                         summary.get("total_sentence_count", 0),
                     )
             summary["skills"] = skills
+            # v4（R1）：组维度计数（派生口径见 data-model-contract §4.22；与能力维度无关，
+            # 故用 all_book_states 而非 skill_code 过滤后的 book_states）
+            group_agg = aggregate_group_progress(
+                groups=groups_by_book.get(textbook_id, []),
+                sentences=sentences,
+                states=all_book_states,
+            )
+            summary["learned_group_count"] = group_agg["learned_group_count"]
+            summary["mastered_group_count"] = group_agg["mastered_group_count"]
+            summary["total_group_count"] = group_agg["total_group_count"]
             enriched.append(
                 {
                     "textbook_id": textbook_id,
@@ -399,10 +415,8 @@ async def get_scholar_books(
 # ==================== 查询接口拆分（原 POST /tracking/stats 已移除，Phase 6 按页拆分） ====================
 
 
-# 能力全集：含对话能力（前端 SKILL_ORDER 四能力 = translation/conversation/listening/speaking，
-# 另有内部 reading）。接口 2 每课 skills 与接口 3 summary.skills 均按此聚合，保证概览与
-# 句子级 skills（全量 skill_state）口径一致，避免「列表项有对话、概览缺对话」。
-_SKILL_CODES = ("translation", "conversation", "listening", "reading", "speaking")
+# 对外统计能力集合。存量 listening 在读取时归一化为 speaking，reading 不进入该契约。
+_SKILL_CODES = PUBLIC_SKILL_CODES
 
 
 def _to_iso(timestamp) -> str | None:
@@ -422,6 +436,94 @@ async def _find_lesson_by_id(db, textbook_id: str, lesson_id: str) -> dict | Non
         if le.get("lesson_id") == lesson_id:
             return le
     return None
+
+
+def _build_review_groups(
+    groups: list[dict],
+    sentences: list[dict],
+    states: list[dict],
+    limit: int = 20,
+) -> list[dict]:
+    """按组复习推荐候选（v4 R4 规则版；口径见 api-contract §3.1 / data-model-contract §4.22）。
+
+    需求 R4：「以后学习过的组，按照学习时间，和记忆规律，推送该复习哪些组」——
+    候选 = **已学过的组**（组内至少 1 句已学 `status >= 1`），**含已掌握组**：
+    产品目标是学习者的**遗忘曲线**，已掌握的内容同样会随间隔到期需要复习（用户 2026-09-21 拍板
+    「已掌握组也按间隔推回来，先按简单规则」）。
+
+    纳入判据（**禁止用 `min(next_review_at)` 当组到期判据**——最弱句会让组永久到期，D6）：
+    - 未掌握（组木桶 `status < 3`）→ 纳入；或
+    - **过半到期**（简单规则）= `due_sentence_count >= ceil(sentence_count / 2)`
+      其中到期口径见 `group_view._is_review_due`：**含已掌握句**（与 `/tracking/review-plan` 的句级
+      「mastered 免复习」谓词显式不同，两者各有消费方）。
+    排序：未掌握优先 → 到期句数降序 → 木桶 `status` 升序 → 课内 `order_in_lesson` 升序。
+    """
+    rows = aggregate_group_progress(groups=groups, sentences=sentences, states=states)["groups"]
+    out = []
+    for r in rows:
+        if r.get("learned_sentence_count", 0) < 1:
+            continue
+        total = r.get("sentence_count", 0) or 0
+        # 过半到期（简单规则）：ceil(total/2)
+        half_due = total > 0 and r.get("group_due_count", 0) >= -(-total // 2)
+        if r.get("group_status", 0) < 3 or half_due:
+            out.append(r)
+    out.sort(key=lambda r: (
+        0 if r.get("group_status", 0) < 3 else 1,
+        -r.get("group_due_count", 0),
+        r.get("group_status", 0),
+        r.get("order_in_lesson") if isinstance(r.get("order_in_lesson"), int) else 0,
+    ))
+    items = []
+    for r in out[:limit]:
+        items.append({
+            "group_id": r.get("group_id"),
+            "group_title": r.get("group_title") or "",
+            "lesson_id": r.get("lesson_id") or "",
+            "group_status": r.get("group_status", 0),
+            "group_mastery": round(float(r.get("group_mastery") or 0.0), 4),
+            "sentence_count": r.get("sentence_count", 0),
+            "learned_sentence_count": r.get("learned_sentence_count", 0),
+            "due_sentence_count": r.get("group_due_count", 0),
+        })
+    return items
+
+
+def _build_weak_groups(
+    groups: list[dict],
+    sentences: list[dict],
+    states: list[dict],
+    textbook_id: str,
+    limit: int = 20,
+) -> list[dict]:
+    """按组短板候选（v4 R2；口径见 data-model-contract §4.22 / api-contract §3.1）。
+
+    候选 = 组木桶 `status < 3`（组评测不高）且组内至少 1 句已学（`status >= 1`）；
+    排序 = `group_status` 升序 → 有到期句优先 → 课内 `order_in_lesson` 升序；截断 limit。
+    """
+    rows = aggregate_group_progress(groups=groups, sentences=sentences, states=states)["groups"]
+    weak = [
+        r for r in rows
+        if r.get("group_status", 0) < 3 and r.get("learned_sentence_count", 0) >= 1
+    ]
+    weak.sort(key=lambda r: (
+        r.get("group_status", 0),
+        0 if r.get("group_due_count", 0) > 0 else 1,
+        r.get("order_in_lesson") if isinstance(r.get("order_in_lesson"), int) else 0,
+    ))
+    out = []
+    for r in weak[:limit]:
+        out.append({
+            "group_id": r.get("group_id"),
+            "group_title": r.get("group_title") or "",
+            "lesson_id": r.get("lesson_id") or "",
+            "group_status": r.get("group_status", 0),
+            "group_mastery": round(float(r.get("group_mastery") or 0.0), 4),
+            "sentence_count": r.get("sentence_count", 0),
+            "learned_sentence_count": r.get("learned_sentence_count", 0),
+            "due_sentence_count": r.get("group_due_count", 0),
+        })
+    return out
 
 
 @router.get("/scholar/{scholar_id}/textbooks/{textbook_id}/lessons")
@@ -472,6 +574,8 @@ async def get_textbook_lessons(
         # 将原 5 次重复聚合查询（含逐章/逐课 N+1）压缩为固定 5 次查询，
         # 查询次数与教材规模无关。
         chapters, lessons, sentences = await _load_book_content(db, textbook_id)
+        # v4（R2）：按组短板候选需要句子→组映射（book 级一次查询，不按课 N+1）
+        groups_by_book = await get_sentence_groups_by_textbook(db, textbook_id)
         states = await query_all_pages(
             db,
             collection=SKILL_STATE,
@@ -483,6 +587,8 @@ async def get_textbook_lessons(
                 "status": 1,
                 "mastery_score": 1,
                 "attempt_count": 1,
+                # v4（R2）：组短板候选需要到期数（口径同 §3.7 review-plan）
+                "next_review_at": 1,
             },
         )
         attempts = await query_all_pages(
@@ -524,14 +630,17 @@ async def get_textbook_lessons(
         # 各能力独立聚合：仅内存内按 skill_code 过滤，不再重复触库
         states_by_skill: dict[str, list[dict]] = {c: [] for c in _SKILL_CODES}
         for st in states:
-            c = st.get("skill_code")
+            c = canonical_skill_code(st.get("skill_code"))
             if c in states_by_skill:
-                states_by_skill[c].append(st)
+                # M5 收敛配套：落桶时**同时归一化行内 skill_code**——否则下游
+                # pick_state(states, code) 仍按原始码过滤（如 listening），
+                # 与桶键（speaking）不一致 → 该能力视图取不到数据（历史 listening 系丢失）
+                states_by_skill[c].append({**st, "skill_code": c})
         attempts_by_skill: dict[str, list[dict]] = {c: [] for c in _SKILL_CODES}
         for a in attempts:
-            c = a.get("skill_code")
+            c = canonical_skill_code(a.get("skill_code"))
             if c in attempts_by_skill:
-                attempts_by_skill[c].append(a)
+                attempts_by_skill[c].append({**a, "skill_code": c})
 
         skill_views: dict[str, dict[str, dict]] = {}
         for code in _SKILL_CODES:
@@ -601,6 +710,11 @@ async def get_textbook_lessons(
                     summary_raw.get("mastery_distribution", {}),
                     summary_raw.get("total_sentence_count", 0),
                 ),
+                # v4（R2）：按组短板候选——候选 = 组木桶 status < 3 且有已学句；
+                # 排序 = group_status 升序 → 有到期句优先 → 课内 order（data-model §4.22 派生，无新增存储）
+                "weak_groups": _build_weak_groups(groups_by_book, sentences, states, textbook_id),
+                # v4（R4 规则版）：按组复习推荐候选（含已掌握但到期的组）
+                "review_groups": _build_review_groups(groups_by_book, sentences, states),
             },
             "lessons": lessons_out,
         }
@@ -708,9 +822,9 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
             picked = picked_by_sentence.get(sid)
             s_states = states_by_sentence.get(sid, [])
             skills = {
-                st.get("skill_code"): status_to_int(st.get("status"))
+                canonical_skill_code(st.get("skill_code")): status_to_int(st.get("status"))
                 for st in s_states
-                if st.get("skill_code")
+                if canonical_skill_code(st.get("skill_code"))
             }
             if picked and picked.get("status") in (STATUS_LEARNED, STATUS_MASTERED):
                 learned += 1
@@ -742,7 +856,8 @@ async def get_lesson_sentences(scholar_id: str, textbook_id: str, lesson_id: str
         for code in _SKILL_CODES:
             code_states = [
                 s for s in states
-                if s.get("skill_code") == code and s.get("sentence_id") in sentence_ids
+                if canonical_skill_code(s.get("skill_code")) == code
+                and s.get("sentence_id") in sentence_ids
             ]
             if code_states:
                 skill_dist[code] = mastery_ratio(mastery_distribution(code_states), total_sentences)
@@ -978,9 +1093,9 @@ async def get_review_plan(data: dict):
             s = content_by_id.get(sid) or {}
             s_states = states_by_sentence.get(sid, [])
             skills = {
-                st.get("skill_code"): status_to_int(st.get("status"))
+                canonical_skill_code(st.get("skill_code")): status_to_int(st.get("status"))
                 for st in s_states
-                if st.get("skill_code")
+                if canonical_skill_code(st.get("skill_code"))
             }
             queue.append({
                 "sentence_id": sid,
@@ -1125,9 +1240,9 @@ async def get_weakness_plan(data: dict):
             s = content_by_id.get(sid) or {}
             s_states = states_by_sentence.get(sid, [])
             skills = {
-                st.get("skill_code"): status_to_int(st.get("status"))
+                canonical_skill_code(st.get("skill_code")): status_to_int(st.get("status"))
                 for st in s_states
-                if st.get("skill_code")
+                if canonical_skill_code(st.get("skill_code"))
             }
             weakest = min(skills, key=skills.get) if skills else None
             queue.append({

@@ -252,6 +252,83 @@ class TestGetBooks:
         assert summary["learned_sentence_count"] == 0
         assert summary["total_attempt_count"] == 0
 
+    # ==================== v4（R1）：组维度计数（summary.learned/mastered/total_group_count） ====================
+
+    def _seed_three_groups(self, fake_db):
+        """三个组：g1 全 mastered（木桶 3）/ g2 mastered+learning（木桶 1）/ g3 全未学（木桶 0）。"""
+        seed_content(
+            fake_db,
+            lesson_ids=("l1",),
+            sentence_ids=("s1", "s2", "s3", "s4", "s5"),
+            include_text=False,
+        )
+        for gid, sids in (("grp_g1", ["s1", "s2"]), ("grp_g2", ["s3", "s4"]), ("grp_g3", ["s5"])):
+            fake_db.add("sentence_group", {
+                "group_id": gid,
+                "_id": gid,
+                "textbook_id": "tb_1",
+                "lesson_id": "l1",
+                "title": gid,
+                "type": "stand_alone",
+                "order_in_lesson": 0,
+                "sentence_ids": sids,
+            })
+        for sid, status, mastery in (
+            ("s1", "mastered", 90), ("s2", "mastered", 85),
+            ("s3", "mastered", 80), ("s4", "learning", 40),
+        ):
+            fake_db.add("skill_state", {
+                "scholar_id": "s1", "sentence_id": sid, "skill_code": "translation",
+                "status": status, "mastery_score": mastery, "attempt_count": 1,
+            })
+
+    def test_group_counts_bucket_min(self, make_client, fake_db):
+        """组木桶口径：已学习组（>=1）2 个、已掌握组（>=3）1 个、总数 3。"""
+        self._seed_three_groups(fake_db)
+        client = make_client(tracking_router)
+        client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
+        summary = client.get("/scholar/s1/books").json()["data"]["books"][0]["summary"]
+        assert summary["learned_group_count"] == 2
+        assert summary["mastered_group_count"] == 1
+        assert summary["total_group_count"] == 3
+
+    def test_group_counts_ignore_skill_code_filter(self, make_client, fake_db):
+        """组维度与能力维度无关：带 skill_code 查询参数时计数不变。"""
+        self._seed_three_groups(fake_db)
+        client = make_client(tracking_router)
+        client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
+        plain = client.get("/scholar/s1/books").json()["data"]["books"][0]["summary"]
+        filtered = client.get(
+            "/scholar/s1/books", params={"skill_code": "translation"}
+        ).json()["data"]["books"][0]["summary"]
+        assert filtered["learned_group_count"] == plain["learned_group_count"] == 2
+        assert filtered["mastered_group_count"] == plain["mastered_group_count"] == 1
+        assert filtered["total_group_count"] == plain["total_group_count"] == 3
+
+    def test_group_counts_legacy_when_no_sentence_group(self, make_client, fake_db):
+        """无 sentence_group 的课次 → 读兼容层逐句成组（句数 = 组数）。"""
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1", "s2"), include_text=False)
+        fake_db.add("skill_state", {
+            "scholar_id": "s1", "sentence_id": "s1", "skill_code": "translation",
+            "status": "learned", "mastery_score": 70, "attempt_count": 1,
+        })
+        client = make_client(tracking_router)
+        client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
+        summary = client.get("/scholar/s1/books").json()["data"]["books"][0]["summary"]
+        assert summary["total_group_count"] == 2   # s1 / s2 各成一组
+        assert summary["learned_group_count"] == 1  # 仅 s1 已学
+        assert summary["mastered_group_count"] == 0
+
+    def test_group_counts_zero_without_learning(self, make_client, fake_db):
+        """空态：有内容但无学习记录 → 组总数为句数（legacy），已学习/已掌握为 0。"""
+        seed_content(fake_db, lesson_ids=("l1",), sentence_ids=("s1",), include_text=False)
+        client = make_client(tracking_router)
+        client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
+        summary = client.get("/scholar/s1/books").json()["data"]["books"][0]["summary"]
+        assert summary["learned_group_count"] == 0
+        assert summary["mastered_group_count"] == 0
+        assert summary["total_group_count"] == 1
+
     def test_multiple_books_isolated(self, make_client, fake_db):
         client = make_client(tracking_router)
         client.put("/scholar/s1/books/tb_1/position", json={"current_lesson_id": "l1"})
@@ -273,8 +350,11 @@ class TestBooksQueryCount:
       独立聚合，各查 1 次 states + 1 次 attempts）；
     - 书名必须批量 $in（textbook_v2 一次取回，Phase 6 已移除旧表回退），
       不允许逐本查询。
-    查询次数公式：1(books) + 3×N(内容) + 1(书名) + 1(states) + 1(attempts)。
-    优化前本场景（2 本教材）需 1 + 2×(2 书名 + 5 聚合) = 15 次，优化后为 10 次。
+    查询次数公式：1(books) + 4×N(内容) + 1(书名) + 1(states) + 1(attempts)。
+    内容 4 项 = chapter / lesson / sentence_v2 / sentence_group（**2026-09-21 v4 R1**：组维度计数
+    需句子→组映射，按书一次取回，仍与教材规模无关；不做 per-lesson N+1）。
+    优化前本场景（2 本教材）需 1 + 2×(2 书名 + 5 聚合) = 15 次；内容不含 sentence_group 时为 10 次，
+    v4 起为 12 次。
     """
 
     def test_learning_data_fetched_once(self, make_client, fake_db):
@@ -315,8 +395,10 @@ class TestBooksQueryCount:
         # 学者级学习数据只查一次
         assert calls.count("skill_state") == 1
         assert calls.count("study_attempt") == 1
-        # 总查询 = 1(books) + 3×2(内容) + 1(书名: 批量 $in) + 1 + 1 = 10
-        assert len(calls) == 10
+        # 总查询 = 1(books) + 4×2(内容含 sentence_group) + 1(书名: 批量 $in) + 1 + 1 = 12
+        assert len(calls) == 12
+        # v4：组映射按书一次取回（非 per-lesson）
+        assert calls.count("sentence_group") == 2
         # 每本教材的 summary 独立：只有 tb_1 有 1 句 learned
         by_id = {b["textbook_id"]: b["summary"] for b in books}
         assert by_id["tb_1"]["total_sentence_count"] == 2

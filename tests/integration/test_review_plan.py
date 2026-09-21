@@ -93,8 +93,8 @@ class TestReviewPlan:
         assert s1["next_review_at"].startswith("2026-08-16T11:00:00")
         assert s1["status"] == 1  # learning
         # skills 全量列出(同句多能力),weakest 取 status 数字最小者
-        assert s1["skills"] == {"translation": 2, "listening": 1}
-        assert s1["weakest_skill"] == "listening"
+        assert s1["skills"] == {"translation": 2, "speaking": 1}
+        assert s1["weakest_skill"] == "speaking"  # M5：listening 归一为 speaking
 
     def test_sort_by_next_then_mastery(self, make_client, fake_db):
         """同到期时间按 mastery_score 升序(薄弱优先)。"""

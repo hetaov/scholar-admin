@@ -20,7 +20,9 @@ from services.english import SentenceNotFoundError
 from services.english.sentence_management import ensureSentenceSemanticKey
 from services.events import end_session, record_attempt, start_session
 from services.models_learning import (
+    PUBLIC_SKILL_CODES,
     DEFAULT_SKILL_CODE,
+    LEGACY_SKILL_CODE_MAP,
     SELF_EVAL_COOLDOWN_MS,
     SKILL_STATE,
     skill_state_id,
@@ -79,7 +81,20 @@ async def report_tracking_state(data: dict):
     if not sentence_id:
         raise HTTPException(status_code=400, detail="缺少参数 sentence_id")
 
-    skill_code = str(data.get("skill_code") or DEFAULT_SKILL_CODE).strip()
+    raw_skill_code = str(data.get("skill_code") or DEFAULT_SKILL_CODE).strip().lower()
+    if raw_skill_code in LEGACY_SKILL_CODE_MAP:
+        skill_code = LEGACY_SKILL_CODE_MAP[raw_skill_code]
+        logger.warning(
+            f"[deprecated-skill] {raw_skill_code} -> {skill_code}, "
+            f"scholar_id={scholar_id}, sentence_id={sentence_id}"
+        )
+    elif raw_skill_code in PUBLIC_SKILL_CODES:
+        skill_code = raw_skill_code
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法 skill_code: {raw_skill_code}（应为 translation/conversation/speaking）",
+        )
     time_spent = data.get("time_spent")
     source = str(data.get("source") or "").strip() or None
 

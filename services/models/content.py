@@ -254,6 +254,24 @@ async def get_sentence_groups_by_lesson(
     )
     return [normalize_sentence_group_doc(r) for r in result.get("records", [])]
 
+async def get_sentence_groups_by_textbook(
+    db,
+    textbook_id: str,
+    limit: int = 2000,
+) -> list[dict]:
+    """按教材查全部组（读侧经 normalize getter）。
+
+    v4 组维度聚合（api-contract §3.1 组计数 / data-model-contract §4.22）用：
+    一次查询取全教材分组，避免按课次 N+1；`sentence_group` 文档含 `textbook_id`。
+    """
+    result = await db.query(
+        collection=SENTENCE_GROUP,
+        where={"textbook_id": textbook_id},
+        limit=limit,
+    )
+    return [normalize_sentence_group_doc(r) for r in result.get("records", [])]
+
+
 
 # ---------------------------------------------------------------------------
 # M5 — sentence_semantic_key 集合模型（data-model-contract §4.15，2026-08-23 SOP ④ DM-G2）

@@ -30,6 +30,17 @@ from config import MIN_EVIDENCE
 SKILL = "skill"
 SKILL_STATE = "skill_state"
 
+# 对外统计与新写入的技能集合。存量 listening 只在读写边界归一化为 speaking。
+PUBLIC_SKILL_CODES = ("translation", "conversation", "speaking")
+LEGACY_SKILL_CODE_MAP = {"listening": "speaking"}
+
+
+def canonical_skill_code(skill_code: Any) -> str | None:
+    """将技能码归一化为当前三维口径；未知技能返回 None。"""
+    code = str(skill_code or "").strip().lower()
+    code = LEGACY_SKILL_CODE_MAP.get(code, code)
+    return code if code in PUBLIC_SKILL_CODES else None
+
 # ---------------------------------------------------------------------------
 # 状态枚举（新写入统一英文）
 # ---------------------------------------------------------------------------
@@ -147,23 +158,16 @@ SKILL_SEEDS: list[dict] = [
         "learned_threshold": 0.6,
     },
     {
-        "_id": "listening",
-        "skill_code": "listening",
-        "name": "听力",
+        "_id": "conversation",
+        "skill_code": "conversation",
+        "name": "对话",
         "mastery_threshold": 0.8,
         "learned_threshold": 0.6,
     },
     {
         "_id": "speaking",
         "skill_code": "speaking",
-        "name": "口语",
-        "mastery_threshold": 0.8,
-        "learned_threshold": 0.6,
-    },
-    {
-        "_id": "reading",
-        "skill_code": "reading",
-        "name": "阅读",
+        "name": "跟读",
         "mastery_threshold": 0.8,
         "learned_threshold": 0.6,
     },

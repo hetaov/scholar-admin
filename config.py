@@ -237,6 +237,24 @@ TRANSLATION_LLM_TIMEOUT_SECONDS = int(
     os.environ.get("TRANSLATION_LLM_TIMEOUT_SECONDS", 300)
 )
 
+# ==================== 复习推荐（v4 R4 第二段：AI 排序与理由；ADR-0016 修订 2026-09-21） ====================
+
+# 开关（默认 0 关闭）：关 → 路由不注册（404），小程序保持规则版行为（V4-5）。
+REVIEW_RECOMMEND_ENABLED = int(os.environ.get("REVIEW_RECOMMEND_ENABLED", 0))
+
+# LLM 单次调用超时上限（秒，默认 60s）：排序任务无多轮、候选 ≤20，短超时即可。
+REVIEW_RECOMMEND_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("REVIEW_RECOMMEND_LLM_TIMEOUT_SECONDS", 60)
+)
+
+# 候选上限（契约 api-contract §3.16：1~20）。
+REVIEW_RECOMMEND_MAX_CANDIDATES = int(
+    os.environ.get("REVIEW_RECOMMEND_MAX_CANDIDATES", 20)
+)
+
+# 排序 + 理由属生成类 → 缺省复用 LLM_SUMMARY_MODEL（可 env 覆盖）。
+REVIEW_RECOMMEND_MODEL = os.environ.get("REVIEW_RECOMMEND_MODEL", "") or LLM_SUMMARY_MODEL
+
 # ==================== 沉浸式 AI 会话 v2 配置（proposal 2026-09-02 / api-contract §3.12） ====================
 
 # LLM 单次调用超时上限（秒，默认 300s = 5 分钟，可配置）：
@@ -338,3 +356,17 @@ MATH_SCAN_DEBUG_ENABLED = os.environ.get("MATH_SCAN_DEBUG_ENABLED", "0") == "1"
 # AUTH_MODE=dev + 未配 token 时放行（本地调试）；生产必须配置强随机 token。
 # 高敏凭据：仅在管理台环境注入，**不进代码库**；泄露等价于持有付费 AI 调用权。
 MATH_SCAN_DEBUG_TOKEN = os.environ.get("MATH_SCAN_DEBUG_TOKEN", "")
+
+# ==================== LLM 供应商切换(仅 services/build/build_nce 使用) ====================
+# 切换开关:volcano(默认,行为不变)/ deepseek(OpenAI 兼容)
+# 留空、未设、或非 "deepseek" 都按 volcano 处理(保守回落)
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "volcano")
+
+# Deepseek 配置(OpenAI 兼容接口;LLM_PROVIDER=deepseek 时生效)
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get(
+    "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
+)
+DEEPSEEK_CHAT_MODEL = os.environ.get(
+    "DEEPSEEK_CHAT_MODEL", "deepseek-chat"
+)

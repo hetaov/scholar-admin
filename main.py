@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX, MATH_SCAN_DEBUG_ENABLED
+from config import PORT, RENDER_OUTPUT_DIR, RENDER_STATIC_URL_PREFIX, MATH_SCAN_DEBUG_ENABLED, REVIEW_RECOMMEND_ENABLED
 from services.auth import require_debug_access, require_paid_user
 from services.background_tasks import (
     start_dialogue_cleanup_loop,
@@ -55,6 +55,7 @@ from services.routes_planner import router as planner_router
 from services.routes_math import router as math_router
 from services.routes_math_debug import router as math_debug_router
 from services.routes_english import router as english_router
+from services.routes_review_recommend import router as review_recommend_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -142,6 +143,12 @@ for _router in _PAID_ROUTERS:
 # 数学错题识别 Admin 调试干跑（api-contract §3.15）
 # 开关关 → 路由不注册（404 而非 403，避免信息泄露）
 # 开关开 → require_debug_access 二级门控（token 校验）
+# 复习推荐（v4 R4 第二段：AI 排序与理由；ADR-0016 修订 2026-09-21）
+# 开关关 → 路由不注册（404）；开启后小程序按 groupId 合并 reason_text，失败/关闭一律回退规则排序
+if REVIEW_RECOMMEND_ENABLED:
+    app.include_router(review_recommend_router)
+    logger.info("[review_recommend] router 已条件注册（REVIEW_RECOMMEND_ENABLED=1）")
+
 if MATH_SCAN_DEBUG_ENABLED:
     app.include_router(
         math_debug_router, dependencies=[Depends(require_debug_access)]

@@ -377,18 +377,18 @@ class TestSeedSkills:
     def test_seed_creates_all(self):
         db = FakeDB()
         stats = asyncio.run(seed_skills(db))
-        assert stats["created"] == 4
+        assert stats["created"] == 3
         assert stats["skipped"] == 0
         codes = {s["skill_code"] for s in db.all(SKILL)}
-        assert codes == {"translation", "listening", "speaking", "reading"}
+        assert codes == {"translation", "conversation", "speaking"}
 
     def test_seed_idempotent(self):
         db = FakeDB()
         asyncio.run(seed_skills(db))
         stats2 = asyncio.run(seed_skills(db))
         assert stats2["created"] == 0
-        assert stats2["skipped"] == 4
-        assert len(db.all(SKILL)) == 4
+        assert stats2["skipped"] == 3
+        assert len(db.all(SKILL)) == 3
 
     def test_default_skills_is_copy(self):
         seeds = get_default_skills()

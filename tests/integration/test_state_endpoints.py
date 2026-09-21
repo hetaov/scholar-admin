@@ -78,14 +78,14 @@ class TestPostTrackingState:
         )
         assert resp.json()["data"]["state"]["skill_code"] == "translation"
 
-    def test_attempt_type_inferred_from_skill_code(self, make_client, fake_db):
+    def test_legacy_listening_maps_to_speaking_attempt_type(self, make_client, fake_db):
         client = make_client(state_router, tracking_router)
         resp = client.post(
             "/tracking/state",
             json={"scholar_id": "s1", "sentence_id": "sent_1", "skill_code": "listening"},
         )
         attempt = resp.json()["data"]["attempt"]
-        assert attempt["attempt_type"] == "listen"
+        assert attempt["attempt_type"] == "speak"
 
     def test_attempt_explicit_fields(self, make_client, fake_db):
         client = make_client(state_router, tracking_router)

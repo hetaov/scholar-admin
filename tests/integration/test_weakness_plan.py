@@ -111,8 +111,8 @@ class TestWeaknessPlan:
         assert s1["mastery_score"] == 50  # picked=translation(0.5)
         assert s1["status"] == 2
         assert s1["review_count"] == 3
-        assert s1["skills"] == {"translation": 2, "listening": 1}
-        assert s1["weakest_skill"] == "listening"
+        assert s1["skills"] == {"translation": 2, "speaking": 1}
+        assert s1["weakest_skill"] == "speaking"
 
     def test_sort_by_weakest_then_chapter(self, make_client, fake_db):
         """排序:weakest_skill 升序(listening < translation),同最弱按章节 order。"""
@@ -126,7 +126,7 @@ class TestWeaknessPlan:
         queue = resp.json()["data"]["weakness_queue"]
         # listening(s2) < translation(s1, s3);s1 与 s3 同最弱,按 order:s1(2) < s3(3)
         assert [q["sentence_id"] for q in queue] == ["s2", "s1", "s3"]
-        assert [q["weakest_skill"] for q in queue] == ["listening", "translation", "translation"]
+        assert [q["weakest_skill"] for q in queue] == ["speaking", "translation", "translation"]
 
     def test_scope_textbook(self, make_client, fake_db):
         """限定教材:textbook_id=tb_1 → 仅返回 tb_1 内候选。"""

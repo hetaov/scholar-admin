@@ -152,11 +152,11 @@ class TestStatusAggregation:
 
         entries = {s["sentence_id"]: s for g in data["groups"] for s in g["sentences"]}
         s1 = entries["s1"]
-        # 乐观聚合：s1 translation=learned(2)，listening=learning(1) → 取最高 learned
+        # 乐观聚合：s1 translation=learned(2)，listening=learning(1) → 取最高 learned（listening 展示收敛为 speaking）
         assert s1["status"] == 2  # learned
         assert s1["review_count"] == 2
         assert s1["skills"]["translation"] == 2
-        assert s1["skills"]["listening"] == 1
+        assert s1["skills"]["speaking"] == 1
         assert s1["next_review_at"] is not None
         s2 = entries["s2"]
         assert s2["status"] == 1  # learning
