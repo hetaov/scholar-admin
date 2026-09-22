@@ -13,7 +13,8 @@
 安装（一次）：
     git clone --depth 1 https://github.com/TencentCloud/tencentcloud-speech-sdk-python.git \\
         scholar-admin/vendor/tencentcloud-speech-sdk-python
-    pip install websocket-client requests      # SDK 依赖；readme 建议 websocket-client==0.48，新版实测兼容
+    pip install "websocket-client>=0.48,<1.0" requests   # SDK 依赖；**<1.0 是硬约束**：
+    # SDK 的 on_close(ws) 只收一个参数，websocket-client 1.0 起无条件传 (ws, code, reason) → TypeError
 
 注意：vendor/ 已被 .gitignore 排除，git 仓库构建（CloudRun）时容器内没有该目录。
 Dockerfile 构建期已兜底在线 clone；若构建机无外网，需 git add -f vendor 入库。

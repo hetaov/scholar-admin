@@ -28,9 +28,9 @@ from config import (
 logger = logging.getLogger("scholar-admin.speech_eval")
 
 # 官方 SDK 源码分发目录（随镜像发布，见 scripts/soe_n_verify.py 安装说明）
-SDK_DIR = (
-    Path(__file__).resolve().parent.parent / "vendor" / "tencentcloud-speech-sdk-python"
-)
+# 本文件在 services/providers/ 下 → 仓库根是 parents[2]（原在 services/ 时为 parent.parent，搬入
+# providers/ 后少算一层，于是去找不存在的 services/vendor/ → 评测恒报 sdk_missing；2026-09-22 修正）
+SDK_DIR = Path(__file__).resolve().parents[2] / "vendor" / "tencentcloud-speech-sdk-python"
 
 # SOE-N 评测原始结果存档集合（data-model-contract §4.9；需 scripts/init_speech_evaluation_collection.py 幂等建表）
 SPEECH_EVALUATION_COLLECTION = "speech_evaluation"

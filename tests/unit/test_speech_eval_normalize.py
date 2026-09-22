@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from services.speech_eval import normalize_soe_result
 
 
@@ -167,3 +169,20 @@ class TestSelectEvalMode:
         assert self._mode(5, "2") == 2      # 强制段落（排障）
         assert self._mode(90, "1") == 1     # 强制句子（排障）
         assert self._mode(5, "auto") == 1   # 非 1/2 → 回落自适应
+
+
+class TestSdkDir:
+    """SDK 源码目录必须指向**仓库根**下的 vendor/（2026-09-22 修复）。
+
+    失效形态：文件由 services/speech_eval.py 搬到 services/providers/speech_eval.py 后，
+    `parent.parent` 只到 services/，于是去找不存在的 services/vendor/...，`_load_sdk()`
+    在 `SDK_DIR.is_dir()` 处直接返回 False → 评测恒报 `sdk_missing`（本地与线上同命中）。
+
+    只断言路径、不断言目录存在：`vendor/` 被 .gitignore 排除，CI 检出后没有该目录。
+    """
+
+    def test_sdk_dir_is_repo_root_vendor(self):
+        from services.providers.speech_eval import SDK_DIR
+
+        repo_root = Path(__file__).resolve().parents[2]  # tests/unit/test_x.py → 仓库根
+        assert SDK_DIR == repo_root / "vendor" / "tencentcloud-speech-sdk-python"

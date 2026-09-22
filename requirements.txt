@@ -15,8 +15,11 @@ tencentcloud-sdk-python-tts>=3.1.101
 # OCR 通用印刷体官方 SDK（F4.2，服务进程 .venv 必需；缺失/无凭据时扫描降级 ocr_status=failed）
 tencentcloud-sdk-python-ocr>=3.1.101
 # 腾讯云语音 SDK（SOE-N 新版，纯源码分发在 vendor/tencentcloud-speech-sdk-python）
-# 唯一第三方依赖：websocket-client（readme 建议 0.48，实测后锁版本）
-websocket-client>=0.48
+# 唯一第三方依赖：websocket-client。**必须 <1.0**：SDK 的回调是 `on_close(ws)`（只收一个参数），
+# 0.x 会先 inspect 回调形参个数（_get_close_args → 形参 !=3 则返回 []），1.0 起改为无条件传
+# (ws, close_status_code, close_reason) → `TypeError: on_close() takes 1 positional argument
+# but 3 were given`（2026-09-22 逐版本实测定位；此前靠改 vendor 源码兜底，已废除）
+websocket-client>=0.48,<1.0
 
 # E1.2 英语语句校验内存缓存（services/english/validation.py TTLCache，TTL 1h）
 cachetools>=5.0.0
