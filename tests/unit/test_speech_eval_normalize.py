@@ -91,3 +91,79 @@ def test_empty_and_missing_fields_fallback_zero():
         "suggested_score": 0.0,
         "words": [],
     }
+
+class TestSoeNFailReason:
+    """失败原因可区分（2026-09-21 后修）：`evaluate_with_reason` 逐因给出 token。
+
+    这些分支都在 `_load_sdk()`/网络调用之前，用假凭据即可命中，不触网。
+    """
+
+    def _provider(self, **kw):
+        from services.providers.speech_eval import TencentSoeNProvider
+
+        # 假凭据 → available=True，但不会真正发起 SOE 调用（前置校验先失败）
+        return TencentSoeNProvider(appid="appid-x", secret_id="sid-x", secret_key="skey-x", **kw)
+
+    def test_no_credentials(self):
+        from services.providers.speech_eval import TencentSoeNProvider
+
+        raw, reason = TencentSoeNProvider(appid="", secret_id="", secret_key="").evaluate_with_reason(
+            b"bytes", "hello world"
+        )
+        assert (raw, reason) == (None, "no_credentials")
+
+    def test_empty_audio(self):
+        raw, reason = self._provider().evaluate_with_reason(b"", "hello world")
+        assert (raw, reason) == (None, "empty_audio")
+
+    def test_ref_text_too_long(self):
+        """超**接受上限 90 词** → ref_text_too_long（2026-09-21 用户拍板 30 → 90）。"""
+        long_text = " ".join(f"w{i}" for i in range(91))
+        raw, reason = self._provider().evaluate_with_reason(b"bytes", long_text)
+        assert (raw, reason) == (None, "ref_text_too_long")
+
+    def test_31_words_no_longer_too_long(self):
+        """31 词（旧上限之上）不再判过长 —— 走段落模式，前置校验应放行到 SDK 阶段之后。
+
+        这里只断言「不再因词数被拒」：假凭据 + 31 词时不应返回 ref_text_too_long
+        （真实模式选择由 select_eval_mode 单测覆盖；此处不触发网络）。
+        """
+        text_31 = " ".join(f"w{i}" for i in range(31))
+        raw, reason = self._provider().evaluate_with_reason(b"", text_31)  # 空音频先拦，验证词数未拦
+        assert reason == "empty_audio"
+
+    def test_ref_text_empty(self):
+        raw, reason = self._provider().evaluate_with_reason(b"bytes", "")
+        assert (raw, reason) == (None, "ref_text_empty")
+
+    def test_evaluate_legacy_signature_still_returns_raw_only(self):
+        """兼容旧签名：`evaluate` 仍只返回 raw（存量调用方零改动）。"""
+        assert self._provider().evaluate(b"", "hello world") is None
+
+    def test_fail_reason_text_covers_all_tokens(self):
+        from services.providers.speech_eval import SPEECH_FAIL_REASON_TEXT
+
+        for token in ("no_credentials", "empty_audio", "ref_text_too_long", "ref_text_empty",
+                      "sdk_missing", "eval_failed", "timeout", "call_error"):
+            assert SPEECH_FAIL_REASON_TEXT.get(token), token
+
+class TestSelectEvalMode:
+    """评测模式按句长自适应（2026-09-21 后修；SOE 官方：句子 ≤30 词 / 段落 ≤120 词）。"""
+
+    def _mode(self, words, override=None):
+        from services.providers.speech_eval import select_eval_mode
+
+        return select_eval_mode(" ".join(f"w{i}" for i in range(words)), override)
+
+    def test_short_text_uses_sentence_mode(self):
+        assert self._mode(1) == 1
+        assert self._mode(30) == 1          # 官方句子模式上限内
+
+    def test_long_text_switches_to_paragraph_mode(self):
+        assert self._mode(31) == 2          # 超句子上限 → 段落模式（不再判过长）
+        assert self._mode(90) == 2          # 接受上限内
+
+    def test_override_forces_mode(self):
+        assert self._mode(5, "2") == 2      # 强制段落（排障）
+        assert self._mode(90, "1") == 1     # 强制句子（排障）
+        assert self._mode(5, "auto") == 1   # 非 1/2 → 回落自适应

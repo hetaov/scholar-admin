@@ -13,7 +13,8 @@ from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
 
-from services.build_sentence import call_volcano, _repair_json
+from services.build_sentence import _repair_json
+from services.build.llm import call_llm
 
 logger = logging.getLogger("scholar-admin.build-nce")
 
@@ -117,6 +118,18 @@ def _build_system_prompt(cfg: dict, start: int, end: int) -> str:
         "4. **官方译文**：中文翻译使用新概念英语官方/标准译文\n"
         f"5. {cfg['hint']}\n"
         "\n"
+        "标点与引号规范（重点，违反即数据错误）：\n"
+        "- 对话必须使用英文双引号 \"...\" 包裹，**绝对不能用单引号 '...' 替代**\n"
+        "- 在 JSON 字符串中，英文双引号必须转义为 \\\",例如：\n"
+        "    正确：{\"text\": \"\\\"I can't hear a word!\\\" I said angrily.\", \"translation\": \"...\"}\n"
+        "    错误：{\"text\": \"'I can't hear a word!' I said angrily.\", ...}  ← 不可用单引号\n"
+        "- 原文中的撇号（apostrophe，如 can't / It's）保持原样，无需转义\n"
+        "- 句子边界严格按原文断句：**不要合并多个句子为一条，也不要拆分一个完整句子为多条**。\n"
+        "  特别注意：同一角色说的多句话，如果原文是用一个引号包裹的连续讲话（如\n"
+        "  \"Do you always get up so late? It's one o'clock!\"），保持为**一条 sentence**，\n"
+        "  不得按问号/感叹号拆分。只有当原文用不同引号或独立陈述句分隔时才独立成条。\n"
+        "- 每条 sentence 的 text 字段：以大写字母或引号开头，以句号/问号/感叹号/闭合引号结尾\n"
+        "\n"
         "输出格式要求：\n"
         "1. 输出必须是合法的 JSON，不要包含 markdown 代码块标记（不要 ```json 包裹）\n"
         "2. 每课对应一个 unit，unit_index 从 1 开始递增\n"
@@ -124,7 +137,8 @@ def _build_system_prompt(cfg: dict, start: int, end: int) -> str:
         "4. unit_title 使用原课标题格式，如 \"Lesson 1: A Private Conversation\"\n"
         "5. topic 为该课主题的一句话中文概括\n"
         "6. sentences 数组包含该课正文中每一句英文及其翻译\n"
-        "7. 对话课中，说话人切换用独立 sentence 表示（每句话独立一条）\n"
+        "7. 对话课中，说话人切换用独立 sentence 表示（每句话独立一条，但同一角色连续讲话\n"
+        "   用同一引号包裹的多句不得拆分，参见上方标点规范）\n"
     )
 
 
@@ -162,6 +176,10 @@ def _build_user_prompt(cfg: dict, start: int, end: int) -> str:
         "关键要求：\n"
         "- 逐句原文照录，保持原样，不增不减不改\n"
         "- 每课正文全部语句完整输出，一句不漏\n"
+        "- 对话中的双引号在 JSON 中必须转义为 \\\",禁止用单引号 ' 替代，示例：\n"
+        "    {\"text\": \"\\\"I can't hear a word!\\\" I said angrily.\", \"translation\": \"\\\"我一个字也听不见！\\\"我生气地说。\"}\n"
+        "- 同一角色连续讲话的多句话（如 \"Do you always ...? It's one o'clock!\"），\n"
+        "  整体作为**一条** sentence，不要按问号或感叹号拆分；只有引号闭合后才算一句结束\n"
         "- 如某课为纯练习课、无正文对话/文章，可为空 sentences 数组\n"
         "- 请直接输出 JSON，不要带任何 markdown 标记"
     )
@@ -173,7 +191,7 @@ def _build_user_prompt(cfg: dict, start: int, end: int) -> str:
 
 
 def generate_content(state: BuildNCEState) -> BuildNCEState:
-    """调用火山模型复现 NCE 原文内容"""
+    """调用 LLM(按 LLM_PROVIDER 切换火山/deepseek)复现 NCE 原文内容"""
     book = state["book"]
     start = state["start_lesson"]
     end = state["end_lesson"]
@@ -186,7 +204,7 @@ def generate_content(state: BuildNCEState) -> BuildNCEState:
 
     raw = ""
     try:
-        raw = call_volcano(
+        raw = call_llm(
             prompt=_build_user_prompt(cfg, start, end),
             system_prompt=_build_system_prompt(cfg, start, end),
             temperature=0.1,       # 极低温度，减少创造性

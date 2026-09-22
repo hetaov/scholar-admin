@@ -69,6 +69,7 @@ from services.speech_eval import (
     normalize_soe_result,
     SpeechProvider,
     SPEECH_EVALUATION_COLLECTION,
+    SPEECH_FAIL_REASON_TEXT,
 )
 
 logger = logging.getLogger("scholar-admin.eval")
@@ -105,6 +106,10 @@ class EvalTranslateResponse(BaseModel):
     code: str = "OK"
     message: Optional[str] = None
     data: Optional[dict] = None
+    # 失败原因 token（2026-09-21 加法式新增；仅 /eval/speech 目前会填）：取自
+    # providers.speech_eval.SPEECH_FAIL_REASON_TEXT，客户端据此分流处置
+    # （`ref_text_too_long` = 本句超 30 词的句级上限，属「本句不支持评测」而非服务不可用）。
+    reason: Optional[str] = None
 
 
 @router.post("/eval/translate", response_model=EvalTranslateResponse)
@@ -545,16 +550,21 @@ async def eval_speech(
         return EvalTranslateResponse(
             success=False,
             code="SOE_UNAVAILABLE",
+            reason="no_credentials",
             message="SOE-N 凭据未配置（可回退旧 /eval/translate 链路）",
         )
-    raw = await run_in_threadpool(
-        provider.evaluate, audio_bytes, body.original_text, body.voice_format or "mp3"
+    # 2026-09-21 后修：改用 evaluate_with_reason —— 失败时带出**可区分的原因**，
+    # 避免 5 种成因在响应里被折叠成同一句 message（客户端由此可分「服务不可用」与「本句不支持评测」）。
+    raw, fail_reason = await run_in_threadpool(
+        provider.evaluate_with_reason, audio_bytes, body.original_text, body.voice_format or "mp3"
     )
     if raw is None:
+        reason_text = SPEECH_FAIL_REASON_TEXT.get(fail_reason or "", "未知原因")
         return EvalTranslateResponse(
             success=False,
             code="SOE_UNAVAILABLE",
-            message="语音评测失败（可回退旧 /eval/translate 链路）",
+            reason=fail_reason,
+            message=f"语音评测失败：{reason_text}（可回退旧 /eval/translate 链路）",
         )
 
     # 4. 归一化 + 落库 speech_evaluation（原始 JSON 存档；落库失败不阻塞返回，仅记日志）

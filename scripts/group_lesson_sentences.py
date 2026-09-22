@@ -21,9 +21,9 @@ group_id / role_in_group）。
   services/english/sentence_group.py._infer_role_in_group 同口径；
 - order_in_lesson 接续该 lesson 已有组（人工/先前建组）之后递增。
 
-LLM 调用复用 ai_session_eval.py 的混元网关范式：AsyncOpenAI + HUNYUAN_* 配置，
-不用 response_format=json_object（hy 系列实测可能空 content），prompt 约束 +
-容错解析（去 markdown fence / 首尾花括号提取）。
+LLM 调用走 services.build.llm.acall_llm（异步入口），按 LLM_PROVIDER 切换
+火山 / deepseek，默认 volcano。不用 response_format=json_object（hy 系列
+实测可能空 content），prompt 约束 + 容错解析（去 markdown fence / 首尾花括号提取）。
 
 用法（scholar-admin 根目录，.env 自动加载 CloudBase + 混元凭据）：
   python scripts/group_lesson_sentences.py --textbook-id tb_xxx           # 单教材 dry-run（调 LLM 出计划）
@@ -50,12 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import (  # noqa: E402
-    HUNYUAN_BASE_URL,
-    HUNYUAN_EVAL_MODEL,
-    HUNYUAN_SECRET_KEY,
-    HUNYUAN_TIMEOUT_SECONDS,
-)
+from services.build.llm import acall_llm  # noqa: E402
 from services.dependencies import get_db  # noqa: E402
 from services.models.content import (  # noqa: E402
     LESSON,
@@ -417,32 +412,6 @@ def build_window_prompt(task: dict) -> list[dict]:
     ]
 
 
-async def _call_hunyuan(messages: list[dict]) -> str:
-    """调用混元 hy3（OpenAI 兼容网关）。失败/空 content 抛异常（上层重试）。"""
-    if not (HUNYUAN_SECRET_KEY and HUNYUAN_EVAL_MODEL and HUNYUAN_BASE_URL):
-        raise RuntimeError("混元凭据未配置（HUNYUAN_SECRET_KEY / HUNYUAN_EVAL_MODEL / HUNYUAN_BASE_URL）")
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key=HUNYUAN_SECRET_KEY,
-        base_url=HUNYUAN_BASE_URL,
-        timeout=HUNYUAN_TIMEOUT_SECONDS,
-        max_retries=0,
-    )
-    resp = await client.chat.completions.create(
-        model=HUNYUAN_EVAL_MODEL,
-        messages=messages,
-        temperature=0.0,
-    )
-    content = (resp.choices[0].message.content or "").strip()
-    if not content:
-        raise RuntimeError(
-            f"LLM 响应 content 为空（model={HUNYUAN_EVAL_MODEL}，"
-            f"base_url={HUNYUAN_BASE_URL} 须为 OpenAI 兼容 /chat/completions 网关）"
-        )
-    return content
-
-
 async def plan_window(
     task: dict,
     *,
@@ -450,13 +419,18 @@ async def plan_window(
 ) -> dict:
     """对一个窗口任务调 LLM 分组。
 
+    走 services.build.llm.acall_llm(按 LLM_PROVIDER 切火山/deepseek)。
+    失败/空 content 抛异常 → 上层重试。
+
     Returns: {ok, groups, invalid, kept_ungrouped, error}
     """
     messages = build_window_prompt(task)
     last_err = ""
     for attempt in range(retries + 1):
         try:
-            content = await _call_hunyuan(messages)
+            content = await acall_llm(messages, temperature=0.0)
+            if not content:
+                raise RuntimeError("LLM 响应 content 为空")
             parsed = parse_llm_content(content)
             if not parsed["ok"]:
                 last_err = parsed["error"] or "解析失败"

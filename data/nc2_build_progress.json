@@ -1,0 +1,124 @@
+{
+  "book": "2",
+  "completed": [
+    {
+      "start": 3,
+      "end": 12,
+      "lesson_count": 10,
+      "sentence_count": 92,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 27.9,
+      "ts": 1789630974
+    },
+    {
+      "start": 13,
+      "end": 22,
+      "lesson_count": 10,
+      "sentence_count": 100,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 28.2,
+      "ts": 1789631004
+    },
+    {
+      "start": 23,
+      "end": 32,
+      "lesson_count": 10,
+      "sentence_count": 116,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 32.3,
+      "ts": 1789631038
+    },
+    {
+      "start": 33,
+      "end": 42,
+      "lesson_count": 10,
+      "sentence_count": 104,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 32.1,
+      "ts": 1789631072
+    },
+    {
+      "start": 43,
+      "end": 52,
+      "lesson_count": 10,
+      "sentence_count": 98,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 33.9,
+      "ts": 1789631107
+    },
+    {
+      "start": 53,
+      "end": 62,
+      "lesson_count": 10,
+      "sentence_count": 108,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 36.7,
+      "ts": 1789631145
+    },
+    {
+      "start": 63,
+      "end": 72,
+      "lesson_count": 10,
+      "sentence_count": 105,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 39.4,
+      "ts": 1789631186
+    },
+    {
+      "start": 83,
+      "end": 92,
+      "lesson_count": 10,
+      "sentence_count": 151,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 34.6,
+      "ts": 1789631300
+    },
+    {
+      "start": 93,
+      "end": 96,
+      "lesson_count": 4,
+      "sentence_count": 49,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 14.7,
+      "ts": 1789631316
+    },
+    {
+      "start": 78,
+      "end": 82,
+      "lesson_count": 5,
+      "sentence_count": 58,
+      "textbook_id": "tb_e6bce2b577554d02",
+      "reused_textbook": true,
+      "elapsed_sec": 18.8,
+      "ts": 1789631426
+    }
+  ],
+  "failed": [
+    {
+      "start": 73,
+      "end": 82,
+      "error": "HTTP Error 500: Internal Server Error",
+      "elapsed_sec": 76.0,
+      "ts": 1789631264,
+      "attempts": 1
+    },
+    {
+      "start": 73,
+      "end": 77,
+      "error": "HTTP Error 500: Internal Server Error",
+      "elapsed_sec": 22.2,
+      "ts": 1789631405,
+      "attempts": 1
+    }
+  ],
+  "next_batch": null
+}

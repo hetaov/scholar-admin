@@ -176,13 +176,37 @@ class TestSpeechEvalFallback:
         assert fake_db.all("speech_evaluation") == []
 
     def test_provider_failure(self, make_client, fake_db):
-        """Provider 可用但评测失败(返回 None)→ SOE_UNAVAILABLE。"""
+        """Provider 可用但评测失败(返回 None)→ SOE_UNAVAILABLE（带可区分 reason）。"""
         client = _client(make_client, provider=FakeSpeechProvider.failing())
         resp = client.post("/eval/speech", json=speech_payload())
         body = resp.json()
         assert body["success"] is False
         assert body["code"] == "SOE_UNAVAILABLE"
+        assert body["reason"] == "eval_failed"          # 2026-09-21：失败原因不再被折叠
         assert fake_db.all("speech_evaluation") == []
+
+    def test_ref_text_too_long_reason(self, make_client, fake_db):
+        """本句超 30 词的句级上限 → reason=ref_text_too_long，message 明示「本句过长」。
+
+        这条是本轮「让失败自述」的核心：`ref_text_too_long` 是唯一**与句子内容相关**的成因
+        （服务端 SOE_MAX_REF_WORDS=30），处置与「服务不可用」不同（不是重试能解决的）。
+        """
+        client = _client(make_client, provider=FakeSpeechProvider.failing_with("ref_text_too_long"))
+        resp = client.post("/eval/speech", json=speech_payload())
+        body = resp.json()
+        assert body["success"] is False
+        assert body["code"] == "SOE_UNAVAILABLE"
+        assert body["reason"] == "ref_text_too_long"
+        assert "过长" in body["message"]                  # 可读原因进 message，客户端/控制台可直接定向
+        assert fake_db.all("speech_evaluation") == []
+
+    def test_no_credentials_reason(self, make_client, fake_db):
+        """凭据缺失 → reason=no_credentials（与「评测失败」区分，处置不同：配环境而非重试）。"""
+        client = _client(make_client, provider=FakeSpeechProvider.unavailable())
+        resp = client.post("/eval/speech", json=speech_payload())
+        body = resp.json()
+        assert body["code"] == "SOE_UNAVAILABLE"
+        assert body["reason"] == "no_credentials"
 
     def test_persist_failure_does_not_block_result(self, make_client, fake_db, monkeypatch):
         """落库异常仅记日志,不阻塞评测结果返回。"""

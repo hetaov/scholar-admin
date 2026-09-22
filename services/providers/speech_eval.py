@@ -22,6 +22,7 @@ from config import (
     SESSION_TOKEN,
     SECRET_ID,
     SECRET_KEY,
+    SPEECH_EVAL_MODE,   # v4 后修：评测模式 auto/1(句子)/2(段落)，缺省 auto 按句长自适应
 )
 
 logger = logging.getLogger("scholar-admin.speech_eval")
@@ -36,10 +37,30 @@ SPEECH_EVALUATION_COLLECTION = "speech_evaluation"
 
 # SOE-N 语音评测参数（与 F1-2 实测一致）
 SOE_ENGINE = "16k_en"          # 英语 16k
-SOE_EVAL_MODE = 1              # 1 = 句子
 SOE_REC_MODE = 1               # 1 = 录音模式（一次性上传完整音频，≤60s）
 SOE_TEXT_MODE = 0              # 0 = 普通文本
-SOE_MAX_REF_WORDS = 30         # 句级 ref_text ≤30 词（F1-2 定标）
+
+# 评测模式（官方 EvalMode：0=单词 / 1=句子 / 2=段落 / 3=自由说）
+SOE_EVAL_MODE_SENTENCE = 1
+SOE_EVAL_MODE_PARAGRAPH = 2
+# 官方文本长度上限：句子模式 ≤30 词、段落模式 ≤120 词（2026-09-21 查证）
+SOE_SENTENCE_MAX_WORDS = 30
+# 我们的接受上限（2026-09-21 用户拍板 30 → 90）：≤30 走句子模式，31~90 自动切**段落模式**，
+# >90 直接判「本句过长」不发起评测。低于官方段落上限 120，留余量避免边界抖动。
+SOE_MAX_REF_WORDS = 90
+
+# 语音评测失败原因（2026-09-21 后修）：token 为机器可读（客户端据此分流），text 为可读文案（拼进响应 message）。
+# 背景：此前 5 种失败在路由层被折叠成同一句 message，客户端无法区分「服务不可用」与「本句不支持评测」。
+SPEECH_FAIL_REASON_TEXT = {
+    "no_credentials": "SOE-N 凭据未配置",
+    "empty_audio": "音频内容为空",
+    "ref_text_too_long": f"本句过长（超 {SOE_MAX_REF_WORDS} 词的评测上限）",
+    "ref_text_empty": "缺少参考文本",
+    "sdk_missing": "服务端缺少 SOE-N SDK",
+    "eval_failed": "SOE 评测未通过",
+    "timeout": "SOE 评测超时",
+    "call_error": "SOE 调用异常",
+}
 EVALUATE_TIMEOUT = 65.0        # 录音 ≤60s + 缓冲，超出视为评测失败
 
 # 契约 voice_format 字符串 → SOE-N int（0=pcm / 1=wav / 2=mp3 / 4=speex）
@@ -81,6 +102,22 @@ def _load_sdk() -> bool:
         return False
 
 
+def select_eval_mode(ref_text: str, override: str | int | None = None) -> int:
+    """按句长选择 SOE 评测模式（纯函数，便于单测）。
+
+    - `override` 为 `1`/`2`/`"1"`/`"2"` 时**强制**该模式（运维配置 `SPEECH_EVAL_MODE`）；
+    - 否则自动：`ref_text` ≤ `SOE_SENTENCE_MAX_WORDS` 词 → 句子模式；否则 → **段落模式**
+      （段落模式官方上限 120 词，故 31~90 词的句子不再被判「过长」而是走段落评测）。
+
+    背景（2026-09-21）：句子模式官方文本上限仅 30 词，此前 30 也被当作我们的接受上限 →
+    31 词以上的句子直接不可评测。放开到 90 词并自动切段落模式后，长句可正常评测。
+    """
+    if override is not None and str(override).strip() in ("1", "2"):
+        return SOE_EVAL_MODE_SENTENCE if str(override).strip() == "1" else SOE_EVAL_MODE_PARAGRAPH
+    words = len(str(ref_text or "").split())
+    return SOE_EVAL_MODE_SENTENCE if words <= SOE_SENTENCE_MAX_WORDS else SOE_EVAL_MODE_PARAGRAPH
+
+
 class SpeechProvider(ABC):
     """语音评测 Provider 抽象接口（供路由层依赖注入）"""
 
@@ -94,6 +131,17 @@ class SpeechProvider(ABC):
         self, audio_bytes: bytes, ref_text: str, voice_format: str = DEFAULT_VOICE_FORMAT
     ) -> Optional[dict]:
         """对一段音频做句级口语评测，返回 SOE-N 完整原始 JSON；失败返回 None。"""
+
+    def evaluate_with_reason(
+        self, audio_bytes: bytes, ref_text: str, voice_format: str = DEFAULT_VOICE_FORMAT
+    ) -> tuple[Optional[dict], Optional[str]]:
+        """带失败原因的评测（2026-09-21 后修）：返回 `(raw, reason)`。
+
+        成功 → `(原始 JSON, None)`；失败 → `(None, reason_token)`，token 取自
+        `SPEECH_FAIL_REASON_TEXT`，供路由层拼可读 message、客户端按 token 分流处置。
+        默认实现委托 `evaluate`（reason 恒 None），故既有 fake / 存量实现无需改造。
+        """
+        return self.evaluate(audio_bytes, ref_text, voice_format), None
 
 
 class _SoeNListener:
@@ -153,22 +201,36 @@ class TencentSoeNProvider(SpeechProvider):
     def evaluate(
         self, audio_bytes: bytes, ref_text: str, voice_format: str = DEFAULT_VOICE_FORMAT
     ) -> Optional[dict]:
-        """录音模式（rec_mode=1）一次性上传完整音频做句级评测，返回原始 JSON。"""
+        """兼容旧签名（失败返回 None）；内部委托 evaluate_with_reason。"""
+        raw, _ = self.evaluate_with_reason(audio_bytes, ref_text, voice_format)
+        return raw
+
+    def evaluate_with_reason(
+        self, audio_bytes: bytes, ref_text: str, voice_format: str = DEFAULT_VOICE_FORMAT
+    ) -> tuple[Optional[dict], Optional[str]]:
+        """录音模式（rec_mode=1）一次性上传完整音频做句级评测：`(原始 JSON, None)` 或 `(None, reason)`。
+
+        失败原因逐条区分（2026-09-21 后修），路由层据此拼可读 message、客户端据 token 分流——
+        其中 `ref_text_too_long` 是**唯一与句子内容相关**的成因（SOE 句级硬上限 30 词），
+        其余为环境类（凭据/SDK/调用/超时），处置方式不同。
+        """
         if not self.available:
             logger.warning(
                 "[speech_eval] 未配置 TCB_APPID / TENCENTCLOUD_SECRETID/SECRETKEY，无法调用 SOE-N"
             )
-            return None
+            return None, "no_credentials"
         if not audio_bytes:
             logger.warning("[speech_eval] 音频内容为空")
-            return None
+            return None, "empty_audio"
         if not ref_text or len(ref_text.split()) > SOE_MAX_REF_WORDS:
             logger.warning(
-                "[speech_eval] ref_text 为空或超 %d 词（句级评测上限）", SOE_MAX_REF_WORDS
+                "[speech_eval] ref_text 为空或超 %d 词（句级评测上限；当前 %d 词）",
+                SOE_MAX_REF_WORDS,
+                len(str(ref_text or "").split()),
             )
-            return None
+            return None, ("ref_text_empty" if not ref_text else "ref_text_too_long")
         if not _load_sdk():
-            return None
+            return None, "sdk_missing"
 
         voice_format_int = VOICE_FORMAT_MAP.get(voice_format)
         if voice_format_int is None:
@@ -177,6 +239,12 @@ class TencentSoeNProvider(SpeechProvider):
             )
             voice_format_int = VOICE_FORMAT_MAP[DEFAULT_VOICE_FORMAT]
 
+        eval_mode = select_eval_mode(ref_text, SPEECH_EVAL_MODE)
+        logger.info(
+            "[speech_eval] 评测模式=%s（ref_words=%d，句子上限 %d / 接受上限 %d）",
+            "句子" if eval_mode == SOE_EVAL_MODE_SENTENCE else "段落",
+            len(ref_text.split()), SOE_SENTENCE_MAX_WORDS, SOE_MAX_REF_WORDS,
+        )
         try:
             cred = _sdk_credential.Credential(
                 self._secret_id, self._secret_key, self._session_token or None
@@ -185,7 +253,7 @@ class TencentSoeNProvider(SpeechProvider):
             recognizer = _sdk_speaking_assessment.SpeakingAssessment(
                 self._appid, cred, SOE_ENGINE, listener
             )
-            recognizer.set_eval_mode(SOE_EVAL_MODE)        # 1 = 句子
+            recognizer.set_eval_mode(eval_mode)            # 1=句子 / 2=段落（按句长自动，见 select_eval_mode）
             recognizer.set_rec_mode(SOE_REC_MODE)          # 1 = 录音模式
             recognizer.set_ref_text(ref_text)              # 句级 ≤30 词
             recognizer.set_text_mode(SOE_TEXT_MODE)        # 0 = 普通文本
@@ -203,11 +271,11 @@ class TencentSoeNProvider(SpeechProvider):
                         "[speech_eval] 评测成功 size=%dB ref_text=%r",
                         len(audio_bytes), ref_text[:40],
                     )
-                    return listener.result
+                    return listener.result, None
                 logger.warning("[speech_eval] 评测失败: %s", listener.fail_reason)
-                return None
+                return None, "eval_failed"
             logger.error("[speech_eval] 评测超时（%ss）", EVALUATE_TIMEOUT)
-            return None
+            return None, "timeout"
         except Exception as e:  # noqa: BLE001 — 任何 SDK/网络异常都降级为 None（路由层回退旧链路）
             logger.error(
                 "[speech_eval] SOE-N 调用异常: %s（appid=%s, voice_format=%s, ref_words=%d, "
@@ -219,7 +287,7 @@ class TencentSoeNProvider(SpeechProvider):
                 "已配置" if self._session_token else "无",
                 exc_info=True,
             )
-            return None
+            return None, "call_error"
 
 
 def _pick(raw: dict, key: str):

@@ -83,8 +83,27 @@ class FakeSpeechProvider(FakeProviderBase):
         ],
     }
 
-    def __init__(self, result=DEFAULT_RAW, available: bool = True):
+    def __init__(self, result=DEFAULT_RAW, available: bool = True, fail_reason: str = "eval_failed"):
         super().__init__(result, available)
+        # 失败原因 token（2026-09-21 后修）：真实 Provider 的 evaluate_with_reason 会区分成因，
+        # 替身需同样能给出原因，才能覆盖「本句过长（ref_text_too_long）」这类可分流场景。
+        self.fail_reason = fail_reason
 
     def evaluate(self, audio_bytes, ref_text, voice_format="mp3"):
         return self._invoke(audio_bytes, ref_text, voice_format)
+
+    def evaluate_with_reason(self, audio_bytes, ref_text, voice_format="mp3"):
+        """带原因的评测替身：成功 → (raw, None)；失败 → (None, fail_reason)。
+
+        与 ABC 默认实现同构（**委托 `self.evaluate`**）——这样子类覆写 `evaluate` 的记录型替身
+        （测试里常见的 RecordingProvider）依然被走到，不必逐个改造。
+        """
+        raw = self.evaluate(audio_bytes, ref_text, voice_format)
+        if raw is None:
+            return None, self.fail_reason
+        return raw, None
+
+    @classmethod
+    def failing_with(cls, reason: str):
+        """可用但按指定原因失败替身（如 reason='ref_text_too_long' → 本句过长）。"""
+        return cls(result=None, available=True, fail_reason=reason)
