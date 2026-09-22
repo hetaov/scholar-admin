@@ -75,7 +75,7 @@ class FakeSpeechProvider(FakeProviderBase):
         "SuggestedScore": 82.5,
         "PronAccuracy": 78.9,
         "PronFluency": 0.85,
-        "PronCompletion": 90.0,
+        "PronCompletion": 0.9,  # SOE-N 原值 0~1（×100 归一 → 90.0，量纲见 F1-3 定标）
         "Words": [
             {"Word": "the", "MatchTag": 0},
             {"Word": "quick", "MatchTag": 0},

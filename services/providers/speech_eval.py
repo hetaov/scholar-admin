@@ -301,20 +301,36 @@ def _pick(raw: dict, key: str):
 
 
 def normalize_soe_result(raw: dict) -> dict:
-    """把 SOE-N 原始 JSON 归一为 api-contract §3.4.2 / data-model §4.9 parsed 口径。
+    """把 SOE-N 原始 JSON 归一为 api-contract §3.4 / data-model §4.9 parsed 口径。
 
-    - accuracy / completion / suggested_score：0~100（SOE-N 原值）
-    - fluency：0~100（= SOE-N PronFluency × 100 归一，官方原值为 0~1）
+    **四个数值字段的官方量纲并不统一**（F1-3 定标实测为准，勿凭字段名猜）：
+    - accuracy：0~100（SOE-N `PronAccuracy` 原值）
+    - suggested_score：0~100（SOE-N `SuggestedScore` 原值）
+    - fluency：0~100（**= `PronFluency` × 100**，官方原值 0~1）
+    - completion：0~100（**= `PronCompletion` × 100**，官方原值 0~1）
     - words[].match_tag：0=命中 / 2=未命中（SOE-N 原始语义，前端词级高亮）
+
+    定标铁证（`03-change/proposals/2026-08-17-F1-3-定标音频规范.md` §2，同链路同 ref_text 仅换音频）：
+    干净音频 → `PronAccuracy 98.46` / `PronFluency 0.986` / `PronCompletion 1.0`；
+    低质音频 → 0.042 / 0.986 / 0.444。⇒ accuracy 是 0~100，而 fluency 与 completion 都是 0~1。
+
+    ⚠️ 2026-09-22 修正：此前**只对 fluency 做了 ×100，completion 原值透传**，导致
+    `completion` 对外恒为 0~1（干净跟读显示「完整度 1」），并连带 `evaluate_speech` 的
+    `anomaly = completion < 10` 恒为真、`confidence` 恒取最低档（见 evaluation_engine.evaluate_speech）。
     """
     pron_accuracy = _pick(raw, "PronAccuracy")
     pron_fluency = _pick(raw, "PronFluency")
     pron_completion = _pick(raw, "PronCompletion")
     suggested_score = _pick(raw, "SuggestedScore")
 
-    fluency = None
-    if isinstance(pron_fluency, (int, float)):
-        fluency = float(pron_fluency) * 100.0
+    # PronFluency / PronCompletion 官方量纲为 0~1，统一 ×100 归一到 0~100（与 accuracy 同口径）
+    def _scale01(value):
+        if isinstance(value, (int, float)):
+            return float(value) * 100.0
+        return None
+
+    fluency = _scale01(pron_fluency)
+    completion = _scale01(pron_completion)
 
     words = _pick(raw, "Words")
     normalized_words = []
@@ -332,7 +348,7 @@ def normalize_soe_result(raw: dict) -> dict:
     return {
         "accuracy": float(pron_accuracy or 0.0),
         "fluency": fluency if fluency is not None else 0.0,
-        "completion": float(pron_completion or 0.0),
+        "completion": completion if completion is not None else 0.0,
         "suggested_score": float(suggested_score or 0.0),
         "words": normalized_words,
     }

@@ -10,7 +10,8 @@ Skill 落库 speaking，走 reportSpeaking → POST /tracking/state。
         → GET /tracking/{scholar_id}（追踪查询，验证闭环）
 
 断言重点：
-- parsed 三指标归一：accuracy/fluency(×100)/completion/suggested_score 0~100，
+- parsed 四指标归一为 0~100：accuracy / suggested_score 取原值，**fluency = PronFluency×100**、
+  **completion = PronCompletion×100**（后两者官方量纲为 0~1；completion 漏乘于 2026-09-22 修正），
   words[].match_tag 0=命中 / 2=未命中（前端词级高亮语义）；
 - speech_evaluation 原始 JSON 存档落库（raw + parsed + provider=soe_n）；
 - SOE 不可用 / 参数非法 / 音频非法 → 200 + success=false + code 错误契约；

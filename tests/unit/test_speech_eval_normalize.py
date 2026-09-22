@@ -4,7 +4,7 @@
 覆盖:
 - 顶层扁平字段形态(F1-2 实测:F1-2 scripts/soe_n_verify.py 输出顶层字段)
 - result 子对象嵌套形态(SDK 另一返回路径)
-- PronFluency 0~1 → 0~100 归一
+- PronFluency / PronCompletion 0~1 → 0~100 归一
 - Words 词级 MatchTag 透传(0=命中/2=未命中)、异常条目跳过
 - 空/缺字段兜底为 0
 """
@@ -21,7 +21,7 @@ FLAT_RAW = {
     "SuggestedScore": 82.5,
     "PronAccuracy": 78.9,
     "PronFluency": 0.85,  # SOE-N 原值 0~1,归一后 ×100
-    "PronCompletion": 90.0,
+    "PronCompletion": 0.9,  # SOE-N 原值 0~1,归一后 ×100(F1-3 实测:干净音频 = 1.0)
     "Words": [
         {"Word": "the", "MatchTag": 0},
         {"Word": "quick", "MatchTag": 0},
@@ -35,7 +35,7 @@ def test_flat_top_level_fields():
     parsed = normalize_soe_result(FLAT_RAW)
     assert parsed["accuracy"] == 78.9
     assert parsed["fluency"] == 85.0  # 0.85 × 100
-    assert parsed["completion"] == 90.0
+    assert parsed["completion"] == 90.0  # 0.9 × 100
     assert parsed["suggested_score"] == 82.5
     assert parsed["words"] == [
         {"word": "the", "match_tag": 0},
@@ -53,6 +53,44 @@ def test_nested_result_fields():
     assert parsed["completion"] == 90.0
     assert parsed["suggested_score"] == 82.5
     assert len(parsed["words"]) == 3
+
+
+def test_completion_scaling_is_0_to_100():
+    """2026-09-22 修正:PronCompletion 官方量纲为 0~1,必须 ×100。
+
+    修正前原值透传 → 干净跟读显示「完整度 1」(真机反馈的现象)。
+    F1-3 定标实测:干净音频 `PronCompletion = 1.0`(不是 100),低质音频 0.444。
+    """
+    assert normalize_soe_result({"PronCompletion": 1.0})["completion"] == 100.0  # 干净跟读 → 100
+    assert normalize_soe_result({"PronCompletion": 1})["completion"] == 100.0
+    assert normalize_soe_result({"PronCompletion": 0.444})["completion"] == 44.4
+    # 缺省/非数 → 0.0(不因 None 崩)
+    assert normalize_soe_result({})["completion"] == 0.0
+    assert normalize_soe_result({"PronCompletion": None})["completion"] == 0.0
+
+
+def test_completion_feeds_evaluate_speech_anomaly_threshold():
+    """回归联动:`evaluate_speech` 以 `completion < 10` 判 anomaly、并用 completion 支撑 confidence。
+
+    修正前 completion 恒 0~1 → anomaly 恒真、confidence 恒最低档(线上静默失真);
+    修正后干净跟读不再误报 anomaly。
+    """
+    from services.providers.evaluation_engine import evaluate_speech
+
+    clean = evaluate_speech(
+        normalize_soe_result(
+            {"PronAccuracy": 95.0, "PronFluency": 0.98, "PronCompletion": 1.0, "SuggestedScore": 95.0}
+        )
+    )
+    assert clean["anomaly"] is False
+    assert clean["confidence"] > 0.9
+
+    broken = evaluate_speech(
+        normalize_soe_result(
+            {"PronAccuracy": 3.0, "PronFluency": 0.9, "PronCompletion": 0.05, "SuggestedScore": 3.0}
+        )
+    )
+    assert broken["anomaly"] is True  # completion 归一到 5.0 < 10 阈值
 
 
 def test_fluency_scaling_from_int():
