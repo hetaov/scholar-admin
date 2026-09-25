@@ -56,6 +56,7 @@ from services.routes_math import router as math_router
 from services.routes_math_debug import router as math_debug_router
 from services.routes_english import router as english_router
 from services.routes_review_recommend import router as review_recommend_router
+from services.routes_lesson import router as lesson_router
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -114,6 +115,7 @@ _FREE_ROUTERS = [
     tracking_router,
     state_router,
     admin_router,
+    lesson_router,
 ]
 
 # 付费 AI 能力路由：require_paid_user 白名单鉴权
