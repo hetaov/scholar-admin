@@ -322,6 +322,78 @@ def seed_ai_session_v3_task(fake_db, **overrides) -> dict:
     return doc
 
 
+def seed_ai_session_v4(fake_db, **overrides) -> dict:
+    """写入一条 ai_session_v4（沉浸式 AI 会话 v4，契约 §3.17），返回写入的文档。
+
+    与 `seed_ai_session_v3` 同构，仅集合名不同（`ai_session_v4`），语义与字段逐条一致。
+    """
+    from services.learning.session_state_v4 import SESSION_TTL_MS  # 延迟导入
+
+    now = int(time.time() * 1000)
+    doc = {
+        "session_id": "s_test",
+        "scholar_id": "scholar_1",
+        "scenario": {"scene": "At the airport"},
+        "roles": {
+            "ai_role": {"name": "Airport Staff", "style": "kind"},
+            "learner_role": {"name": "Passenger"},
+        },
+        "materials": [
+            {
+                "kind": "new",
+                "sentences": [{"sentence_id": "sid_1", "content": "I'd like to check in."}],
+            }
+        ],
+        "history": [],
+        "assisted_count": 0,
+        "pending_task": None,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + SESSION_TTL_MS,
+    }
+    doc.update(overrides)
+    fake_db.add("ai_session_v4", doc)
+    return doc
+
+
+def seed_ai_session_v4_task(fake_db, **overrides) -> dict:
+    """写入一条 ai_session_v4_task（默认 pending，契约 §3.17），返回写入的文档。
+
+    与 `seed_ai_session_v3_task` 同构，并补齐 v4 追加字段：`stream` /
+    `hint_mode` / `model_tier` / `partial_text` / `partial_seq` /
+    `partial_updated_at` / `timings`（可用 overrides 覆盖）。
+    """
+    from services.learning.session_task_v4 import TASK_TTL_MS  # 延迟导入
+
+    now = int(time.time() * 1000)
+    doc = {
+        "task_id": "st_test",
+        "scholar_id": "scholar_1",
+        "session_id": "s_test",
+        "mode": "start",
+        "preferred_type": "auto",
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "context": {"mode": "start", "scenario": {}, "roles": {}, "materials": [], "history": []},
+        # ---- v4 追加（契约 §3.17）----
+        "stream": False,
+        "hint_mode": "sync",
+        "model_tier": "standard",
+        "partial_text": None,
+        "partial_seq": 0,
+        "partial_updated_at": None,
+        "timings": {"submitted_at": now},
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + TASK_TTL_MS,
+    }
+    doc.update(overrides)
+    fake_db.add("ai_session_v4_task", doc)
+    return doc
+
+
 def seed_dialogue_gen_task(fake_db, **overrides) -> dict:
     """写入一条 ai_dialogue_task（批量对话生成，§6.1，默认 pending），返回写入的文档。
 

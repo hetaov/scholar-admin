@@ -12,6 +12,7 @@
 - 评估       → services/routes_eval.py
 - AI 会话   → services/routes_ai.py（沉浸式会话 v2 异步生成）
 - AI 会话 v3 → services/routes_ai_v3.py（新引擎面 /ai/session/v3，§11）
+- AI 会话 v4 → services/routes/ai_v4.py（伪流式实验面 /ai/session/v4，api-contract §3.17）
 - 语音合成   → services/routes_tts.py
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ from services.background_tasks import (
     start_dialogue_gen_cleanup_loop,
     start_session_cleanup_loop,
     start_session_v3_cleanup_loop,
+    start_session_v4_cleanup_loop,
     start_translation_cleanup_loop,
     stop_all_loops,
 )
@@ -47,6 +49,7 @@ from services.routes_conversation import router as conversation_router
 from services.routes_eval import router as eval_router
 from services.routes_ai import router as ai_router
 from services.routes_ai_v3 import router as ai_v3_router
+from services.routes.ai_v4 import router as ai_v4_router
 from services.routes_dialogue_gen import router as dialogue_gen_router
 from services.routes_evaluation import router as evaluation_router
 from services.routes_training import router as training_router
@@ -80,6 +83,7 @@ async def lifespan(_: FastAPI):
     start_dialogue_cleanup_loop()
     start_session_cleanup_loop()
     start_session_v3_cleanup_loop()
+    start_session_v4_cleanup_loop()
     start_dialogue_gen_cleanup_loop()
     try:
         yield
@@ -133,6 +137,7 @@ _PAID_ROUTERS = [
     english_router,
     ai_router,
     ai_v3_router,
+    ai_v4_router,
     dialogue_gen_router,
 ]
 

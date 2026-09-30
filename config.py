@@ -347,6 +347,39 @@ SESSION_V3_CHECKPOINT_COLLECTION = os.environ.get(
     "SESSION_V3_CHECKPOINT_COLLECTION", "ai_session_v3_checkpoint"
 )
 
+# ==================== 沉浸式 AI 会话 v4 配置（伪流式实验面 /ai/session/v4） ====================
+# 设计稿：docs_v1/AI会话优化/AI会话v4伪流式-可行性调研与设计-v1.md §7
+# 契约：docs_v2/02-contract/api-contract.md §3.17
+#
+# 定位：v2 / v3 **零改动**；v4 是「提速 + 伪流式」实验面，复用 v3 生成核
+# （services.learning.dialogue_engine），仅替换 LLM 生成器为流式版本并节流落增量。
+# 小程序本版不接线；首个消费者为 scholar-admin-web 教材详情页 AI 会话页。
+
+# 会话 v4 总开关（默认 0 关闭）：置 1 后 /ai/session/v4 才接受提交，
+# 关闭时提交返回 200 + success=false + code=SESSION_V4_DISABLED（零侵入、可一键回退）。
+SESSION_V4_ENABLED = int(os.environ.get("SESSION_V4_ENABLED", 0))
+
+# 伪流式开关（默认 0）：仅在 SESSION_V4_ENABLED=1 时生效。
+# 双开关用于二分验证：先证明「v4 ≡ v3」（stream=0），再证明「增量有效」（stream=1）。
+SESSION_V4_STREAM_ENABLED = int(os.environ.get("SESSION_V4_STREAM_ENABLED", 0))
+
+# 增量落库节流：距上次写入 ≥ throttle_ms 或新增字符 ≥ min_chars 时写一次；
+# 单轮写入次数上限保护（避免写放大失控）。
+SESSION_V4_PARTIAL_THROTTLE_MS = int(os.environ.get("SESSION_V4_PARTIAL_THROTTLE_MS", 400))
+SESSION_V4_PARTIAL_MIN_CHARS = int(os.environ.get("SESSION_V4_PARTIAL_MIN_CHARS", 24))
+SESSION_V4_PARTIAL_MAX_WRITES = int(os.environ.get("SESSION_V4_PARTIAL_MAX_WRITES", 60))
+
+# v4 三集合（同构复制 v3 语义、集合名参数化，**不写 v2/v3 集合**）
+SESSION_V4_TASK_COLLECTION = os.environ.get(
+    "SESSION_V4_TASK_COLLECTION", "ai_session_v4_task"
+)
+SESSION_V4_STATE_COLLECTION = os.environ.get(
+    "SESSION_V4_STATE_COLLECTION", "ai_session_v4"
+)
+SESSION_V4_CHECKPOINT_COLLECTION = os.environ.get(
+    "SESSION_V4_CHECKPOINT_COLLECTION", "ai_session_v4_checkpoint"
+)
+
 # ==================== 数学错题识别 Admin 调试干跑配置（api-contract §3.15） ====================
 # 设计稿：docs_v1/AI错题/数学AI错题识别-设计文档.md
 # 实施拆分：docs_v1/AI错题/数学AI错题识别-任务拆分与断点.md（B01 步）

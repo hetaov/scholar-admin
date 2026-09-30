@@ -12,6 +12,8 @@
                                   （恢复卡死生成任务并释放会话在途位 + 清理过期任务与会话）
 - start_session_v3_cleanup_loop  : 启动 ai_session_v3_task/ai_session_v3 巡检循环（v3，§11.2）
                                   （同 v2 口径，独立轮次，不改既有时序）
+- start_session_v4_cleanup_loop  : 启动 ai_session_v4_task/ai_session_v4 巡检循环（v4，§3.17）
+                                  （同 v3 口径，独立轮次；v4 默认全关时集合为空，低成本空转）
 - _loops 模块级强引用（按名字）  : 防止 asyncio 任务被 GC 回收（同 eval.py 后台任务模式）
 - 单轮失败仅记日志               : 巡检是尽力而为，不影响后续轮与正常请求
 """
@@ -27,8 +29,10 @@ from services.learning import (
     dialogue_task,
     session_state,
     session_state_v3,
+    session_state_v4,
     session_task,
     session_task_v3,
+    session_task_v4,
     translation_task,
 )
 
@@ -76,6 +80,19 @@ async def _run_session_v3_cleanup_round() -> None:
     await session_task_v3.recover_stale_tasks(db)
     await session_task_v3.cleanup_expired(db)
     await session_state_v3.cleanup_expired(db)
+
+
+async def _run_session_v4_cleanup_round() -> None:
+    """执行一轮 AI 会话 v4（ai_session_v4_task/ai_session_v4）巡检。
+
+    与 v3 同口径：恢复卡死生成任务（recover_stale_tasks 内部会释放会话在途位并清理
+    内存节流态）+ 清理过期任务；最后清理过期会话态。**独立轮次**，不改既有时序
+    （契约红线：v2/v3 零改动）。v4 默认全关时集合为空，巡检为低成本空转。
+    """
+    db = get_db()
+    await session_task_v4.recover_stale_tasks(db)
+    await session_task_v4.cleanup_expired(db)
+    await session_state_v4.cleanup_expired(db)
 
 
 async def _run_dialogue_gen_cleanup_round() -> None:
@@ -154,6 +171,13 @@ def start_session_v3_cleanup_loop(
 ) -> asyncio.Task:
     """启动 AI 会话 v3（ai_session_v3_task/ai_session_v3）巡检循环（幂等）。"""
     return _start_loop("session_v3", _run_session_v3_cleanup_round, interval)
+
+
+def start_session_v4_cleanup_loop(
+    interval: float = CLEANUP_INTERVAL_SECONDS,
+) -> asyncio.Task:
+    """启动 AI 会话 v4（ai_session_v4_task/ai_session_v4）巡检循环（幂等）。"""
+    return _start_loop("session_v4", _run_session_v4_cleanup_round, interval)
 
 
 async def stop_all_loops() -> None:
