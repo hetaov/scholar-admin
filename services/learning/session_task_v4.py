@@ -26,12 +26,14 @@ from typing import Any, Awaitable, Callable
 
 from config import (
     SESSION_LLM_TIMEOUT_SECONDS,
+    SESSION_V4_CHECKPOINT_COLLECTION,
     SESSION_V4_PARTIAL_MAX_WRITES,
     SESSION_V4_PARTIAL_MIN_CHARS,
     SESSION_V4_PARTIAL_THROTTLE_MS,
     SESSION_V4_STATE_COLLECTION,
     SESSION_V4_STREAM_ENABLED,
     SESSION_V4_TASK_COLLECTION,
+    SESSION_V4_THINKING_DISABLED,
 )
 from services.dependencies import get_db
 from services.learning import session_state_v4 as session_state
@@ -365,33 +367,36 @@ def _session_gen_error_to_dict(e: Exception) -> dict | None:
 
 
 def build_on_delta(db, task_id: str, task: dict) -> OnDelta | None:
-    """构造伪流式增量回调（S6 接线用）。
+    """构造伪流式增量回调（已接线：`run_session_task` → `dialogue_engine`）。
 
     仅在「请求 stream=true 且 SESSION_V4_STREAM_ENABLED=1」时返回回调；否则返回 None，
     执行路径与 v3 完全一致（S5 判据）。
-    回调内部累积文本并节流落库（见 `write_partial`）。
+
+    回调为 **async**（由 `_default_stream_generator` await），内部累积文本并节流落库
+    （见 `write_partial`）；累积缓冲挂在回调的 `buffer` 属性上，供终态取
+    `partial_first_ms`（S6 埋点）。
     """
     if not stream_enabled_for(task.get("stream")):
         return None
 
     buffer: dict[str, Any] = {"text": "", "first_at": None}
 
-    def _on_delta(delta: str) -> None:
+    async def _on_delta(delta: str) -> None:
         if not delta:
             return
         buffer["text"] += delta
-        now = _now_ms()
         if buffer["first_at"] is None:
-            buffer["first_at"] = now
-        # 异步写：由调用方 await（dialogue_engine 侧以 await 调用回调）
-        coro = write_partial(db, task_id, buffer["text"])
-        if isinstance(coro, Awaitable):
-            # 交由事件循环调度，不阻塞生成主流程
-            import asyncio
+            buffer["first_at"] = _now_ms()
+        await write_partial(db, task_id, buffer["text"])
 
-            asyncio.create_task(coro)  # noqa: RUF006 — fire-and-forget，失败仅记日志
-
+    _on_delta.buffer = buffer  # type: ignore[attr-defined] — 供 timings 取首帧时间
     return _on_delta
+
+
+def partial_first_ms_of(on_delta: OnDelta | None) -> int | None:
+    """取增量回调的首帧时间戳（ms）；无回调/未产出增量时返回 None。"""
+    buffer = getattr(on_delta, "buffer", None) if on_delta is not None else None
+    return (buffer or {}).get("first_at")
 
 
 async def run_session_task(task_id: str) -> None:
@@ -401,7 +406,7 @@ async def run_session_task(task_id: str) -> None:
     - claim_task 原子抢占：被其他实例抢占则直接返回，避免重复执行
     - 生成：任务 `context` 自包含快照即执行唯一依据，走 v3 同款引擎
       （services.learning.dialogue_engine，超时 SESSION_LLM_TIMEOUT_SECONDS）
-    - 伪流式：`build_on_delta` 返回回调时透传给引擎（S6 生效；当前引擎不支持则忽略）
+    - 伪流式：`build_on_delta` 返回回调时透传给引擎（S6 已接线；回调为空则路径 ≡ v3）
     - 成功：回写 history 并释放 pending_task（session_state_v4.complete_turn），finish success
     - 失败：释放 pending_task（不污染 history），finish failed（不降级、不静默）
     """
@@ -419,6 +424,8 @@ async def run_session_task(task_id: str) -> None:
     error: dict | None = None
     timings_extra: dict = {"claimed_at": _now_ms()}
     llm_started = _now_ms()
+    # 伪流式增量回调（stream=true + 服务级开关开启时非空；否则 None → 路径 ≡ v3）
+    on_delta = build_on_delta(db, task_id, task)
 
     try:
         payload = await dialogue_engine.generate_session_reply(
@@ -426,8 +433,16 @@ async def run_session_task(task_id: str) -> None:
             session_id=session_id,
             context=task.get("context") or {},
             preferred_type=task.get("preferred_type", "auto"),
+            on_delta=on_delta,
+            thinking_disabled=bool(SESSION_V4_THINKING_DISABLED),
+            checkpoint_collection=SESSION_V4_CHECKPOINT_COLLECTION,
         )
         timings_extra["llm_total_ms"] = _now_ms() - llm_started
+        # 伪流式首帧埋点：首个增量到达时刻 - 任务提交时刻（契约 §3.17 timings）
+        submitted_at = int((task.get("timings") or {}).get("submitted_at") or 0)
+        first_at = partial_first_ms_of(on_delta)
+        if first_at and submitted_at:
+            timings_extra["partial_first_ms"] = first_at - submitted_at
         result = {
             "session_id": session_id,
             "content_type": payload["content_type"],

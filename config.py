@@ -363,6 +363,14 @@ SESSION_V4_ENABLED = int(os.environ.get("SESSION_V4_ENABLED", 0))
 # 双开关用于二分验证：先证明「v4 ≡ v3」（stream=0），再证明「增量有效」（stream=1）。
 SESSION_V4_STREAM_ENABLED = int(os.environ.get("SESSION_V4_STREAM_ENABLED", 0))
 
+# 关闭模型「思考」（默认 1 = 关）：向方舟透传 thinking.type=disabled。
+# 原因：VOLCANO_CHAT_MODEL 绑的是推理型模型，会先吐数十字节 reasoning_content，
+# 真正的 content（含 ai_text 的 JSON）几乎到最后才出——extract_ai_text_prefix 只认
+# content，推理期间恒为 None，导致 partial_text 迟迟为空、伪流式看不到增量（S7 实测
+# partial_first_ms 占 total_ms 的 98%）。关思考后首帧从 ~12s 降到 ~1.4s，输出结构不变。
+# 仅作用于 v4 路径；置 0 可复现「思考开」用于对照。
+SESSION_V4_THINKING_DISABLED = int(os.environ.get("SESSION_V4_THINKING_DISABLED", 1))
+
 # 增量落库节流：距上次写入 ≥ throttle_ms 或新增字符 ≥ min_chars 时写一次；
 # 单轮写入次数上限保护（避免写放大失控）。
 SESSION_V4_PARTIAL_THROTTLE_MS = int(os.environ.get("SESSION_V4_PARTIAL_THROTTLE_MS", 400))

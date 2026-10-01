@@ -206,14 +206,24 @@ async def node_generate_reply(
     *,
     generator: Any = None,
     timeout_seconds: int | None = None,
+    on_delta: Any = None,
+    thinking_disabled: bool = False,
 ) -> dict:
-    """单次 LLM 调用 + 解析（注入 fake generator；超时/空值语义见 invoke_dialogue_llm）。"""
+    """单次 LLM 调用 + 解析（注入 fake generator；超时/空值语义见 invoke_dialogue_llm）。
+
+    Args:
+        on_delta: v4 伪流式增量回调（可选，透传至 `invoke_dialogue_llm`）；
+            注入 generator 时不生效（fake 不走真实流式）。
+        thinking_disabled: 关掉模型思考（可选，v4 专用；同 `on_delta`）。
+    """
     timeout = timeout_seconds or SESSION_LLM_TIMEOUT_SECONDS
     try:
         raw = await invoke_dialogue_llm(
             state.get("messages") or [],
             generator=generator,
             timeout_seconds=timeout,
+            on_delta=on_delta,
+            thinking_disabled=thinking_disabled,
         )
     except DialogueGenError as e:
         raise _map_dialogue_error(e) from e
@@ -261,15 +271,25 @@ def build_session_graph(
     *,
     generator: Any = None,
     timeout_seconds: int | None = None,
+    on_delta: Any = None,
+    thinking_disabled: bool = False,
 ) -> StateGraph:
-    """构建会话 v3 生成图（依赖经 partial 注入，单测传 fake；复用批量面图范式）。"""
+    """构建会话 v3 生成图（依赖经 partial 注入，单测传 fake；复用批量面图范式）。
+
+    `on_delta` 仅 v4 伪流式使用，透传至 `node_generate_reply` → `invoke_dialogue_llm`；
+    v3 不传（None）即走同步路径，行为不变。`thinking_disabled` 同属 v4 专用开关。
+    """
     workflow = StateGraph(SessionDialogueState)
     workflow.add_node("load_context", node_load_context)
     workflow.add_node("build_prompt", node_build_prompt)
     workflow.add_node(
         "generate_reply",
         functools.partial(
-            node_generate_reply, generator=generator, timeout_seconds=timeout_seconds
+            node_generate_reply,
+            generator=generator,
+            timeout_seconds=timeout_seconds,
+            on_delta=on_delta,
+            thinking_disabled=thinking_disabled,
         ),
     )
     workflow.add_node("persist", node_persist)
@@ -287,16 +307,28 @@ def get_compiled_session_graph(
     checkpointer: Any = None,
     generator: Any = None,
     timeout_seconds: int | None = None,
+    on_delta: Any = None,
+    thinking_disabled: bool = False,
 ):
     """编译会话图；传入 checkpointer 即开启断点续写（thread_id = session_id）。"""
     return build_session_graph(
-        generator=generator, timeout_seconds=timeout_seconds
+        generator=generator,
+        timeout_seconds=timeout_seconds,
+        on_delta=on_delta,
+        thinking_disabled=thinking_disabled,
     ).compile(checkpointer=checkpointer)
 
 
-def get_checkpointer(db: Any) -> NoSQLCheckpointSaver:
-    """构造会话 v3 checkpointer（独立集合 `ai_session_v3_checkpoint`，§11.6）。"""
-    return NoSQLCheckpointSaver(db, collection=SESSION_V3_CHECKPOINT_COLLECTION)
+def get_checkpointer(
+    db: Any, collection: str | None = None
+) -> NoSQLCheckpointSaver:
+    """构造会话 checkpointer（缺省 v3 集合 `ai_session_v3_checkpoint`，§11.6）。
+
+    `collection` 供 v4 传入自己的集合——契约 §3.17 要求 v4 不写 v2/v3 集合。
+    """
+    return NoSQLCheckpointSaver(
+        db, collection=collection or SESSION_V3_CHECKPOINT_COLLECTION
+    )
 
 
 def _thread_config(session_id: str, checkpoint_id: str | None = None) -> dict:
@@ -346,11 +378,13 @@ async def list_session_checkpoints(
     return items
 
 
-def _default_checkpointer(db: Any) -> NoSQLCheckpointSaver | None:
+def _default_checkpointer(
+    db: Any, collection: str | None = None
+) -> NoSQLCheckpointSaver | None:
     """生产缺省 checkpointer：db 可用即接入（会话面多轮续聊，§11.6）。"""
     if db is None:
         return None
-    return get_checkpointer(db)
+    return get_checkpointer(db, collection=collection)
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +403,9 @@ async def generate_session_reply(
     checkpointer: Any = None,
     resume: bool = False,
     from_checkpoint_id: str | None = None,
+    on_delta: Any = None,
+    thinking_disabled: bool = False,
+    checkpoint_collection: str | None = None,
 ) -> dict:
     """会话 v3 生成（start/turn 同一入口，按 context.mode 分派 Prompt）。
 
@@ -383,6 +420,10 @@ async def generate_session_reply(
         generator: 可注入假 LLM（单测；缺省走火山方舟）；
         checkpointer: 可注入 checkpointer（单测；缺省按 db 构造，db 为 None 则无 checkpoint）；
         resume: True 且线程已有 checkpoint → 从最近（或 from_checkpoint_id）续跑。
+        on_delta: v4 伪流式增量回调（可选，透传至 generate_reply 节点；不传即 v3 行为）。
+        thinking_disabled: 关掉模型思考（v4 专用；不传即 v3 行为）。
+        checkpoint_collection: checkpoint 落库集合（缺省 v3 集合；v4 传自己的集合，
+            契约 §3.17 要求 v4 不写 v2/v3 集合）。
 
     Returns:
         `{ content_type, ai_text, hint, suggested_targets }`（v2 对齐，§11.4）
@@ -390,9 +431,17 @@ async def generate_session_reply(
     Raises:
         SessionGenError: LLM_TIMEOUT / EVAL_UNAVAILABLE / LLM_PARSE_ERROR / NETWORK_ERROR
     """
-    saver = checkpointer if checkpointer is not None else _default_checkpointer(db)
+    saver = (
+        checkpointer
+        if checkpointer is not None
+        else _default_checkpointer(db, collection=checkpoint_collection)
+    )
     graph = get_compiled_session_graph(
-        checkpointer=saver, generator=generator, timeout_seconds=timeout_seconds
+        checkpointer=saver,
+        generator=generator,
+        timeout_seconds=timeout_seconds,
+        on_delta=on_delta,
+        thinking_disabled=thinking_disabled,
     )
 
     if saver is not None:

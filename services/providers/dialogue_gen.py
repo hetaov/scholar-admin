@@ -20,6 +20,8 @@ T1 边界（保持直连可用；不接图/不接 checkpoint/不接覆盖校验�
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import re
@@ -79,6 +81,9 @@ NATURALNESS_MAX = 1.0
 
 # 生成器签名：`async (messages) -> content | None`（单测经注入传 fake）
 LLMGenerator = Callable[[list[dict]], Awaitable[str | None]]
+
+# 伪流式增量回调签名：`(delta_text) -> None | Awaitable[None]`（v4 专用；同步/异步回调均可）
+OnDelta = Callable[[str], Any]
 
 
 class DialogueGenError(Exception):
@@ -962,25 +967,44 @@ def build_result(
 # ---------------------------------------------------------------------------
 
 
-def _call_dialogue_llm_sync(messages: list[dict], temperature: float = 0.8) -> str | None:
-    """同步调用火山方舟对话模型；凭据缺失 / 调用失败返回 None。"""
+def _thinking_field(thinking_disabled: bool) -> dict:
+    """方舟「思考」开关字段：关思考时返回 `{"thinking": {"type": "disabled"}}`，否则空。
+
+    推理型模型（当前 `VOLCANO_CHAT_MODEL` 接入点即属此类）会先产出
+    `reasoning_content`，`content` 几乎到最后才出；伪流式只认 `content`，
+    于是增量迟迟不落库。关思考可让首帧提前到秒级（S7 实测 ~12s → ~1.4s）。
+    """
+    return {"thinking": {"type": "disabled"}} if thinking_disabled else {}
+
+
+def _call_dialogue_llm_sync(
+    messages: list[dict],
+    temperature: float = 0.8,
+    thinking_disabled: bool = False,
+) -> str | None:
+    """同步调用火山方舟对话模型；凭据缺失 / 调用失败返回 None。
+
+    `thinking_disabled`：透传 `thinking.type=disabled`（见 `_thinking_field`）。
+    """
     if not (VOLCANO_API_KEY and VOLCANO_CHAT_MODEL):
         logger.warning("[dialogue_gen] 未配置火山方舟凭据，无法生成")
         return None
     import requests
 
+    payload = {
+        "model": VOLCANO_CHAT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "response_format": {"type": "json_object"},
+    }
+    payload.update(_thinking_field(thinking_disabled))
     resp = requests.post(
         f"{VOLCANO_BASE_URL}/chat/completions",
         headers={
             "Authorization": f"Bearer {VOLCANO_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": VOLCANO_CHAT_MODEL,
-            "messages": messages,
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-        },
+        json=payload,
         timeout=DIALOGUE_LLM_TIMEOUT_SECONDS,
     )
     if resp.status_code != 200:
@@ -992,9 +1016,151 @@ def _call_dialogue_llm_sync(messages: list[dict], temperature: float = 0.8) -> s
     return data["choices"][0]["message"]["content"].strip()
 
 
-async def _default_generator(messages: list[dict]) -> str | None:
+async def _default_generator(
+    messages: list[dict], thinking_disabled: bool = False
+) -> str | None:
     """默认生成器：同步请求丢线程池（超时由 `generate_dialogue` 外层 wait_for 兜底）。"""
-    return await run_in_threadpool(_call_dialogue_llm_sync, messages)
+    return await run_in_threadpool(
+        _call_dialogue_llm_sync, messages, thinking_disabled=thinking_disabled
+    )
+
+
+# ---------------------------------------------------------------------------
+# 伪流式（v4 /ai/session/v4；contract §3.17 / 调研报告 §5.2）
+# ---------------------------------------------------------------------------
+
+# `ai_text` 键定位（Prompt 约定 ai_text 为输出对象首字段 → 增量最早可用）
+_AI_TEXT_KEY_RE = re.compile(r'"ai_text"\s*:\s*"')
+
+# 常见 JSON 转义还原（未知转义原样保留，避免半个 Unicode 序列被破坏）
+_JSON_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+}
+
+
+def extract_ai_text_prefix(buffer: str) -> str | None:
+    """从**可能未闭合**的 JSON 缓冲中提取 `ai_text` 已产出前缀（伪流式增量源）。
+
+    契约（调研报告 §5.2 / 风险 R-a）：
+    - `"ai_text"` 键尚未出现 → `None`（静默降级：不回调、不写 `partial_text`）；
+    - 值已闭合 → 完整值；
+    - 值未闭合 → 已产出前缀（尾部悬空转义符丢弃，避免半个转义序列）；
+    - **仅用于展示**，`partial_text` 永不作为 `result` 来源（终态仍走全量解析）。
+    """
+    if not buffer:
+        return None
+    match = _AI_TEXT_KEY_RE.search(buffer)
+    if match is None:
+        return None
+
+    out: list[str] = []
+    i = match.end()
+    n = len(buffer)
+    while i < n:
+        ch = buffer[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                break  # 悬空转义符：等下一个 chunk 补齐
+            nxt = buffer[i + 1]
+            out.append(_JSON_ESCAPES.get(nxt, "\\" + nxt))
+            i += 2
+            continue
+        if ch == '"':
+            return "".join(out)
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+async def _default_stream_generator(
+    messages: list[dict],
+    on_delta: OnDelta | None = None,
+    temperature: float = 0.8,
+    thinking_disabled: bool = False,
+) -> str | None:
+    """默认**流式**生成器：SSE 逐帧累积 + 增量回调（v4 伪流式专用）。
+
+    与同步生成器 `_default_generator` 的差异仅在消费方式，**返回语义完全一致**
+    （完整 raw 文本 → 交由既有 `parse_session_output` 全量解析）：
+    - **不改 `response_format`**（仍为 `json_object`，仅追加 `stream: true`）；
+    - 每帧累积到 raw buffer → `extract_ai_text_prefix` 容错取前缀 → 回调新增片段；
+    - 提取失败（键未出现 / 结构异常）→ **静默降级**，不回调，终态照常；
+    - 回调可为同步或异步（awaitable 时由本函数 await，保证落库顺序）。
+    """
+    if not (VOLCANO_API_KEY and VOLCANO_CHAT_MODEL):
+        logger.warning("[dialogue_gen] 未配置火山方舟凭据，无法生成（stream）")
+        return None
+    import httpx
+
+    url = f"{VOLCANO_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {VOLCANO_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": VOLCANO_CHAT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "response_format": {"type": "json_object"},
+        "stream": True,
+    }
+    payload.update(_thinking_field(thinking_disabled))
+
+    raw_parts: list[str] = []
+    emitted = ""  # 已回调出去的 ai_text 前缀长度基准
+
+    async def _emit(buffer_text: str) -> None:
+        nonlocal emitted
+        if on_delta is None:
+            return
+        prefix = extract_ai_text_prefix(buffer_text)
+        if prefix is None or len(prefix) <= len(emitted):
+            return  # 静默降级 / 无新增
+        piece = prefix[len(emitted) :]
+        emitted = prefix
+        ret = on_delta(piece)
+        if inspect.isawaitable(ret):
+            await ret
+
+    try:
+        async with httpx.AsyncClient(timeout=DIALOGUE_LLM_TIMEOUT_SECONDS) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    logger.error(
+                        "[dialogue_gen] 火山方舟流式返回 %s: %s",
+                        resp.status_code,
+                        str(body)[:200],
+                    )
+                    return None
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        if data == "[DONE]":
+                            break
+                        continue
+                    try:
+                        frame = json.loads(data)
+                    except Exception:  # noqa: BLE001 — 单帧脏数据不影响整段累积
+                        continue
+                    choices = frame.get("choices") or []
+                    delta = (choices[0].get("delta") or {}).get("content") if choices else None
+                    if not delta:
+                        continue
+                    raw_parts.append(delta)
+                    await _emit("".join(raw_parts))
+    except Exception as e:  # noqa: BLE001 — 流式失败按「调用失败」口径返回 None
+        logger.error("[dialogue_gen] 流式生成失败 → %s: %s", type(e).__name__, e)
+        return None
+
+    return "".join(raw_parts).strip() or None
 
 
 async def invoke_dialogue_llm(
@@ -1002,14 +1168,32 @@ async def invoke_dialogue_llm(
     *,
     generator: LLMGenerator | None = None,
     timeout_seconds: int | None = None,
+    on_delta: OnDelta | None = None,
+    thinking_disabled: bool = False,
 ) -> str:
     """单次调用 LLM 并返回原始文本（T3 图所有节点复用，直连路径亦复用）。
 
     统一超时/空值语义（避免图与直连两套口径漂移）：
     - 超过 `timeout_seconds`（缺省 `DIALOGUE_LLM_TIMEOUT_SECONDS`）→ `LLM_TIMEOUT`；
     - 返回空（凭据缺失 / 调用失败 / 空串）→ `LLM_UNAVAILABLE`。
+
+    Args:
+        on_delta: v4 伪流式增量回调（contract §3.17）。**仅当未注入 `generator` 时生效**：
+            此时改用 `_default_stream_generator`，逐帧回调 ai_text 新增片段；
+            返回语义与同步路径一致（完整 raw）。注入 generator（单测 fake）时不流式。
+        thinking_disabled: 关掉模型思考（默认 False = 现行为）。v4 会话面置真以拿到
+            秒级首帧与真实增量；v2/v3 会话面与批量 `/ai/dialogue/v1` 不传，行为不变。
+            注入 `generator`（单测 fake）时同样不生效。
     """
-    gen = generator or _default_generator
+    if generator is not None:
+        gen = generator
+    elif on_delta is not None:
+        gen = functools.partial(_default_stream_generator, on_delta=on_delta)
+    else:
+        gen = _default_generator
+    if thinking_disabled and generator is None:
+        # 仅在需要时追加该 kwarg：缺省调用形状保持不变（默认生成器可能被调用方/单测替换）
+        gen = functools.partial(gen, thinking_disabled=True)
     timeout = timeout_seconds or DIALOGUE_LLM_TIMEOUT_SECONDS
     try:
         content = await asyncio.wait_for(gen(messages), timeout=timeout)
