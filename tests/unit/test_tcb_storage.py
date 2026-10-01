@@ -18,6 +18,7 @@ from unittest import mock
 
 import pytest
 
+import config
 from services.infra.tcb_storage import CloudBaseStorageClient, StorageAPIError, _TOKEN_CACHE
 
 
@@ -155,8 +156,10 @@ def test_access_token_cached_across_calls():
 
 def test_upload_file_missing_credentials():
     """缺少 WX_APPID/WX_SECRET 时明确报错（不发起网络请求）"""
-    client = _make_client(appid="", secret="")
-    with mock.patch("httpx.AsyncClient") as mocked:
+    with mock.patch("httpx.AsyncClient") as mocked, \
+            mock.patch.object(config, "WX_APPID", ""), \
+            mock.patch.object(config, "WX_SECRET", ""):
+        client = _make_client(appid="", secret="")
         with pytest.raises(StorageAPIError, match="WX_APPID / WX_SECRET"):
             _run(client.upload_file("scan/a.jpg", b"x"))
     mocked.assert_not_called()

@@ -70,13 +70,13 @@ class TestListeningSelectFlow:
     def test_select_correct_closed_loop(self, make_client, fake_db):
         client = _client(make_client)
 
-        # 前端听选判定答对 → 上报 status=5（skill_code=listening）
+        # 前端听选判定答对 → 上报 status=5（skill_code=listening，后端归一化为 speaking）
         resp = _report_listening(client, status=5)
         assert resp.status_code == 200
         data = resp.json()["data"]
         state = data["state"]
-        assert state["_id"] == f"{SCHOLAR_ID}_{SENTENCE_ID}_listening"
-        assert state["skill_code"] == "listening"
+        assert state["_id"] == f"{SCHOLAR_ID}_{SENTENCE_ID}_speaking"
+        assert state["skill_code"] == "speaking"
         # 前端答对 status=5（数字）不可识别 → normalize 回落 learning；
         # mastery_score=90 但无显式状态词，derive_status 尊重归一化结果
         assert state["status"] == "learning"
@@ -88,7 +88,7 @@ class TestListeningSelectFlow:
         assert resp.status_code == 200
         result = resp.json()
         assert result["total"] == 1
-        assert result["records"][0]["skill_code"] == "listening"
+        assert result["records"][0]["skill_code"] == "speaking"
         assert result["records"][0]["status"] == "learning"
 
         # 落库：skill_state 1 条 + 事件 1 条
@@ -146,11 +146,11 @@ class TestListeningReadFlow:
         assert body["data"]["status"] == 5
         assert asr.call_count == 1
 
-        # 2. 前端判定 isMatch → 上报 listening
+        # 2. 前端判定 isMatch → 上报 listening（后端归一化为 speaking）
         resp = _report_listening(client, status=5)
         assert resp.json()["success"] is True
         state = resp.json()["data"]["state"]
-        assert state["skill_code"] == "listening"
+        assert state["skill_code"] == "speaking"
         assert state["attempt_count"] == 1
 
         # 3. 查询闭环
