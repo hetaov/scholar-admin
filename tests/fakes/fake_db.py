@@ -71,6 +71,8 @@ class FakeDB:
 
     def __init__(self, seed: dict[str, list[dict]] | None = None):
         self._data: dict[str, list[dict]] = {}
+        # 索引登记（create_indexes 写入；内存版不做真实约束，仅供断言）
+        self._indexes: dict[str, dict[str, dict]] = {}
         # A02 写操作探针：记录被测代码的写调用（不影响 add 测试辅助方法）
         self.write_log: list[tuple[str, str]] = []  # (op, collection)
         self.write_calls = {"insert": 0, "update": 0, "delete": 0}
@@ -115,6 +117,20 @@ class FakeDB:
         """删除集合（表），会清除其中全部文档。"""
         self._data.pop(collection_name, None)
         return {"deleted": True}
+
+    async def create_indexes(self, collection: str, indexes: list[dict]) -> dict:
+        """建索引（内存版只登记，不做真实约束）。
+
+        索引名按集合维度去重存放，供测试断言「脚本建了哪些索引」。
+        """
+        bucket = self._indexes.setdefault(collection, {})
+        for spec in indexes:
+            bucket[spec.get("name") or str(spec.get("key"))] = spec
+        return {"created": True, "numIndexesAfter": len(bucket)}
+
+    def indexes_of(self, collection: str) -> dict:
+        """测试辅助：读取某集合上已建的索引（name → spec）。"""
+        return dict(self._indexes.get(collection, {}))
 
     # ---------------- 查询 ----------------
 

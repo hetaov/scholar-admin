@@ -76,3 +76,6 @@ def no_external_calls(monkeypatch):
     monkeypatch.setattr(
         "services.translation_eval._call_translation_llm", lambda *a, **k: None
     )
+    monkeypatch.setattr(
+        "services.providers.extension_llm._call_extension_llm", lambda *a, **k: None
+    )
