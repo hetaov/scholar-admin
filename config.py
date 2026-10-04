@@ -417,3 +417,93 @@ DEEPSEEK_BASE_URL = os.environ.get(
 DEEPSEEK_CHAT_MODEL = os.environ.get(
     "DEEPSEEK_CHAT_MODEL", "deepseek-chat"
 )
+
+# ==================== 英文语句扩展配置（api-contract §3.18 / 一期 B01） ====================
+# 设计稿：docs_v1/扩展/第一期-scholar-admin接口与admin-web实验页-v1.md §3.8
+# 契约：docs_v2/02-contract/api-contract.md §3.18（E1~E4；E5 离线批量预生成本期不做）
+# 任务账本：docs_v1/扩展/第一期-英文语句扩展-任务拆分与断点-v1.md
+#
+# 定位：纯新增面（新前缀 /english/extension + 新集合 2 个），既有接口与配置键零改动。
+# 一期唯一消费者为 scholar-admin-web 实验页；小程序本期不接线（红线 R3）。
+
+# 总开关（默认 0 关闭）：关 → 端点返回 200 + success=false + code=EXTENSION_DISABLED
+# （照 SESSION_V4_DISABLED 范式：明确提示、不静默回退、不给重试入口）。
+EXTENSION_ENABLED = int(os.environ.get("EXTENSION_ENABLED", 0))
+
+# 抽取/评测模型（Provider 可插拔）：留空时回落 VOLCANO_CHAT_MODEL。
+# 换混元等其它供应商只改此环境变量，不改代码。
+EXTENSION_LLM_MODEL = os.environ.get("EXTENSION_LLM_MODEL", "") or VOLCANO_CHAT_MODEL
+
+# LLM 单次调用超时上限（秒，默认 120s）：抽取比翻译/会话短，不复用 300s。
+# 超时 → 任务 failed + error_code=LLM_TIMEOUT，并落 error.llm_timeout_seconds 便于审计。
+EXTENSION_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("EXTENSION_LLM_TIMEOUT_SECONDS", 120)
+)
+
+# 关闭模型「思考」（默认 1 = 关）：向方舟透传 thinking.type=disabled。
+# 对齐 SESSION_V4_THINKING_DISABLED 的既有结论（v4 实测首帧 ~12s → ~1.4s）：
+# VOLCANO_CHAT_MODEL 接入点是推理型模型，会先产出 reasoning_content，真正的 content
+# （含 points 的 JSON）几乎到最后才出。抽取是「从候选清单里挑 ≤5 条并填字段」的
+# 分类任务，不需要推理；关思考可显著缩短单次调用耗时，输出结构不变。
+# 置 0 可复现「思考开」用于对照。仅作用于 /english/extension 这条链路。
+EXTENSION_THINKING_DISABLED = int(
+    os.environ.get("EXTENSION_THINKING_DISABLED", 1)
+)
+
+# 单句语言点上限（v2.md §2.2；配额 word≤3 / phrase≤2 / slang≤1 / idiom≤1，合计 ≤5）。
+EXTENSION_MAX_POINTS_PER_SENTENCE = int(
+    os.environ.get("EXTENSION_MAX_POINTS_PER_SENTENCE", 5)
+)
+
+# 单句候选上限（分层抽取：规则/词表召回给 LLM 判定的候选条数，控 prompt 体积与成本）。
+# 词表命中优先于 n-gram，其余按 gram 长度降序截断（services/english/extension_candidates.py）。
+EXTENSION_CANDIDATE_MAX = int(os.environ.get("EXTENSION_CANDIDATE_MAX", 40))
+
+# prompt 版本（本面新约定，与既有 build_version / description_version 语义不同）。
+# 进入幂等键 extension_idempotency_key(sentence_id, content_hash, prompt_version, model)，
+# 升版即自然失效旧缓存。
+# v3 = L1 干扰项保底（confusable 必填 ≥3）+ 题面改用候选池补干扰项、选项确定性打乱；
+# v2 = 分层抽取（候选清单 → LLM 只回 candidate_id，不自造 span）；v1 = 单发自由抽取。
+EXTENSION_PROMPT_VERSION = os.environ.get("EXTENSION_PROMPT_VERSION", "v3")
+
+# 规则兜底开关（默认 1 开）：LLM 重试 1 次仍失败时启用 rule_fallback_points（只产 word）。
+# 置 0 用于实验页「关兜底」对照实验，观察纯 LLM 失败率。
+EXTENSION_RULE_FALLBACK_ENABLED = int(
+    os.environ.get("EXTENSION_RULE_FALLBACK_ENABLED", 1)
+)
+
+# LangGraph 非连续短语抽取开关（默认 0 关）：
+# 开 → run_extract_pipeline_via_graph（连续候选 + 非连续 LangGraph 图并行 → merge）；
+# 关 → run_extract_pipeline（一期连续抽取，行为不变）。
+# 非连续短语（turn the light off → turn off）需多 span schema，仅在开关开启时启用。
+EXTENSION_USE_LANGGRAPH = int(os.environ.get("EXTENSION_USE_LANGGRAPH", 0))
+
+# 两集合（data-model-contract §4.24 / §4.25）
+EXTENSION_POINT_COLLECTION = os.environ.get(
+    "EXTENSION_POINT_COLLECTION", "english_extension_point"
+)
+EXTENSION_TASK_COLLECTION = os.environ.get(
+    "EXTENSION_TASK_COLLECTION", "extension_task"
+)
+
+# ---- 学习者校对（修订 2：全局人工覆盖 → 学习者 overlay，2026-10-03）----------
+#
+# 定位：校对是**学习者的学习行为**，不是系统的统一判断（source=manual 全局层已下线）。
+# 学习者判断只写 extension_review / extension_review_log 两集合，**零 mastery 写入**（R9）。
+
+# 学习者校对开关（默认 1 开）：关 → E4' / E6 返回 EXTENSION_DISABLED。
+# 与 EXTENSION_ENABLED 相互独立：抽取面可开而校对关（照 EXTENSION_ENABLED 范式，
+# 明确提示、不静默回退）。
+EXTENSION_REVIEW_ENABLED = int(os.environ.get("EXTENSION_REVIEW_ENABLED", 1))
+
+# 单个学习者单句最多自建语言点条数（data-model §4.26）：超出 → INVALID_INPUT。
+# 自建点不进判分（D2），故条数必须封顶，避免无限膨胀拖慢读侧 merge。
+EXTENSION_REVIEW_MAX_ADDED = int(os.environ.get("EXTENSION_REVIEW_MAX_ADDED", 5))
+
+# 两集合（data-model-contract §4.26 / §4.27）
+EXTENSION_REVIEW_COLLECTION = os.environ.get(
+    "EXTENSION_REVIEW_COLLECTION", "extension_review"
+)
+EXTENSION_REVIEW_LOG_COLLECTION = os.environ.get(
+    "EXTENSION_REVIEW_LOG_COLLECTION", "extension_review_log"
+)

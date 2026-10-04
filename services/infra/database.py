@@ -326,6 +326,36 @@ class CloudBaseNoSQLClient:
         logger.info(f"[DB] delete_collection 完成 → {collection_name}")
         return resp
 
+    async def create_indexes(self, collection: str, indexes: list[dict]) -> dict:
+        """在集合上建索引（幂等：同名索引重复创建不会产生重复项）。
+
+        Args:
+            collection: 集合名称
+            indexes: MongoDB createIndexes 的 `indexes` 数组，元素形如
+                ``{"key": {"scholar_id": 1, "sentence_id": 1},
+                   "name": "scholar_sentence", "unique": True}``
+
+        走 RunCommands 的 CREATEINDEXES 命令（与 query/insert 同一通道）。
+        若云端不支持该 CommandType 会抛异常，由调用方决定是否降级。
+        """
+        cmd = {"createIndexes": collection, "indexes": indexes}
+        raw = await self._run_command(collection, "CREATEINDEXES", cmd)
+        try:
+            result = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            result = {}
+        if isinstance(result, list):
+            result = result[0] if result else {}
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                result = {}
+        if isinstance(result, dict):
+            result = self._normalize_types(result)
+        logger.info(f"[DB] create_indexes 完成 → {collection} {[i.get('name') for i in indexes]}")
+        return result if isinstance(result, dict) else {"raw": str(result)[:200]}
+
     # ==================== 文档查询 ====================
 
     async def query(

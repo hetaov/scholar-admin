@@ -27,6 +27,7 @@ from services.dependencies import get_db
 from services.learning import (
     dialogue_gen_task,
     dialogue_task,
+    extension_task,
     session_state,
     session_state_v3,
     session_state_v4,
@@ -105,6 +106,16 @@ async def _run_dialogue_gen_cleanup_round() -> None:
     await dialogue_gen_task.cleanup_expired(db)
 
 
+async def _run_extension_cleanup_round() -> None:
+    """执行一轮英文语句扩展（extension_task）巡检：恢复卡死 + 清理过期。
+
+    独立轮次，不改动既有时序。EXTENSION_ENABLED=0 时集合为空，低成本空转。
+    """
+    db = get_db()
+    await extension_task.recover_stale_tasks(db)
+    await extension_task.cleanup_expired(db)
+
+
 async def _cleanup_loop(
     name: str,
     round_fn: Callable[[], Awaitable[None]],
@@ -178,6 +189,13 @@ def start_session_v4_cleanup_loop(
 ) -> asyncio.Task:
     """启动 AI 会话 v4（ai_session_v4_task/ai_session_v4）巡检循环（幂等）。"""
     return _start_loop("session_v4", _run_session_v4_cleanup_round, interval)
+
+
+def start_extension_cleanup_loop(
+    interval: float = CLEANUP_INTERVAL_SECONDS,
+) -> asyncio.Task:
+    """启动英文语句扩展（extension_task）巡检循环（幂等）。"""
+    return _start_loop("extension", _run_extension_cleanup_round, interval)
 
 
 async def stop_all_loops() -> None:

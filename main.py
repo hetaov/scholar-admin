@@ -31,6 +31,7 @@ from services.auth import require_debug_access, require_paid_user
 from services.background_tasks import (
     start_dialogue_cleanup_loop,
     start_dialogue_gen_cleanup_loop,
+    start_extension_cleanup_loop,
     start_session_cleanup_loop,
     start_session_v3_cleanup_loop,
     start_session_v4_cleanup_loop,
@@ -58,6 +59,7 @@ from services.routes_planner import router as planner_router
 from services.routes_math import router as math_router
 from services.routes_math_debug import router as math_debug_router
 from services.routes_english import router as english_router
+from services.routes.extension import router as extension_router
 from services.routes_review_recommend import router as review_recommend_router
 from services.routes_lesson import router as lesson_router
 
@@ -85,6 +87,7 @@ async def lifespan(_: FastAPI):
     start_session_v3_cleanup_loop()
     start_session_v4_cleanup_loop()
     start_dialogue_gen_cleanup_loop()
+    start_extension_cleanup_loop()
     try:
         yield
     finally:
@@ -139,6 +142,7 @@ _PAID_ROUTERS = [
     ai_v3_router,
     ai_v4_router,
     dialogue_gen_router,
+    extension_router,
 ]
 
 for _router in _FREE_ROUTERS:
