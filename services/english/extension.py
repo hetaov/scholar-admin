@@ -790,7 +790,7 @@ L2_RUBRIC_SYSTEM_PROMPT = """你是英语造句评测专家。请根据「目标
 
 1. 目标点使用（target_usage）：是否正确使用了所选语言点（词义 / 搭配 / 语法形式）
 2. 语法（grammar）：句子语法是否正确
-3. 语义贴合（semantics）：句子是否表达了合理、通顺的意思
+3. 语义贴合（semantics）：**有情景时**——是否表达了所给中文情景的意思；**无情景时**——句子是否表达合理通顺的意思
 4. 语域与搭配（register_collocation）：语域是否恰当、搭配是否自然
 
 总分 ≥ 6 为通过（passed）。
@@ -807,22 +807,50 @@ L2_RUBRIC_SYSTEM_PROMPT = """你是英语造句评测专家。请根据「目标
 """
 
 
-def _build_l2_rubric_messages(points: list[dict], user_answer: str) -> list[dict]:
+def _build_l2_rubric_messages(
+    points: list[dict],
+    user_answer: str,
+    round_context: dict | None = None,
+) -> list[dict]:
+    """装配 L2 rubric 判分 messages。
+
+    Args:
+        round_context: **三期多轮可选上下文** —— `{"prompt_zh": ..., "reference_en": ...}`。
+            有值时追加第三行「给定中文情景：…（参考表达：…）」，使 `semantics` 维有锚点；
+            **E2（单轮）不传 → messages 与三期前逐字一致**（兼容性变更，口径零影响）。
+    """
     target_desc = "; ".join(
         f"{p['text']}({p['type']}): {p.get('meaning_zh', '')}" for p in points
     )
-    user = f"目标语言点：{target_desc}\n学习者造句：{user_answer}\n请评分。"
+    user = f"目标语言点：{target_desc}\n学习者造句：{user_answer}\n"
+    if round_context:
+        prompt_zh = str(round_context.get("prompt_zh") or "").strip()
+        reference_en = str(round_context.get("reference_en") or "").strip()
+        if prompt_zh:
+            line = f"给定中文情景：{prompt_zh}"
+            if reference_en:
+                line += f"（参考表达：{reference_en}）"
+            user += line + "\n"
+    user += "请评分。"
     return [
         {"role": "system", "content": L2_RUBRIC_SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]
 
 
-async def _call_l2_rubric_llm(points: list[dict], user_answer: str) -> dict:
-    """调用 LLM 做 L2 rubric 4 维评测，返回解析后的 dict（失败抛 ExtensionError）。"""
+async def _call_l2_rubric_llm(
+    points: list[dict],
+    user_answer: str,
+    round_context: dict | None = None,
+) -> dict:
+    """调用 LLM 做 L2 rubric 4 维评测，返回解析后的 dict（失败抛 ExtensionError）。
+
+    `round_context` 见 `_build_l2_rubric_messages`：多轮判分传入本轮中文情景与参考句，
+    单轮（E2）不传 —— 既有调用方行为零变更。
+    """
     from services.providers.extension_llm import call_extension_llm, extract_json, ExtensionError
 
-    messages = _build_l2_rubric_messages(points, user_answer)
+    messages = _build_l2_rubric_messages(points, user_answer, round_context)
     content = await call_extension_llm(messages)
     parsed = extract_json(content)
     if not parsed:
