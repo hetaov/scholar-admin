@@ -507,3 +507,68 @@ EXTENSION_REVIEW_COLLECTION = os.environ.get(
 EXTENSION_REVIEW_LOG_COLLECTION = os.environ.get(
     "EXTENSION_REVIEW_LOG_COLLECTION", "extension_review_log"
 )
+
+# ---- 语言点造句「多轮」（第三期，2026-10-04）--------------------------------------
+#
+# 设计稿：docs_v1/扩展/第三期-语言点造句多轮-v1.md §3.5（配置键表）
+# 契约：docs_v2/02-contract/api-contract.md §3.18（E7 / E8 / E9）、
+#       data-model-contract.md §4.28（extension_round）
+# 任务账本：docs_v1/扩展/第三期-语言点造句多轮-任务拆分与断点-v1.md
+#
+# 定位：只 append，既有扩展配置键零改动。本块为第 5 个集合 extension_round 的全部可调项。
+# 红线：R10 零 mastery 写入 / R11 不回写 english_extension_point / R12 仅本人可见 /
+#      R13 禁静默降级（关开关 → 明确 EXTENSION_ROUND_DISABLED）/ R14 轮次与输入长度封顶。
+
+# 多轮子开关（默认 0 关）：关 → 返回 200 + success=false + code=EXTENSION_ROUND_DISABLED。
+# 与 EXTENSION_ENABLED 相互独立（照 EXTENSION_REVIEW_ENABLED 范式）；
+# 无论 EXTENSION_ENABLED 是否开，本开关关时不静默回退单轮 L2（R13）。
+EXTENSION_ROUND_ENABLED = int(os.environ.get("EXTENSION_ROUND_ENABLED", 0))
+
+# 默认轮次上限（请求不传 max_turns 时用），硬上限见下一键。
+EXTENSION_ROUND_MAX_TURNS = int(os.environ.get("EXTENSION_ROUND_MAX_TURNS", 3))
+
+# 轮次硬上限（默认 6）：请求 max_turns > 本值（或 < 1）→ INVALID_INPUT（R14）。
+# 防单文档超 1MB：turns[] 条数封顶即文档体积封顶。
+EXTENSION_ROUND_MAX_TURNS_HARD = int(
+    os.environ.get("EXTENSION_ROUND_MAX_TURNS_HARD", 6)
+)
+
+# 达标线（rubric 总分 8 分制）：total >= 本值 且 must_use_hit 为真 → finish_passed。
+EXTENSION_ROUND_PASS_SCORE = int(os.environ.get("EXTENSION_ROUND_PASS_SCORE", 6))
+
+# 单次会话最多勾选语言点数：会话内锁定 selected_ids，超出 → INVALID_INPUT。
+EXTENSION_ROUND_MAX_SELECTED = int(
+    os.environ.get("EXTENSION_ROUND_MAX_SELECTED", 3)
+)
+
+# 出题 prompt 版本（独立键，不复用 EXTENSION_PROMPT_VERSION）：
+# 升版即失效旧情景缓存，便于 A/B 对照「中文情景句」质量（M9 / M10 观测口径）。
+EXTENSION_ROUND_PROMPT_VERSION = os.environ.get(
+    "EXTENSION_ROUND_PROMPT_VERSION", "v1"
+)
+
+# 会话集合（data-model-contract §4.28）
+EXTENSION_ROUND_COLLECTION = os.environ.get(
+    "EXTENSION_ROUND_COLLECTION", "extension_round"
+)
+
+# 会话 TTL（小时，默认 24）：超时即弃（cleanup_expired 扫 expires_at）。
+# 会话服务端有状态（ADR-0031），必须有界，避免孤儿文档无限堆积。
+EXTENSION_ROUND_TTL_HOURS = int(os.environ.get("EXTENSION_ROUND_TTL_HOURS", 24))
+
+# 情景重复重出次数（默认 1）：新 prompt_zh 与 used_prompts 相似 → 追加「必须换场景」重出；
+# 仍重复 → 打 repeat_risk=true 放行（不阻断轮次，实验页可见）。
+EXTENSION_ROUND_REPEAT_MAX_RETRY = int(
+    os.environ.get("EXTENSION_ROUND_REPEAT_MAX_RETRY", 1)
+)
+
+# 单次 LLM 上限（秒，默认 120）：对齐 EXTENSION_LLM_TIMEOUT_SECONDS。
+# E8 一次任务内串行两次 LLM（判分 + 出题），各自独立计时。
+EXTENSION_ROUND_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("EXTENSION_ROUND_LLM_TIMEOUT_SECONDS", 120)
+)
+
+# user_input 长度封顶（字符，默认 500，R14）：防单文档超 1MB，超出 → INVALID_INPUT。
+EXTENSION_ROUND_MAX_INPUT_LEN = int(
+    os.environ.get("EXTENSION_ROUND_MAX_INPUT_LEN", 500)
+)
