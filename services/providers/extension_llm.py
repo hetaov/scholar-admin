@@ -234,12 +234,16 @@ async def call_extension_llm(
     messages: list[dict],
     timeout_seconds: int | None = None,
     thinking_disabled: bool | None = None,
+    temperature: float | None = None,
 ) -> str:
     """LLM 调用异步包装：同步请求丢线程池 + asyncio.wait_for 超时强制取消。
 
     Args:
         thinking_disabled: 是否透传 `thinking.type=disabled`；None → 取
             `config.EXTENSION_THINKING_DISABLED`（默认 1 = 关思考）。
+        temperature: 采样温度；None → 走 `_call_extension_llm` 默认 0.2。
+            （三期出题面用 0.3，见 `extension_round_llm.ROUND_TEMPERATURE`；
+            既有抽取 / 判分面不传，行为不变。）
 
     Raises:
         ExtensionError: 超时 → LLM_TIMEOUT(stage=llm)；返回 None → PROVIDER_UNAVAILABLE
@@ -247,10 +251,14 @@ async def call_extension_llm(
     timeout = timeout_seconds or EXTENSION_LLM_TIMEOUT_SECONDS
     if thinking_disabled is None:
         thinking_disabled = bool(EXTENSION_THINKING_DISABLED)
+    temp = 0.2 if temperature is None else temperature
     try:
         content = await asyncio.wait_for(
             run_in_threadpool(
-                _call_extension_llm, messages, thinking_disabled=thinking_disabled
+                _call_extension_llm,
+                messages,
+                temp,
+                thinking_disabled=thinking_disabled,
             ),
             timeout=timeout,
         )
