@@ -4,7 +4,7 @@
 设计：docs_v1/扩展/第三期-语言点造句多轮-v1.md §3.3（出题规格 + 去重兜底）
 账本：docs_v1/扩展/第三期-语言点造句多轮-任务拆分与断点-v1.md（B05）
 
-职责（**出题 + 判分决策**，落库与编排在 B08）：
+职责（**出题 + 判分决策 + E7/E8 编排**）：
 - `build_round_prompt_messages`：按上下文装配出题 messages（目标点 / 原句译文 /
   上一轮 `user_input` + `errors` / 已用情景 / 语域 / 难度），system prompt 取自 B04；
 - `validate_prompt_item`：`banned_check` —— 中文情景句里**不得出现目标点英文原文**
@@ -28,9 +28,11 @@ from __future__ import annotations
 import difflib
 import logging
 import re
+import time
 
 import config
 from services.english.extension import _call_l2_rubric_llm, grade_l2_rubric
+from services.learning import extension_round as round_repo
 from services.learning.extension_round import build_prompt_fingerprint
 from services.providers.extension_llm import STAGE_PARSE, ExtensionError
 from services.providers.extension_round_llm import (
@@ -541,4 +543,284 @@ def build_summary(
         "best_score": best_score,
         "top_errors": top_errors,
         "model_sentences": model_sentences,
+    }
+
+
+# ===========================================================================
+# E7 / E8 执行器（B08 编排层：出题 / 判分 / 落库）
+# ===========================================================================
+
+
+def _select_points(points_snapshot, selected_ids) -> list[dict]:
+    """从快照里取勾选项；命中为空 → INVALID_INPUT（同 E2 口径）。"""
+    selected = [
+        p
+        for p in (points_snapshot or [])
+        if p.get("id") in (selected_ids or [])
+    ]
+    if not selected:
+        raise ExtensionError(
+            round_repo.ERR_INVALID_INPUT,
+            round_repo.STAGE_INPUT,
+            "selected_ids 不在语言点列表中",
+        )
+    return selected
+
+
+def _public_turn(turn: dict) -> dict:
+    """轮次**下发**形态：**剔除 `reference_en`**（决策 D5：出题时落库不下发，防泄题）。"""
+    return {
+        "turn_index": turn.get("turn_index"),
+        "prompt_zh": turn.get("prompt_zh", ""),
+        "register": turn.get("register", ""),
+        "focus_hint": turn.get("focus_hint", "") or "",
+        "scene_tag": list(turn.get("scene_tag") or []),
+        "must_use": list(turn.get("must_use") or []),
+    }
+
+
+def _resolve_round_settings(doc: dict, turns: list[dict]) -> tuple[str, str]:
+    """F9：解析「第 k+1 轮」出题用的 `difficulty` / `register`。
+
+    会话偏好在 E7 落库（`create_round`），E8 入参不含二者 → 服务端自取。
+    补订前（老 doc 无字段）自动回落，**补订前后同一份代码**。
+
+    | 会话 `register` | `difficulty` | 取到的 `register` | 依据 |
+    |---|---|---|---|
+    | 显式非 `auto` | 任意 | 直接用该偏好 | 偏好直达 |
+    | `auto` | `same` | 沿用上一轮 `turns[-1].register` | 「换场景**保持语域**」 |
+    | `auto` | `harder` | 强制 `auto`（**不沿用**） | 「升一级语域」，沿用会把语域锁死 |
+
+    ⚠️ `harder` 时若沿用上一轮语域，`build_round_prompt_messages` 会同时输出
+    「升一级语域」与「语域偏好：neutral（`register` 字段按此填写）」两条打架的指令，
+    模型服从更具体的偏好行 → **`harder` 静默失效**。
+    """
+    difficulty = str(doc.get("difficulty") or DIFFICULTY_SAME)
+    register = str(doc.get("register") or "")
+    if not register or register == REGISTER_AUTO:
+        register = ""
+        if difficulty == DIFFICULTY_SAME and turns:
+            register = str((turns[-1] or {}).get("register") or "")
+    return difficulty, (register or REGISTER_AUTO)
+
+
+async def run_round_start(
+    db,
+    *,
+    scholar_id: str,
+    sentence_id: str,
+    textbook_id: str | None = None,
+    lesson_id: str | None = None,
+    selected_ids: list[str],
+    points_snapshot: list[dict],
+    original: str = "",
+    translation: str = "",
+    max_turns: int | None = None,
+    register: str = REGISTER_AUTO,
+    difficulty: str = DIFFICULTY_SAME,
+) -> dict:
+    """E7 执行器：出题（第 1 轮）→ 建会话 → 落第 1 轮情景。
+
+    **先出题、后建会话**：出题是纯 LLM 不写库，反过来会在出题失败时留下
+    `turn_index=0` 的孤儿会话（红线 R13：失败的轮次不消耗）。
+
+    返回形态见 api-contract §3.18 E7 的 `result`：
+    `{ round_id, turn_index, max_turns, status, turn, points, meta }`；
+    `turn` **不含 `reference_en`**（防泄题，决策 D5）。
+    """
+    started = time.time()
+    selected = _select_points(points_snapshot, selected_ids)
+
+    prompt = await generate_round_prompt(
+        points=selected,
+        original=original,
+        translation=translation,
+        used_prompts=[],
+        prev_turn=None,
+        difficulty=difficulty,
+        register=register,
+        turn_index=1,
+    )
+
+    doc = await round_repo.create_round(
+        db,
+        scholar_id=scholar_id,
+        sentence_id=sentence_id,
+        selected_ids=selected_ids,
+        points_snapshot=points_snapshot,
+        original=original,
+        translation=translation,
+        textbook_id=textbook_id,
+        lesson_id=lesson_id,
+        max_turns=max_turns,
+        register=register,
+        difficulty=difficulty,
+    )
+    # `append_turn` 返回的是**更新后的会话文档**（`_save` 语义），新轮次取 `turns[-1]`
+    updated = await round_repo.append_turn(
+        db,
+        doc["round_id"],
+        turn=prompt,
+        prompt_fingerprint=build_prompt_fingerprint(
+            prompt["prompt_zh"], prompt["scene_tag"]
+        ),
+    )
+    turn_doc = (updated.get("turns") or [])[-1]
+    logger.info(
+        f"[extension_round] start → round_id={doc['round_id']}, "
+        f"sentence_id={sentence_id}, repeat_risk={prompt['repeat_risk']}"
+    )
+    return {
+        "round_id": doc["round_id"],
+        "turn_index": turn_doc["turn_index"],
+        "max_turns": doc["max_turns"],
+        "status": round_repo.STATUS_ACTIVE,
+        "turn": _public_turn(turn_doc),
+        "points": list(points_snapshot or []),
+        "meta": {
+            "prompt_version": prompt["prompt_version"],
+            "model": config.EXTENSION_LLM_MODEL,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "repeat_risk": prompt["repeat_risk"],
+        },
+    }
+
+
+async def run_round_turn(
+    db,
+    *,
+    round_id: str,
+    scholar_id: str,
+    user_input: str,
+    client_turn_index: int | None = None,
+) -> dict:
+    """E8 执行器：判分（LLM ①）→ 决策 →（continue 时）出题（LLM ②）。
+
+    串行两次 LLM 合并为一个端点，是为省一次往返，并避免前端自行编排状态机时
+    漏掉「出题失败不消耗轮次」（契约 §3.18 E8）。
+
+    返回 `{ round_id, turn_index, result, progress, action, next }`；
+    `next` 为第 k+1 轮的 `_public_turn`（**不含 `reference_en`**），终态为 None。
+
+    Raises:
+        ExtensionError: ROUND_NOT_FOUND（R12：归属不符与不存在同码）/
+            ROUND_CLOSED（终态）/ ROUND_TURN_MISMATCH（乐观并发）/
+            LLM_*（判分失败 → **不写 result、turn_index 不前进**，R13）。
+    """
+    doc = await round_repo.get_round(db, round_id, scholar_id=scholar_id)
+    if doc is None:
+        raise ExtensionError(
+            round_repo.ERR_ROUND_NOT_FOUND,
+            round_repo.STAGE_ROUND,
+            "会话不存在或已过期",
+        )
+    if doc.get("status") != round_repo.STATUS_ACTIVE:
+        raise ExtensionError(
+            round_repo.ERR_ROUND_CLOSED,
+            round_repo.STAGE_ROUND,
+            f"本组练习已结束（status={doc.get('status')}）",
+        )
+
+    k = int(doc.get("turn_index") or 0)
+    if client_turn_index is not None and int(client_turn_index) != k:
+        raise ExtensionError(
+            round_repo.ERR_ROUND_TURN_MISMATCH,
+            round_repo.STAGE_ROUND,
+            f"轮次不匹配：服务端当前第 {k} 轮",
+        )
+    turns = [dict(t) for t in (doc.get("turns") or [])]
+    if not turns:
+        raise ExtensionError(
+            round_repo.ERR_ROUND_TURN_MISMATCH,
+            round_repo.STAGE_ROUND,
+            "会话尚无轮次，无法作答",
+        )
+
+    current = turns[-1]
+    selected = _select_points(doc.get("points_snapshot"), doc.get("selected_ids"))
+
+    # LLM ①：判分。失败即抛 —— 不写 result、turn_index 不前进（R13）
+    result = await judge_round_turn(
+        points=selected,
+        user_input=user_input,
+        prompt_zh=current.get("prompt_zh", ""),
+        reference_en=current.get("reference_en", ""),
+    )
+    updated = await round_repo.append_turn_result(
+        db,
+        round_id,
+        turn_index=k,
+        result=result,
+        user_input=user_input,
+    )
+
+    decision = decide_next_action(
+        turn_index=k,
+        max_turns=int(doc.get("max_turns") or 0),
+        score=result.get("score", 0),
+        must_use_hit=result.get("must_use_hit", False),
+    )
+    action = decision["action"]
+    next_turn = None
+
+    if action == ACTION_FINISH_PASSED:
+        await round_repo.close_round(
+            db,
+            round_id,
+            status=round_repo.STATUS_PASSED,
+            summary=build_summary(updated["turns"], passed=True),
+        )
+    elif action == ACTION_FINISH_MAX:
+        await round_repo.close_round(
+            db,
+            round_id,
+            status=round_repo.STATUS_EXHAUSTED,
+            summary=build_summary(updated["turns"], passed=False),
+        )
+    else:
+        # continue → LLM ②：出第 k+1 轮（偏好自会话内取，F9）
+        difficulty, register = _resolve_round_settings(doc, updated["turns"])
+        prompt = await generate_round_prompt(
+            points=selected,
+            original=doc.get("original", ""),
+            translation=doc.get("translation", ""),
+            used_prompts=updated.get("used_prompts") or [],
+            prev_turn={
+                "user_input": user_input,
+                "errors": result.get("errors", []),
+            },
+            difficulty=difficulty,
+            register=register,
+            turn_index=k + 1,
+        )
+        appended = await round_repo.append_turn(
+            db,
+            round_id,
+            turn=prompt,
+            prompt_fingerprint=build_prompt_fingerprint(
+                prompt["prompt_zh"], prompt["scene_tag"]
+            ),
+        )
+        next_turn = _public_turn((appended.get("turns") or [])[-1])
+
+    judged = [t for t in (updated["turns"] or []) if (t or {}).get("result")]
+    logger.info(
+        f"[extension_round] turn → round_id={round_id}, turn_index={k}, "
+        f"action={action}, score={result.get('score')}"
+    )
+    return {
+        "round_id": round_id,
+        "turn_index": k,
+        "result": result,
+        "progress": {
+            "turn_index": k,
+            "max_turns": int(doc.get("max_turns") or 0),
+            "passed": bool(result.get("passed")),
+            "best_score": max(
+                [int((t["result"] or {}).get("score") or 0) for t in judged],
+                default=0,
+            ),
+        },
+        "action": action,
+        "next": next_turn,
     }

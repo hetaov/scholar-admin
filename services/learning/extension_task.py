@@ -27,6 +27,7 @@ from typing import Any
 
 import config
 from services.dependencies import get_db
+from services.providers.extension_llm import ExtensionError
 
 logger = logging.getLogger("scholar-admin.extension_task")
 
@@ -372,34 +373,44 @@ async def run_extension_task(
                 scholar_id=scholar_id,
             )
         elif kind == KIND_ROUND:
-            # 三期多轮（B07 任务层；pipeline 由 B08 落地）
-            if round_action == ROUND_ACTION_START:
-                from services.english.extension_round import run_round_start
+            # 三期多轮（B07 任务层 + B08 pipeline）
+            try:
+                if round_action == ROUND_ACTION_START:
+                    from services.english.extension_round import run_round_start
 
-                result = await run_round_start(
-                    db,
-                    scholar_id=scholar_id,
-                    sentence_id=sentence_id,
-                    textbook_id=textbook_id,
-                    lesson_id=lesson_id,
-                    selected_ids=selected_ids or [],
-                    points_snapshot=points_snapshot or [],
-                    original=original,
-                    translation=translation,
-                    max_turns=max_turns,
-                    register=register,
-                    difficulty=difficulty,
-                )
-            else:  # ROUND_ACTION_TURN（validate_task_kind 已在入口收紧）
-                from services.english.extension_round import run_round_turn
+                    result = await run_round_start(
+                        db,
+                        scholar_id=scholar_id,
+                        sentence_id=sentence_id,
+                        textbook_id=textbook_id,
+                        lesson_id=lesson_id,
+                        selected_ids=selected_ids or [],
+                        points_snapshot=points_snapshot or [],
+                        original=original,
+                        translation=translation,
+                        max_turns=max_turns,
+                        register=register,
+                        difficulty=difficulty,
+                    )
+                else:  # ROUND_ACTION_TURN（validate_task_kind 已在入口收紧）
+                    from services.english.extension_round import run_round_turn
 
-                result = await run_round_turn(
-                    db,
-                    round_id=round_id,
-                    scholar_id=scholar_id,
-                    user_input=user_input or "",
-                    client_turn_index=client_turn_index,
+                    result = await run_round_turn(
+                        db,
+                        round_id=round_id,
+                        scholar_id=scholar_id,
+                        user_input=user_input or "",
+                        client_turn_index=client_turn_index,
+                    )
+            except ExtensionError as e:
+                # 多轮面的业务码（ROUND_NOT_FOUND / ROUND_CLOSED / ROUND_TURN_MISMATCH /
+                # INVALID_INPUT / LLM_*）**原样透出**，不被归一为 PROVIDER_UNAVAILABLE
+                # （契约 §3.18 业务码表）。只包 round 分支：既有 extract / evaluate 零 diff。
+                logger.info(
+                    f"[extension] round biz error → task_id={task_id}, "
+                    f"code={e.error_code}"
                 )
+                error = e.to_dict(config.EXTENSION_LLM_TIMEOUT_SECONDS)
         else:
             raise ValueError(f"unknown kind: {kind}")
     except NotImplementedError:

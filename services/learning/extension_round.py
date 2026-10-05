@@ -167,8 +167,15 @@ async def create_round(
     textbook_id: str | None = None,
     lesson_id: str | None = None,
     max_turns: int | None = None,
+    register: str = "auto",
+    difficulty: str = "same",
 ) -> dict:
     """E7：建会话（**不含第 1 轮情景**，情景由出题链路 `append_turn` 写入）。
+
+    `register` / `difficulty`（**2026-10-05 F9 补订**，data-model §4.28）：E7 传入的
+    **出题偏好**，落会话供**第 2 轮及以后**出题取用（E8 入参不含二者 → 服务端自取）。
+    枚举校验放在路由入参侧；老文档无此字段 → 读侧 `.get()` 按 `auto` / `same` 回落
+    （既有行零迁移，同 `extension_task.round_action` 范式）。
 
     入参校验（红线 R14 / 契约 §4.28）：
     - `scholar_id` / `sentence_id` 空 → INVALID_INPUT；
@@ -221,6 +228,9 @@ async def create_round(
         "points_snapshot": list(points_snapshot or []),
         "original": original or "",
         "translation": translation or "",
+        # F9（2026-10-05）：出题偏好落库，供第 2 轮及以后出题取用
+        "register": register or "auto",
+        "difficulty": difficulty or "same",
         "max_turns": turns_cap,
         "turn_index": 0,
         "status": STATUS_ACTIVE,
