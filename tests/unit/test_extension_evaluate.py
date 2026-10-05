@@ -17,6 +17,8 @@ import config
 from tests.fakes.fake_db import FakeDB
 
 from services.english.extension import (
+    L2_RUBRIC_SYSTEM_PROMPT,
+    _build_l2_rubric_messages,
     _persist_point,
     grade_l1_fill,
     grade_l2_rubric,
@@ -116,6 +118,100 @@ def test_must_use_hit_treats_missing_origin_as_ai():
     """向后兼容：未带 `origin` 的点（既有抽取产出）按 `ai` 处理，行为不变。"""
     pts = [{"text": "take part in"}]
     assert grade_l2_rubric(pts, "I take part in it.")["must_use_hit"] is True
+
+
+# ---------------------------------------------------------------------------
+# C3 判分口径基线（三期 B06 semantics 语义扩展兼容性）
+#
+# 评审 C3 硬条件：B06 把 `L2_RUBRIC_SYSTEM_PROMPT` 第 3 维 semantics 描述改为
+# 「有情景时……；无情景时……」，并给 `_build_l2_rubric_messages` 增可选
+# `round_context`。pytest 全绿只证明代码结构正确，**不足以证明既有 L2 判分口径不变**。
+#
+# 本基线冻结 E2（单轮，不传 round_context）的 messages 结构：
+#   - system prompt 必须含「无情景时」分支且语义与变更前一致；
+#   - user message 不得含「给定中文情景」行（只有多轮才追加）；
+#   - 4 维度 rubric 结构与达标线（total >= 6）不变。
+# 任何对 prompt 文案 / 维度 / 达标线的改动都会打破本基线 → 须重走 SOP 评审。
+# ---------------------------------------------------------------------------
+
+
+# E2 基线：单轮 L2 判分发给 LLM 的 messages（冻结为可回归样本）
+_E2_BASELINE_POINTS = [
+    {"id": "s1#0", "type": "phrase", "text": "take part in", "meaning_zh": "参加"},
+    {"id": "s1#1", "type": "word", "text": "discussion", "meaning_zh": "讨论"},
+]
+_E2_BASELINE_ANSWER = "I take part in the discussion."
+
+
+def test_c3_e2_messages_no_scenario_line():
+    """C3①：E2（round_context=None）的 user message 不含「给定中文情景」行。"""
+    msgs = _build_l2_rubric_messages(_E2_BASELINE_POINTS, _E2_BASELINE_ANSWER)
+    user_content = msgs[1]["content"]
+    assert "给定中文情景" not in user_content
+    assert "参考表达" not in user_content
+    # 结构：目标语言点 + 学习者造句 + 请评分（与三期前逐字一致）
+    assert user_content.startswith("目标语言点：")
+    assert "学习者造句：" in user_content
+    assert user_content.rstrip().endswith("请评分。")
+
+
+def test_c3_e2_system_prompt_semantics_preserves_original_intent():
+    """C3②：system prompt 的 semantics 维「无情景时」分支与变更前语义一致。
+
+    变更前：语义贴合（semantics）：句子是否表达合理通顺的意思
+    变更后：语义贴合（semantics）：有情景时——…；无情景时——句子是否表达合理通顺的意思
+    E2 走「无情景时」分支，判分口径不变。
+    """
+    assert "无情景时" in L2_RUBRIC_SYSTEM_PROMPT
+    assert "句子是否表达合理通顺的意思" in L2_RUBRIC_SYSTEM_PROMPT
+    # 4 维度齐全（target_usage / grammar / semantics / register_collocation）
+    for dim in ("target_usage", "grammar", "semantics", "register_collocation"):
+        assert dim in L2_RUBRIC_SYSTEM_PROMPT
+    # 达标线不变
+    assert "总分 ≥ 6 为通过" in L2_RUBRIC_SYSTEM_PROMPT
+
+
+def test_c3_multiturn_adds_exactly_one_scenario_line():
+    """C3③：多轮（round_context 非空）只追加一行「给定中文情景」，其余与 E2 一致。"""
+    e2_msgs = _build_l2_rubric_messages(_E2_BASELINE_POINTS, _E2_BASELINE_ANSWER)
+    multi_msgs = _build_l2_rubric_messages(
+        _E2_BASELINE_POINTS,
+        _E2_BASELINE_ANSWER,
+        round_context={"prompt_zh": "会议拖得太久。", "reference_en": "He took part in it."},
+    )
+    # system prompt 完全相同（只有 user message 差一行）
+    assert e2_msgs[0]["content"] == multi_msgs[0]["content"]
+    # user message 只差「给定中文情景」行
+    e2_lines = e2_msgs[1]["content"].splitlines()
+    multi_lines = multi_msgs[1]["content"].splitlines()
+    diff = set(multi_lines) - set(e2_lines)
+    assert len(diff) == 1
+    added = diff.pop()
+    assert added.startswith("给定中文情景：")
+    assert "参考表达" in added
+
+
+def test_c3_e2_messages_freeze():
+    """C3④：冻结 E2 messages 全文基线（任何 prompt 文案改动都会打破）。"""
+    msgs = _build_l2_rubric_messages(_E2_BASELINE_POINTS, _E2_BASELINE_ANSWER)
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == L2_RUBRIC_SYSTEM_PROMPT
+    expected_user = (
+        "目标语言点：take part in(phrase): 参加; discussion(word): 讨论\n"
+        "学习者造句：I take part in the discussion.\n"
+        "请评分。"
+    )
+    assert msgs[1]["content"] == expected_user
+    assert msgs[1]["role"] == "user"
+
+
+def test_c3_l2_pass_threshold_unchanged():
+    """C3⑤：达标线（total >= 6）与维度权重不变——后端判达标逻辑。"""
+    pts = [{"text": "take part in"}]
+    # total=6 且 must_use_hit → passed
+    assert grade_l2_rubric(pts, "I take part in it.")["must_use_hit"] is True
+    # 4 维度每维 0-2，总分 0-8，达标线 6
+    assert "总分 ≥ 6 为通过" in L2_RUBRIC_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
