@@ -1,16 +1,18 @@
 """一次性脚本：创建英文语句扩展相关集合与索引（幂等）
 
-创建四个集合：
+创建五个集合：
   - english_extension_point（AI 抽取结果 / 缓存；point_key 幂等）      §4.24
   - extension_task（抽取 / 评测统一任务；24h TTL 由后台 cleanup 清理） §4.25
   - extension_review（学习者判断 overlay 补丁）                       §4.26
   - extension_review_log（学习历史，append-only）                     §4.27
+  - extension_round（**语言点造句多轮会话**，服务端有状态；24h TTL）    §4.28
 
 索引：
   - english_extension_point : point_key（唯一）、sentence_id
   - extension_task          : task_id（唯一）、expires_at
   - extension_review        : (scholar_id, sentence_id) **唯一**、scholar_id
   - extension_review_log    : log_id（唯一）、(scholar_id, sentence_id)、(scholar_id, at)
+  - extension_round         : round_id（唯一）、(scholar_id, sentence_id)、expires_at
 
 用法（在 scholar-admin 项目根目录执行）：
     python -m scripts.init_extension_collections
@@ -19,7 +21,8 @@
 
 已存在集合 / 同名索引时直接跳过（幂等，可重复执行）。
 集合名可通过环境变量 EXTENSION_POINT_COLLECTION / EXTENSION_TASK_COLLECTION /
-EXTENSION_REVIEW_COLLECTION / EXTENSION_REVIEW_LOG_COLLECTION 覆盖。
+EXTENSION_REVIEW_COLLECTION / EXTENSION_REVIEW_LOG_COLLECTION /
+EXTENSION_ROUND_COLLECTION 覆盖。
 需要 CloudBase 环境变量（.env / cloudbaserc.json 注入），本地若无凭据会提示。
 
 索引创建失败只告警不中断：唯一索引是写侧约束的兜底（E4' 全量替换自身即幂等），
@@ -37,7 +40,7 @@ import config  # noqa: E402  加载 EXTENSION_*_COLLECTION
 from services.dependencies import get_db  # noqa: E402
 
 
-# (集合名, [索引 spec, ...])，按 data-model-contract §4.24~§4.27
+# (集合名, [索引 spec, ...])，按 data-model-contract §4.24~§4.28
 COLLECTION_INDEXES: list[tuple[str, list[dict]]] = [
     (
         config.EXTENSION_POINT_COLLECTION,
@@ -73,6 +76,17 @@ COLLECTION_INDEXES: list[tuple[str, list[dict]]] = [
                 "name": "scholar_sentence",
             },
             {"key": {"scholar_id": 1, "at": -1}, "name": "scholar_at"},
+        ],
+    ),
+    (
+        config.EXTENSION_ROUND_COLLECTION,
+        [
+            {"key": {"round_id": 1}, "name": "round_id", "unique": True},
+            {
+                "key": {"scholar_id": 1, "sentence_id": 1},
+                "name": "scholar_sentence",
+            },
+            {"key": {"expires_at": 1}, "name": "expires_at"},
         ],
     ),
 ]
