@@ -543,7 +543,14 @@ async def submit_round_turn(body: SubmitRoundTurnRequest, db=Depends(get_db)):
         return _fail("ROUND_CLOSED", "本组练习已结束，可「再来一组」")
 
     server_turn_index = int(doc.get("turn_index") or 0)
-    if body.client_turn_index is not None and int(body.client_turn_index) != server_turn_index:
+    # 第四期 Z07（用户裁定「同题重新提交，同样消耗一轮」）：接受**同题重提**——
+    # 客户端未达标后仍显示上一轮题面（`onRetrySame` 不递增轮次下标）并重提，故其 `client_turn_index`
+    # 会比服务端少 1。服务端把它实现为「把上一轮题面重新下发为当前轮并判分」⇒ 该次作答**同样消耗一轮**
+    # （落点在 `run_round_turn`）。**仅放宽到 `cur` 与 `cur-1`（后者需 `cur >= 2`）**，其余仍拒绝（防乱序/重复）。
+    allowed = {server_turn_index}
+    if server_turn_index >= 2:
+        allowed.add(server_turn_index - 1)
+    if body.client_turn_index is not None and int(body.client_turn_index) not in allowed:
         return _fail(
             "ROUND_TURN_MISMATCH",
             f"轮次已变化，请按当前轮次重新提交（服务端当前第 {server_turn_index} 轮）",

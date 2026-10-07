@@ -486,3 +486,136 @@ def test_route_turn_not_found_raises_404(monkeypatch):
         _run(fetch_round("rnd_missing", scholar_id=SCHOLAR, db=db))
     assert e2.value.status_code == 404
     assert db.write_log == []
+
+
+# ===========================================================================
+# 第四期 Z07：「同题重提（改一次）同样消耗一轮」
+# ===========================================================================
+
+
+def _doc(db, round_id):
+    return _run(repo.get_round(db, round_id, scholar_id=SCHOLAR))
+
+
+def test_e8_same_question_retry_is_accepted_and_consumes_a_round(monkeypatch):
+    """同题重提：客户端仍报**上一轮**下标 ⇒ 把那一轮题面重新下发为当前轮并判分。
+
+    要点：① 不得 ROUND_TURN_MISMATCH；② `turn_index` / `progress.turn_index` **前进到当前轮**
+    ⇒ 该次作答**同样消耗一轮**；③ 当前轮题面被改写为**上一轮那一道**（同题）；④ **不新增轮次**。
+    """
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    rid = started["round_id"]
+    prompt_1 = started["turn"]["prompt_zh"]
+
+    # 第 1 轮未达标 → continue（服务端随即下发第 2 轮）
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    out1 = _turn(db, rid, monkeypatch, client_turn_index=1)
+    assert out1["action"] == ACTION_CONTINUE
+    assert out1["turn_index"] == 1
+    assert _doc(db, rid)["turn_index"] == 2  # 已下发第 2 轮
+
+    # 「按反馈改一次（同题）」：客户端仍报 1（= 服务端 2 - 1）——此前必然 ROUND_TURN_MISMATCH
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    out2 = _turn(db, rid, monkeypatch, client_turn_index=1)
+    assert out2["action"] == ACTION_CONTINUE
+    assert out2["turn_index"] == 2           # ← 该次作答落在第 2 轮（消耗一轮）
+    assert out2["progress"]["turn_index"] == 2
+
+    doc = _doc(db, rid)
+    # 重提本身**不新增轮次**（改写第 2 轮题面）；`continue` 之后照常下发第 3 轮 ⇒ 共 3 条
+    assert len(doc["turns"]) == 3
+    assert doc["turns"][1]["prompt_zh"] == prompt_1  # 第 2 轮题面 = 第 1 轮那一道（同题）
+    assert doc["turns"][1]["result"] is not None     # 判分写入当前轮（第 2 轮）
+    assert doc["turns"][0]["result"] is not None     # 第 1 轮原判分保留（不被覆盖）
+    assert doc["turn_index"] == 3                    # 已下发第 3 轮
+
+
+def test_e8_same_question_retry_can_exhaust_the_budget(monkeypatch):
+    """轮次预算按**作答次数**计：max_turns=2 时，第 1 轮的「改一次」就吃掉最后一个名额 →
+    未达标即 `finish_max`（会话收口），而不是白给一次重试。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=2)
+    rid = started["round_id"]
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    assert _turn(db, rid, monkeypatch, client_turn_index=1)["action"] == ACTION_CONTINUE
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    out = _turn(db, rid, monkeypatch, client_turn_index=1)  # 同题重提 → 占用第 2 轮 = 上限
+    assert out["action"] == ACTION_FINISH_MAX
+    assert out["next"] is None
+    assert _doc(db, rid)["status"] == repo.STATUS_EXHAUSTED
+
+
+def test_e8_retry_pass_ends_session(monkeypatch):
+    """同题重提**通过** → 正常 `finish_passed`（会话收口，不再出题）。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    rid = started["round_id"]
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    assert _turn(db, rid, monkeypatch, client_turn_index=1)["action"] == ACTION_CONTINUE
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_PASS])
+    out = _turn(db, rid, monkeypatch, client_turn_index=1)
+    assert out["action"] == ACTION_FINISH_PASSED
+    assert out["next"] is None
+    assert _doc(db, rid)["status"] == repo.STATUS_PASSED
+
+
+def test_e8_retry_index_range_is_narrow(monkeypatch):
+    """放宽**仅限** `cur` 与 `cur-1`：更早轮次（cur-2）与未来的轮次仍 ROUND_TURN_MISMATCH。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=4)
+    rid = started["round_id"]
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    _turn(db, rid, monkeypatch, client_turn_index=1)   # → 下发第 2 轮
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    _turn(db, rid, monkeypatch, client_turn_index=2)   # → 下发第 3 轮（cur=3）
+
+    for bad in (1, 4, 9):  # 1 = cur-2（非「上一轮」）；4/9 = 未来轮次
+        with pytest.raises(ExtensionError) as e:
+            _turn(db, rid, monkeypatch, client_turn_index=bad)
+        assert e.value.error_code == repo.ERR_ROUND_TURN_MISMATCH
+
+
+def test_e8_retry_not_allowed_on_first_turn(monkeypatch):
+    """第 1 轮（cur=1）没有「上一轮」可言 ⇒ `client_turn_index=0` 仍 ROUND_TURN_MISMATCH。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    with pytest.raises(ExtensionError) as e:
+        _turn(db, started["round_id"], monkeypatch, client_turn_index=0)
+    assert e.value.error_code == repo.ERR_ROUND_TURN_MISMATCH
+
+
+def test_route_turn_accepts_same_question_retry(monkeypatch):
+    """路由层同样接受「同题重提」（`client_turn_index == cur-1`）。
+
+    ⚠️ 两处都放宽才算通（路由的 `allowed` 集合 + `run_round_turn` 的重提分支）——缺一即失败，
+    故本用例锁路由那一处（编排那处由上面的 E8 用例覆盖）。
+    """
+    monkeypatch.setattr(config, "EXTENSION_ROUND_ENABLED", 1)
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    rid = started["round_id"]
+
+    # 第 1 轮未达标 → 服务端下发第 2 轮
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    assert _turn(db, rid, monkeypatch, client_turn_index=1)["action"] == ACTION_CONTINUE
+
+    # 同题重提：客户端仍报 1（= cur 2 - 1）→ 路由**不得**回 ROUND_TURN_MISMATCH
+    out = _run(
+        submit_round_turn(
+            SubmitRoundTurnRequest(
+                round_id=rid,
+                scholar_id=SCHOLAR,
+                user_input=ANSWER_OK,
+                client_turn_index=1,
+            ),
+            db=db,
+        )
+    )
+    assert out["success"] is True
+    assert out.get("code") != "ROUND_TURN_MISMATCH"

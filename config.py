@@ -548,7 +548,9 @@ EXTENSION_REVIEW_LOG_COLLECTION = os.environ.get(
 EXTENSION_ROUND_ENABLED = int(os.environ.get("EXTENSION_ROUND_ENABLED", 0))
 
 # 默认轮次上限（请求不传 max_turns 时用），硬上限见下一键。
-EXTENSION_ROUND_MAX_TURNS = int(os.environ.get("EXTENSION_ROUND_MAX_TURNS", 3))
+# 2026-10-07（真机走查裁定「改成最多 5 轮」）：默认 **3 → 5**，与小程序
+#   `config.extensionRoundMaxTurns`（同步改为 5，且小程序为**显式下发**）保持一致；硬上限仍 6。
+EXTENSION_ROUND_MAX_TURNS = int(os.environ.get("EXTENSION_ROUND_MAX_TURNS", 5))
 
 # 轮次硬上限（默认 6）：请求 max_turns > 本值（或 < 1）→ INVALID_INPUT（R14）。
 # 防单文档超 1MB：turns[] 条数封顶即文档体积封顶。

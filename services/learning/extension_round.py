@@ -308,6 +308,54 @@ async def append_turn(
     )
 
 
+async def replace_last_turn_prompt(
+    db,
+    round_id: str,
+    *,
+    turn: dict,
+) -> dict:
+    """把**末轮**（尚未作答的那一轮）的题面改指为 `turn` —— 供「同题重提（改一次）」使用。
+
+    语义（2026-10-07，真机走查裁定）：客户端在未达标后仍显示**上一轮**题面并重提时，服务端把
+    那一轮题面**重新下发为当前轮**，随后照常判分写回 ⇒ 该次作答**同样消耗一轮**（`turn_index` 不变、
+    **不新增轮次**）。与 `append_turn` 的差别：**不改 `turn_index`、不 append `turns`、不追加 `used_prompts`**
+    （同一题面的指纹已在其中，避免重复记账）。
+
+    - `turn_index`（服务端当前轮）不变；`result` / `user_input` 复位为 None（替换后由 `append_turn_result` 写入）；
+    - 仅允许在**末轮尚未作答**时替换（`result is None`）→ 否则 ROUND_TURN_MISMATCH（防覆盖已判分的轮）；
+    - 会话非 active → ROUND_CLOSED；不存在 → ROUND_NOT_FOUND。
+    """
+    doc = _require_active(await _load(db, round_id))
+    turns = [dict(t) for t in (doc.get("turns") or [])]
+    if not turns:
+        raise ExtensionError(
+            ERR_ROUND_TURN_MISMATCH, STAGE_ROUND, "会话尚无轮次，无法改写题面"
+        )
+    idx = len(turns) - 1
+    if turns[idx].get("result") is not None:
+        raise ExtensionError(
+            ERR_ROUND_TURN_MISMATCH,
+            STAGE_ROUND,
+            "当前轮已判分，不能改写题面",
+        )
+    src = dict(turn or {})
+    replaced = {
+        **turns[idx],
+        "prompt_zh": src.get("prompt_zh", ""),
+        "register": src.get("register", ""),
+        "focus_hint": src.get("focus_hint", "") or "",
+        "scene_tag": list(src.get("scene_tag") or []),
+        "must_use": list(src.get("must_use") or []),
+        "reference_en": src.get("reference_en", "") or "",
+        "repeat_risk": bool(src.get("repeat_risk", False)),
+        "user_input": None,
+        "result": None,
+        "at": _now_ms(),
+    }
+    turns[idx] = replaced
+    return await _save(db, doc, {"turns": turns})
+
+
 async def append_turn_result(
     db,
     round_id: str,

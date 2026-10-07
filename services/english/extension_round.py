@@ -722,12 +722,6 @@ async def run_round_turn(
         )
 
     k = int(doc.get("turn_index") or 0)
-    if client_turn_index is not None and int(client_turn_index) != k:
-        raise ExtensionError(
-            round_repo.ERR_ROUND_TURN_MISMATCH,
-            round_repo.STAGE_ROUND,
-            f"轮次不匹配：服务端当前第 {k} 轮",
-        )
     turns = [dict(t) for t in (doc.get("turns") or [])]
     if not turns:
         raise ExtensionError(
@@ -735,6 +729,32 @@ async def run_round_turn(
             round_repo.STAGE_ROUND,
             "会话尚无轮次，无法作答",
         )
+
+    # 第四期 Z07（用户裁定「同题重新提交，同样消耗一轮」）：**同题重提（「改一次」）**
+    # 客户端在未达标后**仍显示上一轮题面**（`onRetrySame` 不递增 `round.turnIndex`）并重提
+    # ⇒ 这里收到的是**上一轮**下标。处置：把那一轮题面**重新下发为当前轮**（末轮尚未作答），
+    # 随后照常判分写回 ⇒ **该次作答同样消耗一轮**（`turn_index` 不变、不新增轮次）。
+    # 仅接受 `cur` 与 `cur-1`（后者需 `cur >= 2`）；其余一律 ROUND_TURN_MISMATCH（防乱序 / 重复提交）。
+    retry = (
+        client_turn_index is not None and k >= 2 and int(client_turn_index) == k - 1
+    )
+    if client_turn_index is not None and int(client_turn_index) != k and not retry:
+        raise ExtensionError(
+            round_repo.ERR_ROUND_TURN_MISMATCH,
+            round_repo.STAGE_ROUND,
+            f"轮次不匹配：服务端当前第 {k} 轮",
+        )
+    if retry:
+        await round_repo.replace_last_turn_prompt(db, round_id, turn=turns[-2])
+        refreshed = await round_repo.get_round(db, round_id, scholar_id=scholar_id)
+        if refreshed is None:
+            raise ExtensionError(
+                round_repo.ERR_ROUND_NOT_FOUND,
+                round_repo.STAGE_ROUND,
+                "会话不存在或已过期",
+            )
+        doc = refreshed
+        turns = [dict(t) for t in (doc.get("turns") or [])]
 
     current = turns[-1]
     selected = _select_points(doc.get("points_snapshot"), doc.get("selected_ids"))
