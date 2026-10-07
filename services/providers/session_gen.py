@@ -28,6 +28,7 @@ import re
 
 from config import (
     SESSION_LLM_TIMEOUT_SECONDS,
+    SESSION_V2_THINKING_DISABLED,
     VOLCANO_API_KEY,
     VOLCANO_BASE_URL,
     VOLCANO_CHAT_MODEL,
@@ -287,16 +288,39 @@ def build_session_messages(context: dict, content_type: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _thinking_field(thinking_disabled: bool) -> dict:
+    """方舟「思考」开关字段：关思考时返回 `{"thinking": {"type": "disabled"}}`，否则空。
+
+    同 `services/providers/dialogue_gen.py::_thinking_field`（会话面 v4 已验证）与
+    `services/providers/extension_llm.py::_thinking_field`：`VOLCANO_CHAT_MODEL` 是推理型模型，
+    会先产出 reasoning_content，真正的 content（含本路径要求的 JSON）几乎到最后才出。
+    会话生成是「按语境续写 + 结构化输出」，不需要推理 ⇒ 关思考显著缩短单次调用耗时，输出结构不变。
+    """
+    return {"thinking": {"type": "disabled"}} if thinking_disabled else {}
+
+
 def _call_session_llm(messages: list[dict], temperature: float = 0.7) -> str | None:
     """同步调用火山方舟对话模型（OpenAI 兼容）；凭据缺失 / 调用失败返回 None。
 
     超时由外层 `call_session_llm` 的 `asyncio.wait_for` 兜底（强取消），
     本函数仅设置 requests 软超时（防止线程池悬挂占满）。
+
+    2026-10-07：补 `thinking.type=disabled`（`SESSION_V2_THINKING_DISABLED`，默认 1 = 关）。
+    此前本 provider **完全没有透传该字段**，而模型是推理型 ⇒ 与 v4 同因同果的慢（真机走查实测）。
     """
     if not (VOLCANO_API_KEY and VOLCANO_CHAT_MODEL):
         logger.warning("[session_gen] 未配置火山方舟凭据，无法生成")
         return None
     import requests
+
+    payload = {
+        "model": VOLCANO_CHAT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        # 强制 JSON 输出（OpenAI 兼容字段，方舟支持）
+        "response_format": {"type": "json_object"},
+    }
+    payload.update(_thinking_field(bool(SESSION_V2_THINKING_DISABLED)))
 
     resp = requests.post(
         f"{VOLCANO_BASE_URL}/chat/completions",
@@ -304,13 +328,7 @@ def _call_session_llm(messages: list[dict], temperature: float = 0.7) -> str | N
             "Authorization": f"Bearer {VOLCANO_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": VOLCANO_CHAT_MODEL,
-            "messages": messages,
-            "temperature": temperature,
-            # 强制 JSON 输出（OpenAI 兼容字段，方舟支持）
-            "response_format": {"type": "json_object"},
-        },
+        json=payload,
         timeout=SESSION_LLM_TIMEOUT_SECONDS,
     )
     if resp.status_code != 200:

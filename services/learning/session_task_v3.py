@@ -30,7 +30,12 @@ import time
 import uuid
 from typing import Any
 
-from config import SESSION_LLM_TIMEOUT_SECONDS, SESSION_V3_STATE_COLLECTION, SESSION_V3_TASK_COLLECTION
+from config import (
+    SESSION_LLM_TIMEOUT_SECONDS,
+    SESSION_V3_STATE_COLLECTION,
+    SESSION_V3_TASK_COLLECTION,
+    SESSION_V3_THINKING_DISABLED,
+)
 from services.dependencies import get_db
 from services.learning import session_state_v3 as session_state
 from services.learning import dialogue_engine
@@ -295,6 +300,10 @@ async def run_session_task(task_id: str) -> None:
             session_id=session_id,
             context=task.get("context") or {},
             preferred_type=task.get("preferred_type", "auto"),
+            # 2026-10-07：补关思考（`SESSION_V3_THINKING_DISABLED`，默认跟随 v4）——
+            # v3 与 v4 同 provider，且该 provider 的 `thinking_disabled` 默认 False（= 思考开），
+            # 未透传时 v3 仍是慢的那一档（engine 与模型均与 v4 相同，见 config.py 注释）。
+            thinking_disabled=bool(SESSION_V3_THINKING_DISABLED),
         )
         result = {
             "session_id": session_id,

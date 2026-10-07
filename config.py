@@ -371,6 +371,29 @@ SESSION_V4_STREAM_ENABLED = int(os.environ.get("SESSION_V4_STREAM_ENABLED", 0))
 # 仅作用于 v4 路径；置 0 可复现「思考开」用于对照。
 SESSION_V4_THINKING_DISABLED = int(os.environ.get("SESSION_V4_THINKING_DISABLED", 1))
 
+# 关闭模型「思考」（默认 1 = 关）——**v2 会话路径**（小程序实际走的路径：`POST /ai/session/v2`）。
+# 2026-10-07 补齐：v2 的 provider（`services/providers/session_gen.py`）此前**根本没有透传该字段**
+#   （其 payload 只有 model / messages / temperature / response_format），而它用的是同一个
+#   `VOLCANO_CHAT_MODEL`（推理型）⇒ 与 v4 同因同果，调用明显偏慢（真机走查实测）。
+#   与 `EXTENSION_THINKING_DISABLED` / `SESSION_V4_THINKING_DISABLED` 同一结论：推理型模型先产出
+#   reasoning_content，content（含 JSON）几乎到最后才出；会话生成是「按语境续写 + 结构化输出」，
+#   不需要推理。置 0 可复现「思考开」用于对照。
+SESSION_V2_THINKING_DISABLED = int(os.environ.get("SESSION_V2_THINKING_DISABLED", 1))
+
+# 关闭模型「思考」（默认**跟随 v4**）—— **v3 会话路径**（`POST /ai/session/v3`）。
+# 2026-10-07 补齐：v3 与 v4 走**同一个 provider**（`services/learning/dialogue_engine`
+#   → `services/providers/dialogue_gen.py`），该 provider 的 `thinking_disabled` **默认 False**
+#   （其 docstring 记作「现行为」）⇒ 未显式透传的 v3 仍是「思考开」，与 v4 关掉后的对照差距明显。
+#   v3 与 v4 引擎/结论相同（`VOLCANO_CHAT_MODEL` 为推理型），故默认**继承 v4 开关**
+#   （写法沿用同文件 `LLM_JUDGE_DISABLE_THINKING` 跟随 `LLM_DISABLE_THINKING` 的既有先例），
+#   需要单独对照时可 `SESSION_V3_THINKING_DISABLED=0` 独立覆盖。
+SESSION_V3_THINKING_DISABLED = int(
+    os.environ.get(
+        "SESSION_V3_THINKING_DISABLED",
+        "1" if SESSION_V4_THINKING_DISABLED else "0",
+    )
+)
+
 # 增量落库节流：距上次写入 ≥ throttle_ms 或新增字符 ≥ min_chars 时写一次；
 # 单轮写入次数上限保护（避免写放大失控）。
 SESSION_V4_PARTIAL_THROTTLE_MS = int(os.environ.get("SESSION_V4_PARTIAL_THROTTLE_MS", 400))
