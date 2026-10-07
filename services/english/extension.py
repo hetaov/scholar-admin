@@ -1334,9 +1334,29 @@ async def _persist_point(
             data={"$set": doc},
             multi=False,
         )
-    else:
-        doc["created_at"] = now
+        return
+    doc["created_at"] = now
+    try:
         await db.insert(config.EXTENSION_POINT_COLLECTION, doc)
+    except Exception as err:  # noqa: BLE001
+        # 并发竞态兜底（2026-10-07 真机走查修复）：上面是**先查后写**，而 `point_key` 上是**唯一索引**。
+        # 两个抽取任务同时进入本分支时（同一句被并发抽取 —— 同句多端 / 抽取重试 / 同一句被不同学员
+        # 同时抽；注意 `extension_idempotency_key` **不含 `scholar_id`**），后到者会撞唯一索引抛 E11000。
+        # 这是**幂等**场景（同 `sentence_id` + 同 `content_hash` + 同 `prompt_version`/`model`），
+        # 按「后写者胜」原地更新即可，**不得把整次抽取判失败** ——
+        # 否则学员侧表现为「语言点抽取失败」，且**重试仍失败**（同一句、同一 key）⇒ 卡在该步无法推进。
+        if "E11000" not in str(err):
+            raise
+        again = await _find_cached_point(db, point_key, sentence_id)
+        if again is None:
+            raise
+        doc["created_at"] = again.get("created_at", now)
+        await db.update(
+            config.EXTENSION_POINT_COLLECTION,
+            where={"_id": again["_id"]},
+            data={"$set": doc},
+            multi=False,
+        )
 
 
 # ===========================================================================

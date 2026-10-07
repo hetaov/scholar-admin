@@ -192,3 +192,57 @@ def test_force_refresh_failure_lands_failed_status_in_place(fake_db, monkeypatch
     assert recs[0]["status"] == "failed"
     assert recs[0]["points"] == []
     assert recs[0]["fallback_reason"]
+
+
+# ---------------------------------------------------------------------------
+# 并发竞态（2026-10-07 真机走查修复）：point_key 唯一索引 + 先查后写 → E11000
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_duplicate_insert_is_tolerated(fake_db, monkeypatch):
+    """两个抽取任务同时写同一 `point_key` 时，后到者撞唯一索引 → 应**原地更新**而非判失败。
+
+    真机现象：任务 `kind=extract` 直接 `failed`，`error` 含
+    `E11000 duplicate key error ... english_extension_point index: point_key`；
+    学员侧「语言点抽取失败」，**重试仍失败**（同句同 key）⇒ 卡在该步。
+
+    模拟：包一层 insert —— 先让「并发对手」的行落地（真库中的既有行），再抛含 E11000 的错。
+    """
+    _patch_llm(monkeypatch, [_llm_reply("take part in")])
+    real_insert = fake_db.insert
+    state = {"done": False}
+
+    async def _insert_then_dup(collection, data):
+        if not state["done"]:
+            state["done"] = True
+            # 对手先写入同一 point_key 的行（内容故意不同，用于证明随后发生了**更新**）
+            await real_insert(collection, {**data, "status": "stale", "points": []})
+            raise Exception(
+                "API Error [FailedOperation]: write command error: [{write errors: "
+                "[{E11000 duplicate key error collection: tnt-x.english_extension_point "
+                'index: point_key dup key: { point_key: "deadbeef" }}]}, {<nil>}]'
+            )
+        return await real_insert(collection, data)
+
+    monkeypatch.setattr(fake_db, "insert", _insert_then_dup)
+
+    result = _run(run_extract_pipeline(fake_db, sentence_id="s1", original=ORIGINAL))
+
+    assert result["meta"]["source"] == "llm", "并发撞键不得把整次抽取判失败"
+    recs = _records(fake_db)
+    assert len(recs) == 1, "应原地更新，不产生重复行"
+    assert recs[0]["status"] == "success"          # ← 被更新（对手写的是 stale）
+    assert recs[0]["points"][0]["text"] == "take part in"
+
+
+def test_non_duplicate_insert_error_still_raises(fake_db, monkeypatch):
+    """只有 E11000 才兜底：其它写库异常必须**照旧抛出**（不静默吞掉真故障）。"""
+    _patch_llm(monkeypatch, [_llm_reply("take part in")])
+
+    async def _boom(collection, data):
+        raise Exception("API Error [FailedOperation]: write command error: network down")
+
+    monkeypatch.setattr(fake_db, "insert", _boom)
+
+    with pytest.raises(Exception, match="network down"):
+        _run(run_extract_pipeline(fake_db, sentence_id="s1", original=ORIGINAL))
