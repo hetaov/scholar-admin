@@ -198,11 +198,9 @@ def test_e8_finish_max_when_turns_exhausted(monkeypatch):
         "passed": False,
         "best_score": 4,
         "top_errors": ["时态不一致", "搭配生硬"],
-        "model_sentences": [
-            "He takes part in the discussion.",
-            "He takes part in the discussion.",
-            "He takes part in the discussion.",
-        ],
+        # ★ ADR-0034（第五期 P2）：三轮示范句字符串全等 → 去重保序后只留 1 条
+        # （旧断言的 3 条重复正是本期要修的缺陷行为，故刷新断言，非回归）。
+        "model_sentences": ["He takes part in the discussion."],
     }
 
 

@@ -502,7 +502,8 @@ def build_summary(
     - `turns_used`：有判分结果的轮数（未判分的作废轮不计）；
     - `best_score`：各轮最高分；
     - `top_errors`：跨轮错误按出现次数取 **Top3**（次数相同按首次出现序）；
-    - `model_sentences`：按轮序的示范句（LLM 未给则 `reference_en` 兜底）。
+    - `model_sentences`：按轮序的示范句（LLM 未给则 `reference_en` 兜底）；
+      **按字符串全等去重、保首次出现序**（ADR-0034，data-model §4.28）。
 
     `passed` 缺省（None）时取**末轮** `result.passed`（B08 亦可按终态显式传入）。
     """
@@ -525,13 +526,18 @@ def build_summary(
         e for e in sorted(order, key=lambda x: (-counts[x], order.index(x)))
     ][:TOP_ERRORS_LIMIT]
 
+    # ★ ADR-0034（第五期 P2）：按字符串全等去重、**保首次出现序**（dict.fromkeys 语义）。
+    # 禁 list(set(...)) / sorted(set(...)) —— 轮次语义优先于展示丰富度；
+    # 同题重提（replace_last_turn_prompt）致相邻两轮 reference_en 相同 ⇒ 旧行为会出现两条完全相同的示范句。
     model_sentences = []
+    seen: set[str] = set()
     for t in judged:
         result = t["result"] or {}
         sentence = str(result.get("model_sentence") or "").strip()
         if not sentence:
             sentence = str(t.get("reference_en") or "").strip()
-        if sentence:
+        if sentence and sentence not in seen:
+            seen.add(sentence)
             model_sentences.append(sentence)
 
     if passed is None:

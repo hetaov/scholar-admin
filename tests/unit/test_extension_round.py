@@ -1250,3 +1250,54 @@ def test_build_summary_passed_from_terminal_status():
         "top_errors": [],
         "model_sentences": [],
     }
+
+
+def test_build_summary_model_sentences_dedup_same_reference_fallback():
+    """★ ADR-0034（第五期 P2）：同题重提 → 两轮 `reference_en` 兜底相同 → 去重后只留 1 条。"""
+    turns = [
+        {"reference_en": "He took part in the talk.", "result": {"score": 4, "errors": ["时态不一致"], "model_sentence": ""}},
+        {"reference_en": "He took part in the talk.", "result": {"score": 6, "errors": ["时态不一致"], "model_sentence": ""}},
+    ]
+    s = build_summary(turns)
+    assert s["model_sentences"] == ["He took part in the talk."]
+    # ★ F-R3：其余 4 字段口径零改
+    assert s["turns_used"] == 2
+    assert s["best_score"] == 6
+    assert s["passed"] is False
+    assert s["top_errors"] == ["时态不一致"]
+
+
+def test_build_summary_model_sentences_dedup_keeps_first_seen_order():
+    """保序：去重后仍按轮次首次出现序，**禁字典序排序**（ADR-0034 取舍）。"""
+    turns = [
+        {"reference_en": "", "result": {"score": 5, "errors": [], "model_sentence": "B sentence."}},
+        {"reference_en": "", "result": {"score": 5, "errors": [], "model_sentence": "A sentence."}},
+        {"reference_en": "", "result": {"score": 5, "errors": [], "model_sentence": "B sentence."}},
+    ]
+    s = build_summary(turns)
+    assert s["model_sentences"] == ["B sentence.", "A sentence."]  # 非 ["A sentence.", "B sentence."]
+    assert s["turns_used"] == 3
+
+
+def test_build_summary_model_sentences_distinct_is_untouched():
+    """兼容性：多条不同示范句**逐字零变化**（无重复则不减长度）。"""
+    turns = [
+        {"reference_en": "Ref A.", "result": {"score": 5, "errors": [], "model_sentence": "M1."}},
+        {"reference_en": "Ref B.", "result": {"score": 5, "errors": [], "model_sentence": "M2."}},
+    ]
+    assert build_summary(turns)["model_sentences"] == ["M1.", "M2."]
+
+
+def test_build_summary_model_sentences_dedup_after_strip():
+    """先 strip 再比对：首尾空白不同的同一句同样判重（不产生「看着一样」的两条）。"""
+    turns = [
+        {"reference_en": "  He took part in the talk.  ", "result": {"score": 5, "errors": [], "model_sentence": ""}},
+        {"reference_en": "He took part in the talk.", "result": {"score": 5, "errors": [], "model_sentence": ""}},
+    ]
+    assert build_summary(turns)["model_sentences"] == ["He took part in the talk."]
+
+
+def test_build_summary_model_sentences_all_empty_is_empty():
+    """全空（LLM 未给 + 无 `reference_en`）→ []，不产生空串条目。"""
+    turns = [{"reference_en": "", "result": {"score": 5, "errors": [], "model_sentence": ""}}]
+    assert build_summary(turns)["model_sentences"] == []
