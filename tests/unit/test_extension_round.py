@@ -1239,6 +1239,44 @@ def test_build_summary_top_errors_and_fallback():
     ]
 
 
+def test_build_summary_top_errors_recency_breaks_tie():
+    """★ 真机缺陷（2026-10-13）：**同题重提（「按反馈改一次」）后常错 Top3 仍是上一轮的三条**。
+
+    复现路径：第 1 轮提交 → 点「按反馈改一次（同题）」→ 第 2 轮录音重提 → 出小结卡。
+    学习者已按反馈改过，第 2 轮的 errors 与第 1 轮**不同**；而旧排序在「出现次数相同」时按
+    **首次出现序** ⇒ 第 1 轮的三条永久占据 Top3，第 2 轮的新错误被 `[:3]` 截断掉
+    ⇒ 用户观感「轮数 / 最高分都变了，只有常错 Top3 还是上一次的三条」。
+
+    修复口径：次数相同 ⇒ **最近一次出现优先**（`-last_seen`），同轮内按轮内出现序稳定兜底。
+    """
+    turns = [
+        {
+            "reference_en": "",
+            "result": {"score": 4, "errors": ["时态不一致", "搭配生硬", "语序"], "model_sentence": ""},
+        },
+        {
+            "reference_en": "",
+            "result": {"score": 7, "errors": ["冠词缺失", "拼写错误"], "model_sentence": ""},
+        },
+    ]
+    s = build_summary(turns)
+    # 第 2 轮仍在犯的错误优先；已改掉的旧错误降位（但仍在榜，跨轮计数语义保留）
+    assert s["top_errors"] == ["冠词缺失", "拼写错误", "时态不一致"]
+    # 其余字段口径零改
+    assert s["turns_used"] == 2
+    assert s["best_score"] == 7
+
+
+def test_build_summary_top_errors_count_still_dominates():
+    """回归护栏：真·常错（跨轮反复出现）**仍以次数优先**，不被「最近出现」反超。"""
+    turns = [
+        {"reference_en": "", "result": {"score": 4, "errors": ["时态不一致", "搭配生硬"], "model_sentence": ""}},
+        {"reference_en": "", "result": {"score": 5, "errors": ["时态不一致"], "model_sentence": ""}},
+    ]
+    s = build_summary(turns)
+    assert s["top_errors"] == ["时态不一致", "搭配生硬"]
+
+
 def test_build_summary_passed_from_terminal_status():
     turns = [{"reference_en": "", "result": {"score": 8, "errors": [], "model_sentence": "m1"}}]
     assert build_summary(turns, passed=True)["passed"] is True

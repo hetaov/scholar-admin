@@ -501,7 +501,8 @@ def build_summary(
     `{ turns_used, passed, best_score, top_errors[], model_sentences[] }`：
     - `turns_used`：有判分结果的轮数（未判分的作废轮不计）；
     - `best_score`：各轮最高分；
-    - `top_errors`：跨轮错误按出现次数取 **Top3**（次数相同按首次出现序）；
+    - `top_errors`：跨轮错误按出现次数取 **Top3**；次数相同按**最近一次出现**优先，
+      仍相同则按该轮内出现序稳定兜底（2026-10-13 真机修复，见下方「★ 排序口径」）；
     - `model_sentences`：按轮序的示范句（LLM 未给则 `reference_en` 兜底）；
       **按字符串全等去重、保首次出现序**（ADR-0034，data-model §4.28）。
 
@@ -513,7 +514,8 @@ def build_summary(
 
     counts: dict[str, int] = {}
     order: list[str] = []
-    for t in judged:
+    last_seen: dict[str, int] = {}
+    for i, t in enumerate(judged):
         for e in (t["result"] or {}).get("errors") or []:
             text = str(e or "").strip()
             if not text:
@@ -522,8 +524,21 @@ def build_summary(
                 counts[text] = 0
                 order.append(text)
             counts[text] += 1
+            last_seen[text] = i
+    # ★ 排序口径（2026-10-13 真机缺陷修复）：
+    #   ① 出现次数**降序**（跨轮反复犯 = 真·常错，语义不变）；
+    #   ② 次数相同 ⇒ **最近一次出现优先**（`-last_seen`）。
+    #      原口径此处为「首次出现序」⇒ **同题重提（「按反馈改一次」）时旧错误永久占榜**：
+    #      学习者已按反馈改过，第 2 轮的 errors 与第 1 轮不同，但两者计数同为 1，
+    #      旧口径让第 1 轮的三条稳居前三，新错误被 `[:3]` 截断 ⇒ 真机现象
+    #      「轮数 / 最高分都变了，只有常错 Top3 还是上一次提交的那三条」。
+    #   ③ 仍相同（同一轮内的多个错误）⇒ 按轮内出现序稳定兜底，保证输出确定性。
     top_errors = [
-        e for e in sorted(order, key=lambda x: (-counts[x], order.index(x)))
+        e
+        for e in sorted(
+            order,
+            key=lambda x: (-counts[x], -last_seen[x], order.index(x)),
+        )
     ][:TOP_ERRORS_LIMIT]
 
     # ★ ADR-0034（第五期 P2）：按字符串全等去重、**保首次出现序**（dict.fromkeys 语义）。
