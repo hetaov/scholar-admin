@@ -4,7 +4,7 @@ audit_log 集合：
 - **append-only**：只插入，不可修改 / 删除；保留 ≥6 个月，到期归档
 - 字段：log_id、action、object_ref、actor、occurred_at、result、context
 
-action 枚举（以契约 DM-4 必审清单 7 分组为准，5+3+1+3+5+3+3=23 类）：
+action 枚举（以契约 DM-4 必审清单 9 分组为准，5+3+1+3+5+3+3+1+3=27 类）：
 ① 既有 5 类（ADR-0011，F3 练习纸）：
   generate / share / download / return / modify
 ② F2 描述 3 类：
@@ -22,6 +22,8 @@ action 枚举（以契约 DM-4 必审清单 7 分组为准，5+3+1+3+5+3+3=23 �
   create_sentence_group / edit_sentence_group / delete_sentence_group
 ⑧ ED 英语批量去重 1 类（E-API-12 新增，service-contract §8.1 定稿）：
   deduplicate_english_sentences
+⑨ QZ 数学同类型题 3 类（2026-10-11 新增，ADR-0035 D8 定稿）：
+  quiz_recognize / quiz_generate / quiz_render
 """
 from __future__ import annotations
 
@@ -68,7 +70,12 @@ AUDIT_ACTION_DELETE_SENTENCE_GROUP = "delete_sentence_group"  # E-API-11 管理�
 # —— E-API-12 新增：ED 英语批量去重 1 类（契约 DM-4 必审清单第 ⑧ 组，23 → 24 类） —— #
 AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES = "deduplicate_english_sentences"  # E-API-12 批量去重
 
-# 必审动作全集（DM-4 定稿：5+3+1+3+5+3+3+1 = 24 类）
+# —— QZ 新增：数学同类型题 3 类（契约 DM-4 必审清单第 ⑨ 组，24 → 27 类；ADR-0035 D8） —— #
+AUDIT_ACTION_QUIZ_RECOGNIZE = "quiz_recognize"  # 接口 28 拍照题识别（Judge 付费调用）
+AUDIT_ACTION_QUIZ_GENERATE = "quiz_generate"    # 接口 29 出同类型题（LLM 付费调用）
+AUDIT_ACTION_QUIZ_RENDER = "quiz_render"        # 接口 30 确认打印 / 异步渲染
+
+# 必审动作全集（DM-4 定稿：5+3+1+3+5+3+3+1+3 = 27 类）
 # — 命名约定：双常量等价，REQUIRED_AUDIT_ACTIONS 为契约对外命名；MUST_AUDIT_ACTIONS 为历史命名（向后兼容）
 MUST_AUDIT_ACTIONS = frozenset(
     {
@@ -104,6 +111,10 @@ MUST_AUDIT_ACTIONS = frozenset(
         AUDIT_ACTION_DELETE_SENTENCE_GROUP,
         # ⑧ ED 英语批量去重（E-API-12 新增，1 类）
         AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES,
+        # ⑨ QZ 数学同类型题（E-API/ADR-0035 新增，3 类）
+        AUDIT_ACTION_QUIZ_RECOGNIZE,
+        AUDIT_ACTION_QUIZ_GENERATE,
+        AUDIT_ACTION_QUIZ_RENDER,
     }
 )
 REQUIRED_AUDIT_ACTIONS = MUST_AUDIT_ACTIONS  # 契约命名别名（DM-4 REQUIRED_AUDIT_ACTIONS）

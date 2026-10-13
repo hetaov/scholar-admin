@@ -23,11 +23,15 @@ from __future__ import annotations
 
 class TestRequiredAuditActionsLength:
     def test_required_audit_actions_import_and_len_24(self):
-        """契约 DM-4：20 → 23 → 24 类（E-API-12 ⑧ 组），必审动作全集大小 = 24。"""
+        """契约 DM-4：M3 收口径下必审动作 ≥ 24 类（20 → 23 → 24）。
+
+        注：历史的 `== 24` 硬计数在 QZ 组（数学同类型题 3 类，24 → 27）并入后已改为下界断言；
+        **全集精确计数由 `test_audit_quiz_actions.py` 钉死**（各分组扩展互不影响历史意图）。
+        """
         from services.audit import REQUIRED_AUDIT_ACTIONS
 
         assert REQUIRED_AUDIT_ACTIONS is not None
-        assert len(REQUIRED_AUDIT_ACTIONS) == 24
+        assert len(REQUIRED_AUDIT_ACTIONS) >= 24
 
     def test_must_audit_actions_alias_still_works_and_equals_required(self):
         """向后兼容：原有 MUST_AUDIT_ACTIONS 常量仍可 import（零破坏既有调用处），且内容等价于 REQUIRED。"""

@@ -62,6 +62,19 @@ ERROR_TIMEOUT = "timeout"
 ERROR_RENDER_FAILED = "render_failed"
 ERROR_RETRY_EXCEEDED = "retry_exceeded"
 
+# 错误码 → **用户可见**失败原因（落库 `render_message`，接口 31 出参，前端直接展示）
+RENDER_ERROR_MESSAGES = {
+    ERROR_DEPENDENCY_MISSING: "打印稿渲染依赖未安装（WeasyPrint），请联系管理员或稍后重试",
+    ERROR_FONT_MISSING: "中文字体缺失导致渲染失败，请联系管理员",
+    ERROR_TIMEOUT: "打印稿渲染超时，请稍后重试",
+    ERROR_RENDER_FAILED: "打印稿渲染失败，请稍后重试",
+    ERROR_RETRY_EXCEEDED: "打印稿渲染重试次数已达上限，请稍后重试",
+}
+RENDER_ERROR_MESSAGE_DEFAULT = "打印稿渲染失败，请稍后重试"
+
+# 降级（纯文本版式）的用户可见提示
+RENDER_DEGRADED_MESSAGE = "排版引擎不可用，已降级为纯文本版式打印稿"
+
 # 重试上限（契约：retries 上限 1 次，超限降级）
 RENDER_RETRY_LIMIT = 1
 
@@ -98,6 +111,10 @@ class RenderJobNotFoundError(RenderError):
 
 class SheetNotFoundError(RenderError):
     """practice_sheet 不存在"""
+
+
+class QuizNotFoundError(RenderError):
+    """math_quiz 不存在"""
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +291,92 @@ html, body {{ font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei",
 <div class="footer">
   <span>家长可扫码核对答案与解析</span>
   {qr_html}
+</div>
+</body>
+</html>"""
+
+
+def build_quiz_html(quiz: dict) -> str:
+    """math_quiz 落库文档 → A4 版式 HTML（B10 · 设计文档 D7）
+
+    与 `build_sheet_html`(179) 的差异（D7）：
+    - **无二维码区** —— quiz 无家长扫码回传环节，全程不调用 `_qrcode_ref` /
+      `_qrcode_data_uri`，也不读 `SHEET_QR_*` 配置；
+    - 每题带**来源角标**「来自原题 k」（= `source_index + 1`）；
+    - 页头 meta 显示「共 N 题」统计（对齐前端统计条口径）；
+    - 末页参考答案（无二维码版式，用途同练习纸：家长核对）。
+
+    降级渲染直接复用通用 `build_degraded_html`（字段口径一致：`items[].question` /
+    `items[].answer`）。
+    """
+    items = quiz.get("items") or []
+    scholar_id = quiz.get("scholar_id") or ""
+    created_at = quiz.get("created_at") or 0
+    date_str = time.strftime("%Y-%m-%d", time.localtime(created_at / 1000)) if created_at else ""
+
+    rows: list[str] = []
+    for idx, it in enumerate(items, start=1):
+        question = _html_escape(it.get("question") or "")
+        try:  # 来源角标：source_index + 1；非法值不显示角标
+            src_no = int(it.get("source_index")) + 1
+        except (TypeError, ValueError):
+            src_no = 0
+        badges = f'<span class="badge src">来自原题 {src_no}</span>' if src_no > 0 else ""
+        if it.get("is_extended"):  # P1 拔高题角标（奥数扩展点）
+            badges += '<span class="badge ext">奥数拔高</span>'
+        rows.append(
+            '<div class="q">'
+            f'<div class="q-head"><span class="q-no">{idx}.</span>'
+            f'<span class="q-body">{question}</span>{badges}</div>'
+            f'<div class="answer-area"></div>'
+            "</div>"
+        )
+
+    answers: list[str] = []
+    for idx, it in enumerate(items, start=1):
+        ans = _html_escape(it.get("answer") or "")
+        hint = _html_escape(it.get("hint") or "")
+        hint_html = f'<div class="hint">提示:{hint}</div>' if hint else ""
+        answers.append(f'<div class="ans"><span class="q-no">{idx}.</span>{ans}{hint_html}</div>')
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<style>
+@page {{ size: A4; margin: {PAGE_MARGIN_MM}mm; }}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+html, body {{ font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; color: #222; font-size: 14px; line-height: 1.7; }}
+.header {{ border-bottom: 2px solid #222; padding-bottom: 6px; margin-bottom: 10px; }}
+.header .title {{ font-size: 22px; font-weight: 700; text-align: center; letter-spacing: 2px; }}
+.header .meta {{ font-size: 12px; color: #555; margin-top: 6px; display: flex; justify-content: space-between; }}
+.q {{ margin-bottom: 14px; page-break-inside: avoid; }}
+.q-head {{ display: flex; align-items: baseline; }}
+.q-no {{ font-weight: 700; margin-right: 6px; }}
+.q-body {{ flex: 1; }}
+.badge {{ display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }}
+.badge.src {{ background: #eaf2fd; color: #2471a3; border: 1px solid #a9cce3; }}
+.badge.ext {{ background: #fdecea; color: #c0392b; border: 1px solid #e8b4ad; }}
+.answer-area {{ height: 26mm; margin-top: 6px; border-bottom: 1px dashed #bbb; }}
+.answers-page {{ page-break-before: always; }}
+.answers-page .title {{ font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 10px; }}
+.ans {{ margin-bottom: 8px; page-break-inside: avoid; }}
+.hint {{ font-size: 12px; color: #888; margin-left: 20px; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="title">数学同类型题练习</div>
+  <div class="meta">
+    <span>学生:{_html_escape(scholar_id)}</span>
+    <span>共 {len(items)} 题</span>
+    <span>日期:{date_str}</span>
+  </div>
+</div>
+{''.join(rows)}
+<div class="answers-page">
+  <div class="title">参考答案（家长核对）</div>
+  {''.join(answers)}
 </div>
 </body>
 </html>"""
@@ -514,6 +617,41 @@ def _classify_error(exc: Exception) -> str:
     return ERROR_RENDER_FAILED
 
 
+def _compose_artifacts(entity_id: str, status: str) -> tuple[dict, dict]:
+    """产物引用口径（契约 §4.12.6，`file_refs` 拼 `RENDER_STATIC_URL_PREFIX/{id}`）：
+
+    sheet 与 quiz 共用同一套文件名常量（`PDF_FILENAME` / `PNG_FILENAME` / `PREVIEW_FILENAME`）
+    与拼装规则；success / degraded 回写产物引用，failed 清空。
+
+    Returns: `(artifacts, file_refs)`
+    """
+    base_url = f"{RENDER_STATIC_URL_PREFIX}/{entity_id}"
+    artifacts = {
+        "pdf": f"{base_url}/{PDF_FILENAME}",
+        "png": f"{base_url}/{PNG_FILENAME}",
+        "preview": f"{base_url}/{PREVIEW_FILENAME}",
+    }
+    if status in (RENDER_JOB_SUCCESS, RENDER_JOB_DEGRADED):
+        return artifacts, dict(artifacts)
+    return artifacts, {"pdf": "", "png": "", "preview": ""}
+
+
+def render_message(render_status: str, error_code: str = "") -> str:
+    """渲染结果 → **用户可见**原因（`math_quiz.render_message`，接口 31 出参）。
+
+    - success → `""`（无需提示）
+    - degraded → 降级提示（纯文本版式）
+    - failed → 按 `error_code` 映射的具体原因（依赖缺失 / 字体缺失 / 超时 / 重试超限 …）
+    """
+    if render_status in (RENDER_JOB_SUCCESS, RENDER_JOB_RENDERING, RENDER_JOB_QUEUED):
+        return ""
+    if render_status == RENDER_JOB_DEGRADED:
+        return RENDER_DEGRADED_MESSAGE
+    if render_status == RENDER_JOB_FAILED:
+        return RENDER_ERROR_MESSAGES.get(error_code, RENDER_ERROR_MESSAGE_DEFAULT)
+    return ""
+
+
 async def _finalize_job(
     db,
     sheet_id: str,
@@ -524,22 +662,7 @@ async def _finalize_job(
 ) -> dict:
     """回写 sheet_render_job（status/artifacts/error_code/retries）+ practice_sheet（file_refs/qrcode_ref）"""
     now = _now_ms()
-    base_url = f"{RENDER_STATIC_URL_PREFIX}/{sheet_id}"
-    artifacts = {
-        "pdf": f"{base_url}/{PDF_FILENAME}",
-        "png": f"{base_url}/{PNG_FILENAME}",
-        "preview": f"{base_url}/{PREVIEW_FILENAME}",
-    }
-    # success / degraded 才回写产物引用；failed 清空
-    file_refs = (
-        {
-            "pdf": artifacts["pdf"],
-            "png": artifacts["png"],
-            "preview": artifacts["preview"],
-        }
-        if status in (RENDER_JOB_SUCCESS, RENDER_JOB_DEGRADED)
-        else {"pdf": "", "png": "", "preview": ""}
-    )
+    artifacts, file_refs = _compose_artifacts(sheet_id, status)
 
     job_update: dict = {
         "status": status,
@@ -573,6 +696,161 @@ async def _finalize_job(
         "retries": retries,
         "file_refs": file_refs,
         "qrcode_ref": qr_ref,
+    }
+
+
+async def renderQuizJob(db, quiz_id: str) -> dict:
+    """渲染单份同类型题打印稿（api-contract §3.10 接口 30 · 设计文档 D7）
+
+    与 `renderSheetJob`(468) 的差异（D7）：
+    - **无独立 job 集合**：不落 `sheet_render_job`，状态直接写在 `math_quiz`
+      （`status`: rendering → rendered / failed；`render_status` 透传本次渲染结果）；
+    - **无二维码**：全程不生成、不回写 `qrcode_ref` / `SHEET_QR_*`；
+    - 复用下层资产：`_render_artifacts` / `_classify_error` / 文件名常量 /
+      `file_refs` 拼接口径（`_compose_artifacts`），产物落 `RENDER_OUTPUT_DIR/{quiz_id}`；
+    - 失败沿用 A-14 降级：**重试 1 次**纯文本模板，仍失败 → `status=failed`。
+
+    Args:
+        db: CloudBaseNoSQLClient
+        quiz_id: math_quiz.quiz_id
+
+    Returns:
+        {quiz_id, status, artifacts, error_code, retries, file_refs, render_status}
+
+    Raises:
+        QuizNotFoundError: quiz 不存在（路由层 → 404）
+    """
+    from services.math.quiz import (  # 延迟导入（同 practice_sheet:722）：避免循环依赖
+        MATH_QUIZ_COLLECTION,
+        QUIZ_STATUS_RENDERED,
+        QUIZ_STATUS_RENDERING,
+    )
+
+    quizzes = await db.query(MATH_QUIZ_COLLECTION, where={"quiz_id": quiz_id}, limit=1)
+    quiz = (quizzes.get("records") or [None])[0]
+    if not quiz:
+        raise QuizNotFoundError(f"同类型题不存在: quiz_id={quiz_id}")
+
+    # 渲染中 / 已渲染：幂等直接返回（重复调用不重做，契约：409 或返回既有 file_refs）
+    if quiz.get("status") in (QUIZ_STATUS_RENDERING, QUIZ_STATUS_RENDERED):
+        return {
+            "quiz_id": quiz_id,
+            "status": quiz.get("status"),
+            "artifacts": quiz.get("artifacts") or {},
+            "error_code": quiz.get("error_code") or "",
+            "retries": int(quiz.get("retries") or 0),
+            "file_refs": quiz.get("file_refs") or {"pdf": "", "png": "", "preview": ""},
+            "render_status": quiz.get("render_status") or "",
+            "render_message": quiz.get("render_message") or "",
+        }
+
+    retries = int(quiz.get("retries") or 0)
+    now = _now_ms()
+    await db.update(
+        MATH_QUIZ_COLLECTION,
+        {"quiz_id": quiz_id},
+        {
+            "$set": {
+                "status": QUIZ_STATUS_RENDERING,
+                "render_status": RENDER_JOB_RENDERING,
+                "file_refs": {"pdf": "", "png": "", "preview": ""},
+                "error_code": "",
+                "render_message": "",
+                "updated_at": now,
+            }
+        },
+    )
+
+    quiz_dir = Path(RENDER_OUTPUT_DIR) / quiz_id
+    quiz_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        html = build_quiz_html(quiz)
+        await asyncio.wait_for(
+            _render_artifacts(html, quiz_dir),
+            timeout=RENDER_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, RenderError) as e:
+        retries += 1
+        if retries <= RENDER_RETRY_LIMIT:
+            logger.warning(
+                "[renderQuizJob] 渲染失败，降级纯文本模板重试（retries=%d）: %s", retries, e
+            )
+            try:
+                await asyncio.wait_for(
+                    _render_artifacts(build_degraded_html(quiz), quiz_dir),
+                    timeout=RENDER_TIMEOUT_SECONDS,
+                )
+                return await _finalize_quiz(
+                    db, quiz_id, RENDER_JOB_DEGRADED, retries,
+                    error_code=_classify_error(e),
+                )
+            except Exception as de:  # noqa: BLE001
+                retries += 1
+                logger.error("[renderQuizJob] 降级渲染也失败: %s", de)
+                return await _finalize_quiz(
+                    db, quiz_id, RENDER_JOB_FAILED, retries,
+                    error_code=_classify_error(de),
+                )
+        # 超限（防御）
+        return await _finalize_quiz(
+            db, quiz_id, RENDER_JOB_FAILED, retries,
+            error_code=ERROR_RETRY_EXCEEDED,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("[renderQuizJob] 未预期异常: %s", e)
+        return await _finalize_quiz(
+            db, quiz_id, RENDER_JOB_FAILED, retries,
+            error_code=ERROR_RENDER_FAILED,
+        )
+
+    return await _finalize_quiz(db, quiz_id, RENDER_JOB_SUCCESS, retries)
+
+
+async def _finalize_quiz(
+    db,
+    quiz_id: str,
+    render_status: str,
+    retries: int,
+    error_code: str = "",
+) -> dict:
+    """回写 `math_quiz`：`status`（rendered / failed）+ `render_status` + `file_refs`（D7 无 qrcode_ref）"""
+    from services.math.quiz import (  # 延迟导入，避免循环依赖
+        MATH_QUIZ_COLLECTION,
+        QUIZ_STATUS_FAILED,
+        QUIZ_STATUS_RENDERED,
+    )
+
+    now = _now_ms()
+    ok = render_status in (RENDER_JOB_SUCCESS, RENDER_JOB_DEGRADED)
+    artifacts, file_refs = _compose_artifacts(quiz_id, render_status)
+    status = QUIZ_STATUS_RENDERED if ok else QUIZ_STATUS_FAILED
+    message = render_message(render_status, error_code)
+    if render_status == RENDER_JOB_FAILED and not message:  # 防御：failed 必须有原因
+        message = RENDER_ERROR_MESSAGE_DEFAULT
+    update: dict = {
+        "status": status,
+        "render_status": render_status,
+        "retries": retries,
+        "error_code": error_code,
+        # 用户可见原因（失败 / 降级），前端直接展示；成功为空串
+        "render_message": message,
+        "artifacts": artifacts if ok else {},
+        "file_refs": file_refs,
+        "updated_at": now,
+    }
+    if ok:
+        update["rendered_at"] = now
+    await db.update(MATH_QUIZ_COLLECTION, {"quiz_id": quiz_id}, {"$set": update})
+    return {
+        "quiz_id": quiz_id,
+        "status": status,
+        "artifacts": update["artifacts"],
+        "error_code": error_code,
+        "retries": retries,
+        "file_refs": file_refs,
+        "render_status": render_status,
+        "render_message": message,
     }
 
 

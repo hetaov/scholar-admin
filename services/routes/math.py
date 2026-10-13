@@ -12,11 +12,19 @@ F3 接口 /math/practice-sheet；鉴权归管理端付费组 require_paid_user�
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Any, Literal
+
+from services.audit import (
+    AUDIT_ACTION_QUIZ_RENDER,
+    AUDIT_RESULT_SUCCESS,
+    write_audit,
+)
 
 from services.auth import get_request_openid
 from services.database import (
@@ -25,6 +33,11 @@ from services.database import (
     CloudBaseNoSQLClient,
 )
 from services.dependencies import get_db
+from services.math.a4_renderer import (
+    RENDER_JOB_RENDERING,
+    QuizNotFoundError,
+    renderQuizJob,
+)
 from services.math.curriculum_description import (
     DescriptionError,
     DescriptionValidationError,
@@ -57,6 +70,17 @@ from services.math.practice_sheet import (
     getPracticeSheetById,
     listKnowledgeSummaries,
 )
+from services.math.quiz import (
+    QUIZ_DEFAULT_COUNT_PER_SOURCE,
+    QUIZ_STATUS_GENERATED,
+    QUIZ_STATUS_RENDERED,
+    QUIZ_STATUS_RENDERING,
+    InvalidQuizSourceError,
+    NodeCodeNotFoundError,
+    generateQuiz,
+    getQuizById,
+)
+from services.math.quiz_recognizer import recognize_quiz_scan
 from services.math.skill_progress import build_skill_progress
 from services.math.error_scanner import (
     EXTRA_AI_TEXTBOOK_ID,
@@ -1189,3 +1213,250 @@ async def math_delete_curriculum_node(
     actor = get_request_openid(request) or "anonymous"
     result = await delete_curriculum_node(db, node_id=node_id, actor=actor)
     return {"success": True, "data": result}
+
+
+# ---------------------------------------------------------------------------
+# 🆕 数学同类型题出题 4 接口（SOP ④ · api-contract §3.10 接口 28~31 · ADR-0035）
+# ---------------------------------------------------------------------------
+
+# 渲染后台任务集合：持有强引用，避免 create_task 被 GC 回收
+_QUIZ_RENDER_TASKS: set = set()
+
+
+class QuizRecognizeRequest(BaseModel):
+    """POST /math/scan/quiz-recognize 请求体（接口 28）
+
+    字段**宽松接收**（`str` 默认值），缺参 / `photo_context` 非法 JSON 由路由层
+    统一判 400（沿用 F2/F4 惯例，避免 Pydantic 422 语义偏差）。
+    """
+
+    scholar_id: str = Field("", description="学者 id（必）")
+    scan_id: str = Field(
+        "", description="POST /math/scan/upload（接口 13）返回的 scan_id（OCR 须已完成，必）"
+    )
+    photo_context: str = Field(
+        "",
+        description="教材上下文 JSON（`{textbook_id?, unit_title?, lesson_title?}`）；"
+        "缺省 \"\" = 全量自动猜；非法 JSON → 400",
+    )
+
+
+class QuizSourceQuestion(BaseModel):
+    """`source_questions[]` 单项（接口 29 入参）
+
+    `source_index` 回指接口 28 出参 `items[]` 下标，用于结果项标注「来自原题 k」
+    与幂等签名稳定排序（D9 / D8）。类型校验由服务层统一完成 → 非法一律 400。
+    """
+
+    source_index: Any = Field(None, description="回指接口 28 items[] 的下标（必，整数）")
+    question_text: str = Field("", description="该题题干（识别结果，可编辑后回传；空串 → 400）")
+    knowledge_point_name: str = Field("", description="该题知识点名；缺省 \"\" → prompt 省略知识点段")
+    node_code: str = Field("", description="该题知识点节点码；有值时取 ai_summary.summary 注入 prompt")
+
+
+class GenerateQuizRequest(BaseModel):
+    """POST /math/quiz/generate 请求体（接口 29）"""
+
+    scholar_id: str = Field("", description="学者 id（必）")
+    scan_id: str = Field("", description="溯源用，记入 math_quiz.source_scan_id")
+    source_questions: list[QuizSourceQuestion] = Field(
+        default_factory=list, description="被勾选的源题（D9：未勾选题不出现在数组里）"
+    )
+    count_per_source: Any = Field(
+        QUIZ_DEFAULT_COUNT_PER_SOURCE, description="每道源题出几道（1~3 整数，非法 → 400）"
+    )
+    include_extended: bool = Field(False, description="P1 拔高题开关（本期前端不传）")
+
+
+class RenderQuizRequest(BaseModel):
+    """POST /math/quiz/{quiz_id}/render 请求体（接口 30）"""
+
+    scholar_id: str = Field("", description="学者 id（必）")
+
+
+def _quiz_recognize_error_to_http(exc: Exception) -> HTTPException:
+    """接口 28 异常 → HTTP 状态码（契约：404 scan 不存在/OCR 未就绪，500 Judge/存储失败）"""
+    if isinstance(exc, (ScanNotFoundError, OcrNotReadyError)):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, (JudgeNotConfiguredError, JudgeResponseError)):
+        return HTTPException(status_code=500, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+def _quiz_generate_error_to_http(exc: Exception) -> HTTPException:
+    """接口 29 异常 → HTTP 状态码（契约：400 入参非法，404 node_code 不存在，500 出题失败）"""
+    if isinstance(exc, InvalidQuizSourceError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, NodeCodeNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/scan/quiz-recognize")
+async def math_quiz_recognize(
+    body: QuizRecognizeRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST 拍照题识别（接口 28 · 契约 §3.10）
+
+    链路：读 `math_scan_upload` 的 OCR 结果 → 加载知识点候选集（`photo_context` 命中则收敛）
+    → 一次 Judge 调用「题目切分 + 知识点定位」→ 返回**全部**题干供前端勾选。
+
+    **红线 R1**：全程零写库 —— 不写 `error_record`、不回写 OCR/归类状态、不新建 `curriculum_node`。
+    审计 `quiz_recognize`（成功 / 失败均写）由服务层写入。
+    """
+    actor = get_request_openid(request) or "anonymous"
+    if not body.scholar_id.strip():
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+    if not body.scan_id.strip():
+        raise HTTPException(status_code=400, detail="缺少 scan_id")
+    if body.photo_context.strip():
+        try:
+            json.loads(body.photo_context)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"photo_context 非法 JSON: {e}") from e
+    try:
+        data = await recognize_quiz_scan(
+            db,
+            scan_id=body.scan_id,
+            scholar_id=body.scholar_id,
+            photo_context=body.photo_context,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (ScanNotFoundError, OcrNotReadyError, JudgeNotConfiguredError, JudgeResponseError) as e:
+        raise _quiz_recognize_error_to_http(e) from e
+
+
+@router.post("/quiz/generate")
+async def math_quiz_generate(
+    body: GenerateQuizRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST 出同类型题（接口 29 · 契约 §3.10 · D9）
+
+    只对 `source_questions[]` 内的题出题（**未勾选题零 LLM 调用**），逐源题独立调用
+    出题 prompt → 防背题校验（D6）→ 落库 `math_quiz`；出参经 `_to_public_quiz` 净化，
+    **`answer` / `hint` 不出参**（红线 R3）。幂等：同参数 10 分钟窗口内返回既有 `quiz_id`（D8）。
+    """
+    actor = get_request_openid(request) or "anonymous"
+    try:
+        data = await generateQuiz(
+            db,
+            scholar_id=body.scholar_id,
+            source_questions=[q.model_dump() for q in body.source_questions],
+            scan_id=body.scan_id or None,
+            count_per_source=body.count_per_source,
+            include_extended=body.include_extended,
+            actor=actor,
+        )
+        return {"success": True, "data": data}
+    except (InvalidQuizSourceError, NodeCodeNotFoundError) as e:
+        raise _quiz_generate_error_to_http(e) from e
+    except (LLMResponseError, SummaryLLMNotConfiguredError) as e:
+        # LLMResponseError：全部源题出题失败（500）；LLMNotConfiguredError：模型未配置（400）
+        if isinstance(e, SummaryLLMNotConfiguredError):
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        raise _quiz_generate_error_to_http(e) from e
+
+
+async def _quiz_render_task(db, quiz_id: str) -> None:
+    """渲染后台任务骨架：吞掉所有异常（结果由 `math_quiz` 状态承载，供接口 31 轮询）"""
+    try:
+        await renderQuizJob(db, quiz_id)
+    except QuizNotFoundError as e:
+        logger.warning("[quiz] render 后台任务中止（quiz 不存在）: %s", e)
+    except Exception as e:  # noqa: BLE001
+        logger.error("[quiz] render 后台任务异常 quiz_id=%s: %s", quiz_id, e)
+
+
+def _spawn_quiz_render_task(db, quiz_id: str) -> None:
+    """启动渲染后台任务并持有强引用（防 GC）"""
+    task = asyncio.create_task(_quiz_render_task(db, quiz_id))
+    _QUIZ_RENDER_TASKS.add(task)
+    task.add_done_callback(_QUIZ_RENDER_TASKS.discard)
+
+
+@router.post("/quiz/{quiz_id}/render")
+async def math_quiz_render(
+    quiz_id: str,
+    body: RenderQuizRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST 确认打印（接口 30 · 契约 §3.10 · D7）
+
+    异步渲染 A4（`a4_renderer.renderQuizJob`，**不生成二维码**）：
+    `asyncio.create_task` 后立即返回 `status: "rendering"`，前端轮询接口 31 取 `file_refs`。
+    审计 `action=quiz_render` 在这里写（成功 / 触发失败均留痕）。
+    """
+    actor = get_request_openid(request) or "anonymous"
+    if not body.scholar_id.strip():
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+
+    quiz = await getQuizById(db, quiz_id=quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail=f"同类型题不存在: quiz_id={quiz_id}")
+
+    status = quiz.get("status") or ""
+    file_refs = quiz.get("file_refs") or {"pdf": "", "png": "", "preview": ""}
+    render_message = quiz.get("render_message") or ""
+    if status in (QUIZ_STATUS_RENDERING, QUIZ_STATUS_RENDERED):
+        # 幂等：渲染中 / 已渲染 → 直接返回既有产物，不重复触发
+        return {
+            "success": True,
+            "data": {
+                "quiz_id": quiz_id,
+                "status": status,
+                "file_refs": file_refs,
+                "render_status": quiz.get("render_status") or "",
+                "render_message": render_message,
+            },
+        }
+    if status != QUIZ_STATUS_GENERATED:
+        # 失败原因对用户可见：failed 时带上 `render_message`（如“渲染依赖未安装”）
+        detail = f"当前状态不允许渲染（status={status}），请重新出题"
+        if render_message:
+            detail = f"{detail}：{render_message}"
+        raise HTTPException(status_code=409, detail=detail)
+
+    _spawn_quiz_render_task(db, quiz_id)
+    await write_audit(
+        db,
+        action=AUDIT_ACTION_QUIZ_RENDER,
+        object_ref=quiz_id,
+        actor=actor,
+        result=AUDIT_RESULT_SUCCESS,
+        context={
+            "scholar_id": body.scholar_id,
+            "item_count": len(quiz.get("items") or []),
+        },
+    )
+    return {
+        "success": True,
+        "data": {
+            "quiz_id": quiz_id,
+            "status": QUIZ_STATUS_RENDERING,
+            "file_refs": file_refs,
+            "render_status": RENDER_JOB_RENDERING,
+            "render_message": "",
+        },
+    }
+
+
+@router.get("/quiz/{quiz_id}")
+async def math_get_quiz(
+    quiz_id: str,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET 同类型题详情 / 轮询渲染产物（接口 31 · 契约 §3.10）
+
+    出参为 `_to_public_quiz` 结构 —— `items[].answer` / `hint` **恒不出参**（红线 R3）；
+    `render_status` 由渲染任务回写，前端据此区分「渲染中 / 已成功 / 渲染失败」。
+    """
+    data = await getQuizById(db, quiz_id=quiz_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"同类型题不存在: quiz_id={quiz_id}")
+    return {"success": True, "data": data}
