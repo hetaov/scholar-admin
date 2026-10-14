@@ -61,6 +61,69 @@ except ImportError:  # pragma: no cover — B13 实施后自动切到正式常�
 logger = logging.getLogger("scholar-admin.math.quiz")
 
 # ---------------------------------------------------------------------------
+# 出题排障诊断工具（2026-10-14 加）
+#
+# 背景：真机出现「LLM HTTP 200 但 [quiz] 出题返回空 items」→ 每题重试 2 次均空
+# → 全部源题出题失败（500）。原日志只有一行「出题返回空 items」，看不出是
+# ①输出被 max_tokens 截断（finish_reason=length）②模型把 JSON 吐在
+# reasoning_content 而 content 为空 ③prompt 要求裸数组而代码只认 {"items": [...]}
+# ④模型返回了别的键（questions/items 缺失）。以下工具把上述字段全部落日志。
+#
+# 红线：诊断日志**绝不能影响出题主流程**——取值与写日志全部 try/except 兜底。
+# ---------------------------------------------------------------------------
+
+
+def _preview(value: Any, limit: int = 500) -> str:
+    """任意值 → 截断后的可打印字符串（日志用；永不抛异常）。"""
+    try:
+        text = value if isinstance(value, str) else str(value)
+    except Exception:  # noqa: BLE001 — 诊断工具不得影响主流程
+        return "<unprintable>"
+    return text if len(text) <= limit else f"{text[:limit]}…(截断, 总长 {len(text)})"
+
+
+def _resp_attr(obj: Any, name: str, default: Any = "") -> Any:
+    """安全取响应字段：兼容对象（OpenAI SDK）与 dict（裸响应/mock），永不抛异常。"""
+    try:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _log_quiz_llm_diag(resp: Any, *, model: str, kwargs: dict, prompt: str) -> None:
+    """记录单次出题 LLM 调用的诊断字段。
+
+    必看字段：finish_reason（length = 输出被 max_tokens 截断）/ usage（token 是否打满）/
+    content 长度与原文 / reasoning_content 长度（推理型模型是否把正文吐到别处）/
+    实际下发的 model·max_tokens·response_format·thinking·timeout。
+    """
+    try:
+        choices = _resp_attr(resp, "choices", []) or []
+        first = choices[0] if choices else None
+        message = _resp_attr(first, "message", None)
+        content = _resp_attr(message, "content", "")
+        reasoning = _resp_attr(message, "reasoning_content", "")
+        usage = _resp_attr(resp, "usage", None)
+        logger.info(
+            f"[quiz][llm] model={model!r} max_tokens={kwargs.get('max_tokens')} "
+            f"timeout={kwargs.get('timeout')} response_format={kwargs.get('response_format')} "
+            f"thinking_disabled={bool(kwargs.get('extra_body'))} "
+            f"finish_reason={_resp_attr(first, 'finish_reason', '')!r} "
+            f"prompt_tokens={_resp_attr(usage, 'prompt_tokens', None)} "
+            f"completion_tokens={_resp_attr(usage, 'completion_tokens', None)} "
+            f"total_tokens={_resp_attr(usage, 'total_tokens', None)} "
+            f"prompt_len={len(prompt or '')} "
+            f"content_len={len(content) if isinstance(content, str) else -1} "
+            f"reasoning_len={len(reasoning) if isinstance(reasoning, str) else -1} "
+            f"content_preview={_preview(content, 800)!r}"
+        )
+    except Exception as e:  # noqa: BLE001 — 诊断日志失败不得中断出题
+        logger.warning(f"[quiz][llm] 诊断日志写入失败（已忽略）: {type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # 集合名
 # ---------------------------------------------------------------------------
 
@@ -119,7 +182,14 @@ _QUIZ_QUESTION_USER_TEMPLATE = """请参考下面这道“原题”，出 {count
 要求：
 1. 必须与原题同题型（同为应用题/竖式计算/图形题等）、同考查点；仅替换数值（L1）、或等价替换情境（L2）。
 2. 不改变题目考查的算理/步骤结构；难度贴合原题（±1 档）。
-3. 输出 [{{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 1~5 整数, "hint": "提示语"}}]；**禁止输出原题原文**。"""
+3. 每道题输出 {{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 1~5 整数, "hint": "提示语"}}；**禁止输出原题原文**。
+
+输出 JSON 结构（**必须是含 "items" 键的对象，不要直接输出顶层数组**）：
+{{
+  "items": [
+    {{"question": "...", "answer": "...", "answer_type": "number", "difficulty": 3, "hint": "..."}}
+  ]
+}}"""
 
 # D4 兜底：`knowledge_point_name` 为空（识别未命中且用户未填）→ 省略知识点段，
 # 退化为「纯同题型模仿」，由调用方返回 warnings「未识别到知识点，已按原题题型出题」。
@@ -129,7 +199,14 @@ _QUIZ_QUESTION_USER_TEMPLATE_NO_KP = """请参考下面这道“原题”，出 
 要求：
 1. 必须与原题同题型（同为应用题/竖式计算/图形题等）、同考查点；仅替换数值（L1）、或等价替换情境（L2）。
 2. 不改变题目考查的算理/步骤结构；难度贴合原题（±1 档）。
-3. 输出 [{{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 1~5 整数, "hint": "提示语"}}]；**禁止输出原题原文**。"""
+3. 每道题输出 {{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 1~5 整数, "hint": "提示语"}}；**禁止输出原题原文**。
+
+输出 JSON 结构（**必须是含 "items" 键的对象，不要直接输出顶层数组**）：
+{{
+  "items": [
+    {{"question": "...", "answer": "...", "answer_type": "number", "difficulty": 3, "hint": "..."}}
+  ]
+}}"""
 
 # P1 拔高题（`include_extended=true` 且节点存在 `extended_points` 时使用）：
 # 沿用 `practice_sheet._build_question_prompt`(473) 的奥数口径 —— 以原题题型为起点，
@@ -142,7 +219,14 @@ _QUIZ_EXTENDED_USER_TEMPLATE = """请参考下面这道“原题”与其所属�
 要求：
 1. 在原题题型基础上适度拔高（{extended_band} 档），可引入一步推理或等价变换，**不超纲**。
 2. 难度 4~5；不改变原题考查的算理主线。
-3. 输出 [{{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 4~5 整数, "hint": "提示语"}}]；**禁止输出原题原文**。"""
+3. 每道题输出 {{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 4~5 整数, "hint": "提示语"}}；**禁止输出原题原文**。
+
+输出 JSON 结构（**必须是含 "items" 键的对象，不要直接输出顶层数组**）：
+{{
+  "items": [
+    {{"question": "...", "answer": "...", "answer_type": "text", "difficulty": 4, "hint": "..."}}
+  ]
+}}"""
 
 _QUIZ_EXTENDED_USER_TEMPLATE_NO_KP = """请参考下面这道“原题”，出 {count} 道奥数拔高题。
 
@@ -151,7 +235,14 @@ _QUIZ_EXTENDED_USER_TEMPLATE_NO_KP = """请参考下面这道“原题”，出 
 要求：
 1. 在原题题型基础上适度拔高（{extended_band} 档），可引入一步推理或等价变换，**不超纲**。
 2. 难度 4~5；不改变原题考查的算理主线。
-3. 输出 [{{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 4~5 整数, "hint": "提示语"}}]；**禁止输出原题原文**。"""
+3. 每道题输出 {{"question": "题干", "answer": "参考答案", "answer_type": "number|text", "difficulty": 4~5 整数, "hint": "提示语"}}；**禁止输出原题原文**。
+
+输出 JSON 结构（**必须是含 "items" 键的对象，不要直接输出顶层数组**）：
+{{
+  "items": [
+    {{"question": "...", "answer": "...", "answer_type": "text", "difficulty": 4, "hint": "..."}}
+  ]
+}}"""
 
 
 def _build_quiz_prompt(
@@ -220,7 +311,47 @@ def _call_quiz_chat_sync(client: Any, model: str, system: str, prompt: str) -> s
     if LLM_DISABLE_THINKING:
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     resp = client.chat.completions.create(**kwargs)
+    # 2026-10-14 加：记录 finish_reason / usage / content 预览，定位「200 但 items 为空」
+    _log_quiz_llm_diag(resp, model=model, kwargs=kwargs, prompt=prompt)
     return (resp.choices[0].message.content or "").strip()
+
+
+def _extract_quiz_items(result: Any) -> list | None:
+    """从 LLM 解析结果里取 `items`（**兼容模型跑偏的几种形态**）。
+
+    2026-10-14 真机故障：LLM 返回 HTTP 200，但每题都「出题结果 items 为空」，两次重试
+    均失败 → 全部源题出题失败（500）。根因是 prompt 只写了「输出 `[{...}]`」（裸数组），
+    而解析只认 `{"items": [...]}` —— 模型越听话越失败。本次修法：
+      ① prompt 明确要求 `{"items": [...]}`（与 `practice_sheet._QUESTION_USER_TEMPLATE`
+         的「输出 JSON 结构」段同口径）；
+      ② 本函数对**历史/跑偏形态**兜底，避免再出现「200 但整页失败」。
+
+    兼容形态（按优先级）：
+      1. `[...]` —— 裸数组（模型按旧 prompt 或自由发挥直接输出数组）
+      2. `{"items": [...]}` —— 契约形态
+      3. `{"questions": [...]}` —— 模型常用的同义键
+
+    Returns: 取到且为 list → 该 list；否则 None（调用方按「空 items」重试）。
+    """
+    if isinstance(result, list):
+        logger.warning(
+            f"[quiz] LLM 返回顶层数组（非 {{\"items\": [...]}}），已兜底兼容 "
+            f"items_len={len(result)}"
+        )
+        return result
+    if not isinstance(result, dict):
+        return None
+    items = result.get("items")
+    if isinstance(items, list):
+        return items
+    for key in ("questions",):
+        candidate = result.get(key)
+        if isinstance(candidate, list):
+            logger.warning(
+                f"[quiz] LLM 返回键 {key!r} 而非 'items'，已兜底兼容 items_len={len(candidate)}"
+            )
+            return candidate
+    return None
 
 
 async def _generate_quiz_questions(
@@ -267,16 +398,29 @@ async def _generate_quiz_questions(
                 prompt,
             )
             result = _parse_json_response(response)
-            items = result.get("items") if isinstance(result, dict) else None
+            items = _extract_quiz_items(result)  # 兼容裸数组 / {"questions": [...]}（见函数注释）
             if isinstance(items, list) and items:
                 return items[:count]
             last_err = LLMResponseError("出题结果 items 为空")
-            logger.warning(f"[quiz] 出题返回空 items（第 {attempt} 次）")
+            # 2026-10-14 加：把「为什么空」所需的字段一次打全
+            # —— result_type=list 说明模型按 prompt 返回了裸数组（代码只认 {"items": [...]}）；
+            #    result_keys 能看到模型用了别的键（如 questions）；raw 预览能看到截断/前言。
+            logger.warning(
+                f"[quiz] 出题返回空 items（第 {attempt} 次）model={LLM_SUMMARY_MODEL!r} "
+                f"count={count} extended={extended} kp={knowledge_point_name!r} "
+                f"result_type={type(result).__name__} "
+                f"result_keys={list(result.keys()) if isinstance(result, dict) else None} "
+                f"items_type={type(items).__name__} "
+                f"items_len={len(items) if isinstance(items, list) else None} "
+                f"source_question_preview={_preview(source_question, 120)!r} "
+                f"raw_response_preview={_preview(response, 800)!r}"
+            )
         except Exception as e:  # noqa: BLE001 — 统一重试后仍失败抛 LLMResponseError
             last_err = e
             logger.warning(
-                f"[quiz] 出题失败（第 {attempt} 次）kp={knowledge_point_name!r} "
-                f"count={count}: {type(e).__name__}: {e}"
+                f"[quiz] 出题失败（第 {attempt} 次）model={LLM_SUMMARY_MODEL!r} "
+                f"kp={knowledge_point_name!r} count={count}: {type(e).__name__}: {e} "
+                f"| source_question_preview={_preview(source_question, 120)!r}"
             )
             if type(e).__name__ in ("APITimeoutError", "TimeoutError"):
                 break
@@ -732,6 +876,13 @@ async def generateQuiz(
         include_extended=include_extended,
     )
 
+    t0 = time.time()
+    logger.info(
+        f"[quiz] 出题开始 scholar={scholar_id} 源题数={len(sources)} "
+        f"count_per_source={count_per_source} include_extended={include_extended} "
+        f"model={model!r} signature={signature[:12]} scan_id={scan_id or ''}"
+    )
+
     recent = await _find_recent_quiz(db, scholar_id, signature)
     if recent is not None:
         logger.info(f"[quiz] 幂等命中 quiz_id={recent.get('quiz_id')} scholar={scholar_id}（零 LLM 调用）")
@@ -784,12 +935,21 @@ async def generateQuiz(
                     accepted=accepted,
                 )
         except Exception as e:  # noqa: BLE001 — 单源题失败跳过，不整体失败
-            logger.warning(f"[quiz] {label} 出题失败，已跳过: {type(e).__name__}: {e}")
+            logger.warning(
+                f"[quiz] {label} 出题失败，已跳过: {type(e).__name__}: {e} "
+                f"| model={model!r} count_per_source={count_per_source} kp={kp_name!r} "
+                f"node_code={src.get('node_code') or ''} "
+                f"question_preview={_preview(src['question_text'], 120)!r}"
+            )
             warnings.append(f"{label}出题失败，已跳过")
             failed_sources += 1
             continue
 
         if not items:
+            logger.warning(
+                f"[quiz] {label} 出题结果不可用（校验后为空）raw_items={len(raw_items) if raw_items else 0} "
+                f"warnings={warn} question_preview={_preview(src['question_text'], 120)!r}"
+            )
             warnings.append(f"{label}出题结果不可用，已跳过")
             failed_sources += 1
             continue
@@ -809,7 +969,12 @@ async def generateQuiz(
             extended_count += added
 
     if failed_sources >= len(sources):
-        logger.error(f"[quiz] 全部源题出题失败 scholar={scholar_id} 源题数={len(sources)}")
+        logger.error(
+            f"[quiz] 全部源题出题失败 scholar={scholar_id} 源题数={len(sources)} "
+            f"model={model!r} count_per_source={count_per_source} "
+            f"include_extended={include_extended} signature={signature[:12]} "
+            f"耗时={time.time() - t0:.1f}s warnings={warnings}"
+        )
         await write_audit(
             db,
             action=AUDIT_ACTION_QUIZ_GENERATE,
@@ -829,6 +994,11 @@ async def generateQuiz(
         raise LLMResponseError("全部源题出题失败，请稍后重试")
 
     quiz_id = _gen_quiz_id()
+    logger.info(
+        f"[quiz] 出题完成 quiz_id={quiz_id} scholar={scholar_id} 源题数={len(sources)} "
+        f"生成={len(accepted)} 拔高={extended_count} 失败源题={failed_sources} "
+        f"model={model!r} 耗时={time.time() - t0:.1f}s"
+    )
     audit = await write_audit(
         db,
         action=AUDIT_ACTION_QUIZ_GENERATE,
