@@ -168,23 +168,50 @@ class TestTranscodeToMp3:
         assert "16000" in cmd
         assert "1" in cmd
 
-    def test_falls_back_to_auto_probe_when_forced_format_fails(self, monkeypatch):
-        """强制作 aac 解不出来时，应退化为自动探测（不传 -f）再试一次。
+    def test_auto_probe_is_tried_first(self, monkeypatch):
+        """自动探测应排在最前（真机实测强制 `-f aac` 恒失败，反序会白跑一次 ffmpeg）。
 
         背景：微信 RecorderManager(format:'aac') 产出的虽是 .aac 扩展名，
-        实际容器未必是裸 ADTS，强制 `-f aac` 会解不出来。
+        实际容器不是裸 ADTS —— 强制 `-f aac` 报 `Error opening input: End of file`。
         """
         monkeypatch.setattr(se.shutil, "which", lambda _: "/usr/bin/ffmpeg")
         cmds = []
 
         def run(cmd, *a, **k):
             cmds.append(cmd)
-            forced = "-f" in cmd and cmd[cmd.index("-f") + 1] == "aac"
+            # 只有「自动探测」（输入段不带 -f）能成功
+            head = cmd[: cmd.index("-i")]
+            ok = "-f" not in head
 
             class _Proc:
-                returncode = 1 if forced else 0
-                stdout = b"" if forced else b"MP3!"
-                stderr = b"Invalid data found" if forced else b""
+                returncode = 0 if ok else 1
+                stdout = b"MP3!" if ok else b""
+                stderr = b"" if ok else b"Error opening input: End of file"
+
+            return _Proc()
+
+        monkeypatch.setattr(se.subprocess, "run", run)
+        assert se._transcode_to_mp3(b"AAC", "aac") == b"MP3!"
+
+        # ★ 第一次就命中 ⇒ 不浪费第二次调用
+        assert len(cmds) == 1
+        head0 = cmds[0][: cmds[0].index("-i")]
+        assert "-f" not in head0      # 自动探测，不带输入格式
+
+    def test_falls_back_to_forced_format_when_auto_probe_fails(self, monkeypatch):
+        """自动探测失败时应退回按声明格式强制解复用（顺序反过来的兜底仍在）。"""
+        monkeypatch.setattr(se.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        cmds = []
+
+        def run(cmd, *a, **k):
+            cmds.append(cmd)
+            head = cmd[: cmd.index("-i")]
+            ok = "-f" in head      # 只有强制 -f aac 能成功
+
+            class _Proc:
+                returncode = 0 if ok else 1
+                stdout = b"MP3!" if ok else b""
+                stderr = b"" if ok else b"Invalid data found"
 
             return _Proc()
 
@@ -192,11 +219,8 @@ class TestTranscodeToMp3:
         assert se._transcode_to_mp3(b"AAC", "aac") == b"MP3!"
 
         assert len(cmds) == 2
-        # 只看 `-i` 之前的**输入**段（输出段也有 `-f mp3`，不能用整体包含判断）
-        head0 = cmds[0][: cmds[0].index("-i")]
-        head1 = cmds[1][: cmds[1].index("-i")]
-        assert head0[-2:] == ["-f", "aac"]   # 第一次：强制 aac
-        assert "-f" not in head1             # 第二次：交给 ffmpeg 自动探测
+        assert "-f" not in cmds[0][: cmds[0].index("-i")]        # 先自动探测
+        assert cmds[1][: cmds[1].index("-i")][-2:] == ["-f", "aac"]  # 再强制 aac
 
     def test_logs_magic_bytes_when_all_candidates_fail(self, monkeypatch, caplog):
         """全部候选失败时应打印魔数，便于一眼看出音频的真实容器。"""

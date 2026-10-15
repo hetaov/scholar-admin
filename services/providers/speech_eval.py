@@ -98,10 +98,11 @@ def _transcode_to_mp3(audio_bytes: bytes, src_format: str) -> Optional[bytes]:
         )
         return None
 
-    # 输入格式候选：先按声明格式强制解复用；失败则交给 ffmpeg **自动探测**。
+    # 输入格式候选：**先自动探测**，失败再按声明格式强制解复用。
     # 原因：微信 RecorderManager(format:'aac') 产出的虽然扩展名是 .aac，但实际容器
-    # 未必是裸 ADTS（可能被封装成 mp4/m4a），强制 `-f aac` 会解不出来。
-    for in_fmt in (src_format, None):
+    # 不是裸 ADTS —— 真机实测强制 `-f aac` 恒报 `Error opening input: End of file`，
+    # 而自动探测能正常解出。顺序反过来会每次都白跑一次 ffmpeg（实测约 70ms）。
+    for in_fmt in (None, src_format):
         try:
             cmd = ["ffmpeg", "-nostdin", "-y"]
             if in_fmt:
