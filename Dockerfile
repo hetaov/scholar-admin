@@ -9,6 +9,9 @@ WORKDIR /app
 # - curl:                health check / 调试（备用）
 # - fonts-noto-cjk:      F3.2 A4 练习纸渲染：中文 + 数学符号字体
 # - libpango/libcairo/libgdkpixbuf: WeasyPrint 系统依赖（HTML→PDF 渲染）
+# - ffmpeg:                   2026-10-15 —— aac→mp3 转码（SOE-N 的 VoiceFileType 不含 aac，
+#                             而微信小程序在部分真机上录不出 mp3，只能录 aac；
+#                             见 services/providers/speech_eval.py::_transcode_to_mp3）
 # ---------------------------------------------------------------------------
 RUN set -eux; \
     apt-get update -y; \
@@ -22,6 +25,7 @@ RUN set -eux; \
         libcairo2 \
         libgdk-pixbuf-2.0-0 \
         shared-mime-info \
+        ffmpeg \
     ; \
     rm -rf /var/lib/apt/lists/*
 

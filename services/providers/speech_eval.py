@@ -11,6 +11,8 @@ SpeechProvider 抽象接口 + TencentSoeNProvider 实现（WSS 录音模式 rec_
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 import sys
 import threading
 from abc import ABC, abstractmethod
@@ -60,12 +62,68 @@ SPEECH_FAIL_REASON_TEXT = {
     "eval_failed": "SOE 评测未通过",
     "timeout": "SOE 评测超时",
     "call_error": "SOE 调用异常",
+    # 2026-10-15：aac → mp3 转码失败（见 _transcode_to_mp3 说明）
+    "transcode_failed": "音频转码失败（服务端缺少 ffmpeg 或音频损坏）",
 }
 EVALUATE_TIMEOUT = 65.0        # 录音 ≤60s + 缓冲，超出视为评测失败
 
 # 契约 voice_format 字符串 → SOE-N int（0=pcm / 1=wav / 2=mp3 / 4=speex）
 VOICE_FORMAT_MAP = {"mp3": 2, "wav": 1}
 DEFAULT_VOICE_FORMAT = "mp3"
+
+# 2026-10-15：SOE-N 的 VoiceFileType **不含 aac**，但微信小程序在部分真机上
+# 录不出 mp3 —— `RecorderManager` 的原生/默认格式是 aac，mp3 需额外转码，
+# 而这些机器上该转码失败：起录正常（onStart 有）、能录满时长，但 `stop()` 后
+# 微信 `onError` 报 **file error**（编码器产不出文件）⇒ 观感「所有录音都失败」。
+# 客户端已改为「默认 mp3，file error 时自适应降级 aac」，故服务端必须能吃下 aac：
+#   1. 路由层白名单放行 aac；
+#   2. 本 Provider 在送 SOE 前把 aac 转成 mp3（ffmpeg）。
+# ASR 侧（services/providers/asr.py）原生支持 aac，透传即可，无需转码。
+SOE_TRANSCODE_TO_MP3 = {"aac"}
+TRANSCODE_TIMEOUT = 20.0   # 单句 ≤60s，转码远快于此；超时即判失败，避免拖死评测
+
+
+def _transcode_to_mp3(audio_bytes: bytes, src_format: str) -> Optional[bytes]:
+    """把 SOE 不支持的格式（aac）转成 mp3（16k/单声道），失败返回 None。
+
+    走 ffmpeg 子进程、纯管道输入输出（不落盘，避免并发下的临时文件清理问题）。
+    ffmpeg 缺失时**直接返回 None** ⇒ 上层给出 `transcode_failed`，
+    而不是让 SOE 收到无法解码的字节后超时（那样要等满 65s 才失败）。
+    """
+    if shutil.which("ffmpeg") is None:
+        logger.error(
+            "[speech_eval] 需要转码 %s→mp3，但镜像内缺少 ffmpeg（见 Dockerfile apt 依赖）",
+            src_format,
+        )
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-y",
+                "-f", src_format, "-i", "pipe:0",
+                "-codec:a", "libmp3lame", "-ar", "16000", "-ac", "1",
+                "-f", "mp3", "pipe:1",
+            ],
+            input=audio_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=TRANSCODE_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.error("[speech_eval] %s→mp3 转码异常: %s", src_format, e)
+        return None
+
+    if proc.returncode != 0 or not proc.stdout:
+        logger.error(
+            "[speech_eval] %s→mp3 转码失败 rc=%s stderr=%s",
+            src_format, proc.returncode, (proc.stderr or b"")[-300:],
+        )
+        return None
+    logger.info(
+        "[speech_eval] %s→mp3 转码成功（%d → %d 字节）",
+        src_format, len(audio_bytes), len(proc.stdout),
+    )
+    return proc.stdout
 
 # SDK 模块惰性加载缓存
 _sdk_credential = None
@@ -229,6 +287,15 @@ class TencentSoeNProvider(SpeechProvider):
                 len(str(ref_text or "").split()),
             )
             return None, ("ref_text_empty" if not ref_text else "ref_text_too_long")
+        # 2026-10-15：aac 必须先转 mp3 才能送 SOE（VoiceFileType 无 aac）。
+        # 位置在 _load_sdk() **之前**：转不了码就该以 transcode_failed 快速失败，
+        # 而不是先撞上 sdk_missing（后者会误导读数、掩盖真正的转码问题）。
+        if (voice_format or "").lower() in SOE_TRANSCODE_TO_MP3:
+            mp3_bytes = _transcode_to_mp3(audio_bytes, voice_format.lower())
+            if mp3_bytes is None:
+                return None, "transcode_failed"
+            audio_bytes, voice_format = mp3_bytes, "mp3"
+
         if not _load_sdk():
             return None, "sdk_missing"
 

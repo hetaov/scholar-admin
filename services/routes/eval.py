@@ -400,7 +400,7 @@ class EvalSpeechRequest(BaseModel):
     )
     audio_base64: str = Field(..., description="音频 base64（16k/单声道/mp3 或 wav，≤60s）")
     voice_format: Optional[str] = Field(
-        "mp3", description="mp3（默认，SOE-N=2）或 wav（=1）"
+        "mp3", description="mp3（默认，SOE-N=2）、wav（=1）或 aac（送 SOE 前自动转 mp3）"
     )
 
 
@@ -511,11 +511,14 @@ async def eval_speech(
             return EvalTranslateResponse(
                 success=False, code="INVALID_INPUT", message=f"{name} 不能为空"
             )
-    if body.voice_format not in ("mp3", "wav"):
+    # 2026-10-15：新增 aac。微信小程序 RecorderManager 在部分真机上录不出 mp3
+    # （mp3 需额外转码，失败时微信 onError 报 `file error`）⇒ 客户端降级录 aac。
+    # aac 不由 SOE 直接消费：Provider 在送 SOE 前会转成 mp3（见 providers/speech_eval.py）。
+    if body.voice_format not in ("mp3", "wav", "aac"):
         return EvalTranslateResponse(
             success=False,
             code="INVALID_INPUT",
-            message="voice_format 仅支持 mp3 / wav",
+            message="voice_format 仅支持 mp3 / wav / aac",
         )
 
     # 2. 音频校验（INVALID_AUDIO）
