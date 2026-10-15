@@ -92,38 +92,55 @@ def _transcode_to_mp3(audio_bytes: bytes, src_format: str) -> Optional[bytes]:
     """
     if shutil.which("ffmpeg") is None:
         logger.error(
-            "[speech_eval] 需要转码 %s→mp3，但镜像内缺少 ffmpeg（见 Dockerfile apt 依赖）",
+            "[speech_eval] 需要转码 %s→mp3，但镜像内缺少 ffmpeg（见 Dockerfile apt 依赖）。"
+            "注意：改了 Dockerfile 必须**重新构建镜像**，只同步代码不会装上 ffmpeg。",
             src_format,
         )
         return None
-    try:
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-nostdin", "-y",
-                "-f", src_format, "-i", "pipe:0",
+
+    # 输入格式候选：先按声明格式强制解复用；失败则交给 ffmpeg **自动探测**。
+    # 原因：微信 RecorderManager(format:'aac') 产出的虽然扩展名是 .aac，但实际容器
+    # 未必是裸 ADTS（可能被封装成 mp4/m4a），强制 `-f aac` 会解不出来。
+    for in_fmt in (src_format, None):
+        try:
+            cmd = ["ffmpeg", "-nostdin", "-y"]
+            if in_fmt:
+                cmd += ["-f", in_fmt]
+            cmd += [
+                "-i", "pipe:0",
                 "-codec:a", "libmp3lame", "-ar", "16000", "-ac", "1",
                 "-f", "mp3", "pipe:1",
-            ],
-            input=audio_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=TRANSCODE_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.error("[speech_eval] %s→mp3 转码异常: %s", src_format, e)
-        return None
+            ]
+            proc = subprocess.run(
+                cmd,
+                input=audio_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=TRANSCODE_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.error("[speech_eval] %s→mp3 转码异常: %s", src_format, e)
+            continue
 
-    if proc.returncode != 0 or not proc.stdout:
+        if proc.returncode == 0 and proc.stdout:
+            logger.info(
+                "[speech_eval] %s→mp3 转码成功（%d → %d 字节，输入格式=%s）",
+                src_format, len(audio_bytes), len(proc.stdout), in_fmt or "自动探测",
+            )
+            return proc.stdout
         logger.error(
-            "[speech_eval] %s→mp3 转码失败 rc=%s stderr=%s",
-            src_format, proc.returncode, (proc.stderr or b"")[-300:],
+            "[speech_eval] %s→mp3 转码失败（输入格式=%s）rc=%s stderr=%s",
+            src_format, in_fmt or "自动探测", proc.returncode,
+            (proc.stderr or b"")[-300:],
         )
-        return None
-    logger.info(
-        "[speech_eval] %s→mp3 转码成功（%d → %d 字节）",
-        src_format, len(audio_bytes), len(proc.stdout),
+
+    # 全部候选失败：打印魔数，一眼看出这段音频到底是什么容器
+    # （裸 ADTS AAC 以 FF F1 / FF F9 开头；mp4/m4a 以 ....ftyp 开头）
+    logger.error(
+        "[speech_eval] 转码彻底失败：%d 字节，前 16 字节=%s",
+        len(audio_bytes), audio_bytes[:16].hex(),
     )
-    return proc.stdout
+    return None
 
 # SDK 模块惰性加载缓存
 _sdk_credential = None

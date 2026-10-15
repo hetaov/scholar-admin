@@ -167,3 +167,49 @@ class TestTranscodeToMp3:
         assert "libmp3lame" in cmd
         assert "16000" in cmd
         assert "1" in cmd
+
+    def test_falls_back_to_auto_probe_when_forced_format_fails(self, monkeypatch):
+        """强制作 aac 解不出来时，应退化为自动探测（不传 -f）再试一次。
+
+        背景：微信 RecorderManager(format:'aac') 产出的虽是 .aac 扩展名，
+        实际容器未必是裸 ADTS，强制 `-f aac` 会解不出来。
+        """
+        monkeypatch.setattr(se.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        cmds = []
+
+        def run(cmd, *a, **k):
+            cmds.append(cmd)
+            forced = "-f" in cmd and cmd[cmd.index("-f") + 1] == "aac"
+
+            class _Proc:
+                returncode = 1 if forced else 0
+                stdout = b"" if forced else b"MP3!"
+                stderr = b"Invalid data found" if forced else b""
+
+            return _Proc()
+
+        monkeypatch.setattr(se.subprocess, "run", run)
+        assert se._transcode_to_mp3(b"AAC", "aac") == b"MP3!"
+
+        assert len(cmds) == 2
+        # 只看 `-i` 之前的**输入**段（输出段也有 `-f mp3`，不能用整体包含判断）
+        head0 = cmds[0][: cmds[0].index("-i")]
+        head1 = cmds[1][: cmds[1].index("-i")]
+        assert head0[-2:] == ["-f", "aac"]   # 第一次：强制 aac
+        assert "-f" not in head1             # 第二次：交给 ffmpeg 自动探测
+
+    def test_logs_magic_bytes_when_all_candidates_fail(self, monkeypatch, caplog):
+        """全部候选失败时应打印魔数，便于一眼看出音频的真实容器。"""
+        monkeypatch.setattr(se.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+
+        class _Proc:
+            returncode = 1
+            stdout = b""
+            stderr = b"Invalid data found"
+
+        monkeypatch.setattr(se.subprocess, "run", lambda *a, **k: _Proc())
+        with caplog.at_level("ERROR", logger="scholar-admin.speech_eval"):
+            assert se._transcode_to_mp3(b"\xff\xf1\x50\x80", "aac") is None
+
+        assert "前 16 字节" in caplog.text
+        assert "fff15080" in caplog.text
