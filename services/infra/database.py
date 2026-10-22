@@ -90,6 +90,16 @@ class CloudBaseNoSQLClient:
           {"$numberDouble": "1.5"} → 1.5
           {"$numberInt": "3"}     → 3
           {"$numberLong": "123"}  → 123
+          {"$oid": "507f1f77bcf86cd799439011"} → "507f1f77bcf86cd799439011"
+
+        ⚠️ $oid 必须转换（2026-10-22 修复，见 wx-knowlege-graph/plan/NOTES.md N04）：
+        漏掉它时 ObjectId 会以 {"$oid": ...} dict 的形式随 API 返回给客户端，
+        客户端把它当字符串往下传，会造成：
+          - 组 JSON body     → {"$oid": ...}
+          - 拼 URL 路径参数  → str(obj) == "[object Object]"
+        两者不相等 → 后端「body 主键 vs 路径参数」校验失败 → HTTP 400。
+        该缺陷只在「新建文档后立刻用该 _id 写入」时暴露（老数据槽位里已是字符串），
+        表现为「老用户从不复现、新用户必现」。
         """
         if isinstance(obj, dict):
             keys = list(obj.keys())
@@ -102,6 +112,8 @@ class CloudBaseNoSQLClient:
                     return int(val)
                 if key == "$numberLong":
                     return int(val)
+                if key == "$oid":
+                    return str(val)
             return {k: CloudBaseNoSQLClient._normalize_types(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [CloudBaseNoSQLClient._normalize_types(item) for item in obj]
