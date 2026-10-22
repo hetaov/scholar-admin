@@ -1,0 +1,55 @@
+---
+description: 从 MongoDB 或 CloudBase 读取文档并对外返回时，必须把 Extended JSON（尤其 $oid）完整归一化为原生类型，禁止让 ObjectId 以 {$oid} 对象形式流出 API
+globs: 
+alwaysApply: true
+---
+# Extended JSON 归一化规则（禁止 ObjectId 类型泄漏）
+
+## 背景（2026-10-22 真实事故）
+
+`services/infra/database.py::_normalize_types()` 只处理了 `$numberDouble` / `$numberInt` / `$numberLong`，**唯独漏了 `$oid`**，导致文档 `_id` 以 `{"$oid": "..."}` dict 随 API 响应回到小程序。客户端把它当字符串往下传，两种用法给出两个不同的值：
+
+- 组 JSON body → `{"$oid": ...}`
+- 拼 URL 路径 → `encodeURIComponent(对象)` → 字面量 `[object Object]`
+
+后端 `tracking.py` 校验「body 主键 vs 路径参数」→ 两者必然不等 → **HTTP 400**。
+
+真机报错原文：
+
+```
+HTTP 400: body.scholar_id（{'$oid': '6ad6db7f65dec396b6002c12'}）与路径参数（[object Object]）不一致
+```
+
+**为什么长期没被发现**：老用户槽位里是早年落下的纯字符串，只有「新建文档后立刻用该 `_id` 写入」才暴露 —— 表现为「老用户从不复现、新用户必现」。
+
+## 规则
+
+1. **任何从数据库读出并对外返回的数据，必须完整归一化 Extended JSON**：
+   - `$oid` → `str(val)` ← **最关键**，漏了它 ObjectId 就是对象
+   - `$numberDouble` / `$numberInt` / `$numberLong` → `float` / `int`
+   - `$date` / `$binary` / `$decimal128` / `$regularExpression` 等 → 按业务需要转换
+2. **`_id` 必须以纯字符串形式流出 API**，任何情况下都不能是 dict 或对象。
+3. **新增任何一种 Extended JSON 类型的处理时，同步补上对应单测**（`tests/unit/test_database_normalize.py`）。
+4. **不要把归一化的责任推给客户端**：后端是权威，客户端只做防御层。两侧都要设防，但根因必须在这里修掉。
+5. **改动 `_normalize_types()` 时只增分支，不改对外签名与递归结构**，避免扩大回归面。
+
+## 自检清单
+
+改动数据库读取链路后逐项确认：
+
+- [ ] 返回的 `_id` 是 `str` 而不是 `dict`？
+- [ ] 新增的 Extended JSON 类型有对应单测？
+- [ ] 全量 `pytest tests/unit` 通过？
+
+## 识别信号
+
+客户端报错里出现 **`{'$oid'`** 或 **`[object Object]`** → 立即判定为 Extended JSON 类型泄漏，**不要去查业务逻辑**。
+
+## 相关位置
+
+- 实现：`services/infra/database.py::_normalize_types`
+  （注意 `services/database.py` 只是转发到 `services/infra/database` 的兼容 shim，实现只在后者）
+- 单测：`tests/unit/test_database_normalize.py`
+- 校验方：`services/routes/tracking.py`（body 主键 vs 路径参数一致性校验）
+- 事故记录：`wx-knowlege-graph/plan/NOTES.md` N04
+- 提案：`scholar-skill/docs_v2/03-change/proposals/2026-10-22-MongoDB-ObjectId类型泄漏修复与模拟验证.md`
