@@ -284,7 +284,8 @@ async def create_scan_upload(
 
     image_file_id = upload_info["file_id"]
     try:
-        image_url = await storage.get_temp_file_url(cloud_path)
+        # 必须回传真实 fileID：按 env_id 拼的 ID 在微信侧查不到（STORAGE_FILE_NONEXIST）
+        image_url = await storage.get_temp_file_url(cloud_path, file_id=image_file_id)
     except Exception as e:
         logger.warning(f"[scan] 获取临时 URL 失败（image_file_id 仍可用）: {e}")
         image_url = image_file_id

@@ -26,7 +26,10 @@ cachetools>=5.0.0
 
 # F3.2 A4 练习纸渲染（ADR-0010：HTML/CSS → PDF+PNG）
 # WeasyPrint 纯 Python HTML→PDF 引擎；Pillow 用于 PDF→PNG 截图
+# ⚠️ WeasyPrint ≥60 **已移除** HTML.write_png：PNG/preview 改由 pypdfium2
+#    从已生成的 PDF 渲染首页（2026-10-23 修复线上产物 404）
 weasyprint>=60.0
 Pillow>=10.0.0
+pypdfium2>=4.0
 # 家长核对二维码生成（纯 Python 生成 PNG/SVG，无系统依赖）
 qrcode[pil]>=7.4.0

@@ -440,6 +440,51 @@ def _renderer_available() -> bool:
 _playwright_available = _renderer_available
 
 
+def _render_pdf_to_images(pdf_path: str, png_path: str, preview_path: str) -> None:
+    """PDF 首页 → `sheet.png` + `preview.png`（顶部裁剪，A4 预览比例约 1:1.4）
+
+    ⚠️ 2026-10-23 修复（线上实测）：WeasyPrint **≥60 已移除** `HTML.write_png`
+    （requirements 锁定 `weasyprint>=60.0`），而原实现把 `write_png` 的
+    AttributeError 吞进 `except Exception` 只留一行 warning —— 结果线上
+    `sheet.png` / `preview.png` **从不生成**（静态产物 404），但 `file_refs`
+    仍照常拼出 URL（按路径拼、不校验文件存在），前端「保存预览图/预览」必然失败。
+
+    改由 `pypdfium2` 从**已生成的 PDF** 渲染首页（纯 wheel，无系统依赖）；
+    均不可用时抛错，由调用方降级为「仅 PDF」并告警（不再静默）。
+
+    Raises:
+        RuntimeError: 无可用 PDF→图片渲染器，或渲染/保存失败
+    """
+    from PIL import Image
+
+    pil = None
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(pdf_path)
+        pil = doc[0].render(scale=2).to_pil()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[render] pypdfium2 渲染 PNG 失败，尝试 PyMuPDF: %s", e)
+        try:
+            import fitz  # PyMuPDF
+
+            with fitz.open(pdf_path) as doc:
+                pil = Image.open(io.BytesIO(doc[0].get_pixmap(dpi=144).tobytes("png")))
+                pil.load()
+        except Exception as e2:  # noqa: BLE001
+            raise RuntimeError(
+                f"无可用的 PDF→PNG 渲染器（pypdfium2 / PyMuPDF 均失败）: {e2}"
+            ) from e2
+
+    if pil is None:
+        raise RuntimeError("PDF→PNG 渲染返回空")
+    pil.save(png_path, "PNG")
+
+    w, h = pil.size
+    preview_h = min(h, int(w * 1.4))
+    pil.crop((0, 0, w, preview_h)).save(preview_path, "PNG")
+
+
 async def _render_artifacts(html: str, sheet_dir: Path) -> None:
     """WeasyPrint 渲染 HTML → sheet.pdf + sheet.png + preview.png
 
@@ -459,26 +504,15 @@ async def _render_artifacts(html: str, sheet_dir: Path) -> None:
             presentational_hints=True,
         )
 
-        # 2. PDF → PNG（全页 + 预览，用 Pillow 渲染 PDF 第一页）
+        # 2. PDF → PNG（全页 + 预览）：从已生成的 PDF 渲染首页
         try:
-            from PIL import Image
-            import io as _io
-
-            # WeasyPrint 可通过 write_png 直接生成 PNG（全页）
-            png_path = str(sheet_dir / PNG_FILENAME)
-            HTML(string=html).write_png(png_path, resolution=96)
-
-            # 预览图：截取 PNG 顶部区域（A4 预览比例约 1:1.4）
-            preview_path = str(sheet_dir / PREVIEW_FILENAME)
-            img = Image.open(png_path)
-            w, h = img.size
-            preview_h = min(h, int(w * 1.4))
-            preview = img.crop((0, 0, w, preview_h))
-            preview.save(preview_path, "PNG")
-        except ImportError:
-            # Pillow 未安装 → 只生成 PDF，跳过 PNG
-            logger.warning("[render] Pillow 未安装，跳过 PNG 生成")
+            _render_pdf_to_images(
+                pdf_path,
+                str(sheet_dir / PNG_FILENAME),
+                str(sheet_dir / PREVIEW_FILENAME),
+            )
         except Exception as png_err:  # noqa: BLE001
+            # 仅 PDF 的降级态：产物缺 png/preview，前端下载入口相应不可用
             logger.warning("[render] PNG 生成失败（PDF 已生成）: %s", png_err)
 
     except Exception as e:  # noqa: BLE001

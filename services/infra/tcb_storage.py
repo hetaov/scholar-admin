@@ -151,18 +151,29 @@ class CloudBaseStorageClient:
     # ------------------------------------------------------------------
     # 临时链接：/tcb/batchdownloadfile
     # ------------------------------------------------------------------
-    async def get_temp_file_url(self, cloud_path: str, max_age: int = 3600) -> str:
+    async def get_temp_file_url(
+        self, cloud_path: str, max_age: int = 3600, file_id: str | None = None
+    ) -> str:
         """获取云存储文件的临时 HTTPS 下载链接
 
         Args:
             cloud_path: 云存储路径（与上传时一致）
             max_age: 链接有效期（秒，默认 1 小时）
+            file_id: **优先**使用调用方持有的完整 fileID（见下）
 
         Returns:
             临时 HTTPS URL；无返回时为空串（image_file_id 仍可永久引用）
+
+        ⚠️ 2026-10-23 修复：云端**真实** fileID 形如
+        `cloud://{env}.{bucket-suffix}/{path}`（上传接口回传值），而按
+        `cloud://{env}/{path}` 拼出来的 ID 在微信侧查不到（返回
+        `status=1 STORAGE_FILE_NONEXIST`）→ `image_url` **恒为空串**，
+        前端错题本缩略图（`pages/wrongbook/index.js` `uploadResult.image_url
+        || filePath`）会落成失效的本地临时路径。故调用方应把 upload_file 返回的
+        file_id 传进来；不传时回落旧拼法（兼容既有调用）。
         """
         token = await self._get_access_token()
-        file_id = f"cloud://{self.env_id}/{cloud_path.lstrip('/')}"
+        file_id = file_id or f"cloud://{self.env_id}/{cloud_path.lstrip('/')}"
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{WX_API_HOST}/tcb/batchdownloadfile",
