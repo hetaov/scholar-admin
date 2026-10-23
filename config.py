@@ -186,6 +186,15 @@ WX_SECRET = os.environ.get("WX_SECRET", "")
 TENCENT_OCR_SECRET_ID = os.environ.get("TENCENT_OCR_SECRET_ID", "") or SECRET_ID
 TENCENT_OCR_SECRET_KEY = os.environ.get("TENCENT_OCR_SECRET_KEY", "") or SECRET_KEY
 
+# ⚠️ 临时密钥会话令牌（CloudRun 注入 TENCENTCLOUD_SESSIONTOKEN）：**STS 签名必需**。
+# 云托管注入的是 STS 临时密钥，缺 token 时腾讯云 SDK 一律鉴权失败
+# （表现：OCR 每次调用失败 → ocr_status=failed，而非「provider 未接入」的 pending）。
+# 与 providers/asr.py:77、providers/tts.py:132 同源口径（二者均传 session_token）。
+# 2026-10-23 修复：此前 OCR 是唯一漏传该参数的腾讯云 SDK 调用。
+TENCENT_OCR_SESSION_TOKEN = (
+    os.environ.get("TENCENT_OCR_SESSION_TOKEN", "") or SESSION_TOKEN
+)
+
 # OCR 服务区域（腾讯云 OCR 支持 ap-guangzhou / ap-shanghai 等）
 TENCENT_OCR_REGION = os.environ.get("TENCENT_OCR_REGION", "ap-shanghai")
 

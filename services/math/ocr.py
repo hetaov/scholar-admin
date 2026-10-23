@@ -91,6 +91,7 @@ class TencentGeneralOcrProvider(OcrProvider):
         self,
         secret_id: str | None = None,
         secret_key: str | None = None,
+        session_token: str | None = None,
         region: str | None = None,
         engine: str | None = None,
         timeout_seconds: float | None = None,
@@ -99,6 +100,10 @@ class TencentGeneralOcrProvider(OcrProvider):
 
         self._secret_id = secret_id if secret_id else config.TENCENT_OCR_SECRET_ID
         self._secret_key = secret_key if secret_key else config.TENCENT_OCR_SECRET_KEY
+        # ⚠️ STS 临时密钥必须带 token 才能签名（2026-10-23 修复：此前漏传 → 线上 OCR 恒 failed）
+        self._session_token = (
+            session_token if session_token else config.TENCENT_OCR_SESSION_TOKEN
+        )
         self._region = region if region else config.TENCENT_OCR_REGION
         self._engine = engine if engine else config.TENCENT_OCR_ENGINE
         self._timeout_seconds = (
@@ -116,7 +121,11 @@ class TencentGeneralOcrProvider(OcrProvider):
         from tencentcloud.common.profile.http_profile import HttpProfile
         from tencentcloud.ocr.v20181119 import ocr_client
 
-        cred = credential.Credential(self._secret_id, self._secret_key)
+        # 第三参 = 会话令牌（STS）；无 token 时传 None（与 ASR/TTS 口径一致，
+        # 空串会被 SDK 当作有效 token 参与签名）
+        cred = credential.Credential(
+            self._secret_id, self._secret_key, self._session_token or None
+        )
         http_profile = HttpProfile()
         http_profile.endpoint = "ocr.tencentcloudapi.com"
         http_profile.reqTimeout = self._timeout_seconds
