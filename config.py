@@ -159,6 +159,14 @@ SHEET_QR_SCAN_PAGE = os.environ.get("SHEET_QR_SCAN_PAGE", "/scan/sheet")
 # 单张渲染超时（秒，任务卡验收：单张 ≤10s）
 RENDER_TIMEOUT_SECONDS = int(os.environ.get("RENDER_TIMEOUT_SECONDS", 10))
 
+# 渲染产物是否**同步上传云开发存储**（2026-10-23）
+# 开启后 file_refs 增补 file_ids{pdf,png,preview}（cloud://...），小程序改走
+# wx.cloud.downloadFile 下载 —— 云开发 API 不校验「合法域名」，免去 ICP 备案域名依赖。
+# 关闭（0）则保持纯静态 URL 口径（需备案域名 + downloadFile 合法域名）。
+RENDER_ARTIFACTS_TO_CLOUD = os.environ.get(
+    "RENDER_ARTIFACTS_TO_CLOUD", "1"
+).lower() in ("1", "true", "yes", "on")
+
 # ==================== F4.2 微信云开发 HTTP API 配置（云存储） ====================
 
 # 微信云开发 HTTP API（api.weixin.qq.com/tcb/...）需小程序 access_token，

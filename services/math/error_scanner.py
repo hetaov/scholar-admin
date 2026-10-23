@@ -238,6 +238,7 @@ async def create_scan_upload(
     note: str | None = None,
     actor: str = "",
     storage: CloudBaseStorageClient | None = None,
+    photo_context: str | None = None,
 ) -> dict:
     """创建错题扫描上传记录（F4.1 主流程）
 
@@ -247,6 +248,10 @@ async def create_scan_upload(
     4. 落库 math_scan_upload（ocr_status=pending）
     5. 写审计 scan_upload
     6. 后台异步触发 OCR 任务
+
+    上传通道无关：multipart 直传与「云存储中转（image_url）」两条通道最终都归一为
+    image_bytes 进入本函数（2026-10-23），故去重 / OCR / 落库行为完全一致。
+    photo_context 为拍照时携带的教材上下文（可选），仅落库不参与校验。
     """
     if not scholar_id:
         raise MissingScholarError("缺少 scholar_id")
@@ -301,6 +306,9 @@ async def create_scan_upload(
         "completed_at": None,
         "audit_log_id": "",
     }
+    # 拍照教材上下文（可选）：非空才落库，缺省与历史记录字段集一致
+    if photo_context:
+        record["photo_context"] = photo_context
     await db.insert(MATH_SCAN_UPLOAD_COLLECTION, record)
 
     # 写审计 scan_upload（必审；失败仅记录日志，不阻断上传主流程）

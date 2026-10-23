@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from config import (
+    RENDER_ARTIFACTS_TO_CLOUD,
     RENDER_OUTPUT_DIR,
     RENDER_STATIC_URL_PREFIX,
     RENDER_TIMEOUT_SECONDS,
@@ -87,6 +88,10 @@ PAGE_MARGIN_MM = 12
 PDF_FILENAME = "sheet.pdf"
 PNG_FILENAME = "sheet.png"
 PREVIEW_FILENAME = "preview.png"
+
+# 产物上云目录（2026-10-23）：产物同步上传云开发存储，供小程序 wx.cloud.downloadFile 下载
+# （wx.downloadFile 走公网域名需 ICP 备案，云开发 API 不校验「合法域名」）
+SHEET_CLOUD_PREFIX = "sheets"
 
 # 页脚二维码尺寸（ADR-0010 A-13：≥20×20mm）
 QR_SIZE_MM = 20
@@ -636,6 +641,60 @@ def _compose_artifacts(entity_id: str, status: str) -> tuple[dict, dict]:
     return artifacts, {"pdf": "", "png": "", "preview": ""}
 
 
+async def _upload_artifacts_to_cloud(entity_id: str) -> dict:
+    """渲染产物（pdf / png / preview）上传**云开发存储** → {kind: "cloud://..."}
+
+    目的：小程序 `wx.downloadFile` 下载公网域名须 ICP 备案（云托管默认域名仅供测试），
+    改由 `wx.cloud.downloadFile({ fileID })` 下载 —— 云开发 API 不校验「合法域名」。
+
+    - 产物仍在 `RENDER_OUTPUT_DIR/{entity_id}/` 保留一份，static 通道行为不变；
+    - **失败不阻断渲染**：仅记日志并返回已成功部分（缺省 {} → 前端回落静态 URL 下载）。
+    """
+    from services.infra.tcb_storage import CloudBaseStorageClient  # 延迟导入：渲染依赖可选
+
+    out: dict = {}
+    base = Path(RENDER_OUTPUT_DIR) / entity_id
+    try:
+        storage = CloudBaseStorageClient()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[render] 云存储客户端初始化失败，跳过产物上云: %s", e)
+        return out
+    for kind, filename in (
+        ("pdf", PDF_FILENAME),
+        ("png", PNG_FILENAME),
+        ("preview", PREVIEW_FILENAME),
+    ):
+        path = base / filename
+        try:
+            if not path.exists():
+                continue
+            info = await storage.upload_file(
+                f"{SHEET_CLOUD_PREFIX}/{entity_id}/{filename}", path.read_bytes()
+            )
+            if info.get("file_id"):
+                out[kind] = info["file_id"]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[render] 产物上云失败 entity=%s kind=%s: %s", entity_id, kind, e
+            )
+    return out
+
+
+async def _compose_artifacts_with_cloud(entity_id: str, status: str) -> tuple[dict, dict]:
+    """`_compose_artifacts` + 产物上云：`file_refs` / `artifacts` 增补 `file_ids`
+
+    `file_ids` = {"pdf": "cloud://...", "png": "cloud://...", "preview": "cloud://..."}；
+    上云失败时缺省该键，前端自动回落旧的静态 URL 下载（向后兼容）。
+    """
+    artifacts, file_refs = _compose_artifacts(entity_id, status)
+    if RENDER_ARTIFACTS_TO_CLOUD and status in (RENDER_JOB_SUCCESS, RENDER_JOB_DEGRADED):
+        cloud = await _upload_artifacts_to_cloud(entity_id)
+        if cloud:
+            artifacts = {**artifacts, "file_ids": cloud}
+            file_refs = {**file_refs, "file_ids": cloud}
+    return artifacts, file_refs
+
+
 def render_message(render_status: str, error_code: str = "") -> str:
     """渲染结果 → **用户可见**原因（`math_quiz.render_message`，接口 31 出参）。
 
@@ -662,7 +721,7 @@ async def _finalize_job(
 ) -> dict:
     """回写 sheet_render_job（status/artifacts/error_code/retries）+ practice_sheet（file_refs/qrcode_ref）"""
     now = _now_ms()
-    artifacts, file_refs = _compose_artifacts(sheet_id, status)
+    artifacts, file_refs = await _compose_artifacts_with_cloud(sheet_id, status)
 
     job_update: dict = {
         "status": status,
@@ -823,7 +882,7 @@ async def _finalize_quiz(
 
     now = _now_ms()
     ok = render_status in (RENDER_JOB_SUCCESS, RENDER_JOB_DEGRADED)
-    artifacts, file_refs = _compose_artifacts(quiz_id, render_status)
+    artifacts, file_refs = await _compose_artifacts_with_cloud(quiz_id, render_status)
     status = QUIZ_STATUS_RENDERED if ok else QUIZ_STATUS_FAILED
     message = render_message(render_status, error_code)
     if render_status == RENDER_JOB_FAILED and not message:  # 防御：failed 必须有原因

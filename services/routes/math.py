@@ -16,9 +16,20 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel, Field
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
+from pydantic import BaseModel, Field, ValidationError
 from typing import Any, Literal
+
+import httpx
 
 from services.audit import (
     AUDIT_ACTION_QUIZ_RENDER,
@@ -573,15 +584,90 @@ def _scan_upload_error_to_http(exc: ScanUploadError) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
+class ScanUploadJsonRequest(BaseModel):
+    """POST /math/scan/upload 的 **JSON 通道**入参（云开发中转，2026-10-23）
+
+    背景：小程序 `wx.uploadFile` 直连云托管公网域名会校验「合法域名」，而该域名须
+    ICP 备案（云托管默认域名仅供测试）。故新增通道 A：前端先把图传到**云开发存储**
+    （`wx.cloud.uploadFile`，免白名单）→ `getTempFileURL` 取临时链接 → 以 JSON 提交
+    `image_url`，后端下载字节后复用同一条 F4.1 主流程。
+
+    与 multipart 通道**二选一**，后端以 `image` 文件是否存在判定通道，出参完全一致。
+    """
+
+    scholar_id: str = Field("", description="学生 id")
+    image_url: str = Field("", description="云存储临时下载链接（http/https）")
+    note: str = Field("", description="备注（可选）")
+    photo_context: str = Field("", description="教材上下文 JSON 字符串（可选）")
+
+
+async def _parse_json_upload_payload(request: Request) -> ScanUploadJsonRequest | None:
+    """解析 JSON 通道入参
+
+    ⚠️ FastAPI 在**同时存在 File/Form 参数**时不会解析 JSON body 参数（body 被当作表单
+    处理，`Body(None)` 恒为 None，实测确认）。故这里按 content-type 手动解析：
+    仅 `application/json` 才读原始 body（multipart 时流已被 Starlette 消费，读会抛
+    RuntimeError）。
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return None
+    raw = await request.body()
+    if not raw:
+        return None
+    try:
+        return ScanUploadJsonRequest.model_validate_json(raw)
+    except ValidationError as e:
+        errs = e.errors()
+        msg = errs[0].get("msg", "入参不合法") if errs else "入参不合法"
+        raise HTTPException(status_code=400, detail=f"请求体不合法: {msg}") from e
+
+
+async def _fetch_image_bytes(url: str) -> bytes:
+    """下载 `image_url` → bytes（云开发中转通道）
+
+    体积/格式校验统一交给服务层 `_validate_image`（保持与 multipart 通道同一口径），
+    这里只负责网络与状态码；失败按 400 返回（入参不可用，非服务故障）。
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="image_url 非法：必须是 http(s) 链接")
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"下载图片失败: {e}") from e
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=400, detail=f"下载图片失败: HTTP {resp.status_code}"
+        )
+    return resp.content
+
+
+def _filename_from_image_url(url: str) -> str:
+    """从临时链接推导文件名（供扩展名校验）；无法识别时回落 `scan.jpg`"""
+    name = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    return name if "." in name else "scan.jpg"
+
+
 @router.post("/scan/upload")
 async def math_scan_upload(
     request: Request,
-    scholar_id: str | None = Form(None, description="学生 id"),
-    image: UploadFile = File(..., description="错题图片（multipart 文件）"),
-    note: str | None = Form(None, description="备注（可选）"),
+    scholar_id: str | None = Form(None, description="学生 id（multipart 通道）"),
+    image: UploadFile | None = File(
+        None, description="错题图片（multipart 通道，与 JSON 通道 image_url 二选一）"
+    ),
+    note: str | None = Form(None, description="备注（可选，multipart 通道）"),
+    photo_context: str | None = Form(
+        None, description="教材上下文 JSON 字符串（可选，multipart 通道）"
+    ),
     db: CloudBaseNoSQLClient = Depends(get_db),
 ):
     """POST 错题图片上传（F4.1）
+
+    两条通道（后端按是否有 `image` 文件自动判定，出参与落库完全一致）：
+    - **multipart**：`image` 文件 + `scholar_id` / `note`（原通道，保留兼容）；
+    - **JSON（云开发中转）**：`{scholar_id, image_url, note, photo_context}`，
+      后端下载 `image_url` 得到字节后走同一条主流程（2026-10-23 新增，免备案域名）。
 
     scholar_id 允许缺省由服务层统一校验返回 400（沿用 F2 惯例：
     避免 Pydantic 422 语义偏差）。
@@ -593,15 +679,32 @@ async def math_scan_upload(
     出参（契约 §3.10）：{scan_id, status, image_url, image_file_id, image_hash, deduped}
     """
     actor = get_request_openid(request) or "anonymous"
-    image_bytes = await image.read()
+    if image is not None:
+        image_bytes = await image.read()
+        filename = image.filename or ""
+        sid = scholar_id
+        note_value = note
+        context_value = photo_context
+    else:
+        payload = await _parse_json_upload_payload(request)
+        if payload is None or not payload.image_url:
+            raise HTTPException(
+                status_code=400, detail="缺少图片：请上传 image 文件或提交 image_url"
+            )
+        image_bytes = await _fetch_image_bytes(payload.image_url)
+        filename = _filename_from_image_url(payload.image_url)
+        sid = payload.scholar_id
+        note_value = payload.note
+        context_value = payload.photo_context or None
     try:
         data = await create_scan_upload(
             db,
-            scholar_id=scholar_id,
+            scholar_id=sid,
             image_bytes=image_bytes,
-            filename=image.filename or "",
-            note=note,
+            filename=filename,
+            note=note_value,
             actor=actor,
+            photo_context=context_value,
         )
         return {"success": True, "data": data}
     except ScanUploadError as e:
