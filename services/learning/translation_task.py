@@ -26,8 +26,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import logging
 import time
 import uuid
@@ -41,6 +39,8 @@ from services.asr import (
     get_asr_service_for,
 )
 from services.dependencies import get_db
+# 2026-10-26：后台 worker 也走「fileID 优先」的音源取值（与 routes/eval 共用同一份实现）
+from services.infra.audio_source import InvalidAudio, resolve_audio_bytes
 from services.providers.evaluation_engine import EVALUATION_COLLECTION
 from services.providers.translation_eval import (
     ERR_EVAL_UNAVAILABLE,
@@ -344,6 +344,7 @@ async def run_translation_task(
     input_mode: str,
     user_input: str | None = None,
     audio_base64: str | None = None,
+    voice_file_id: str | None = None,
     voice_format: str = "mp3",
     scholar_id: str | None = None,
     sentence_id: str | None = None,
@@ -353,7 +354,8 @@ async def run_translation_task(
 
     由提交接口 `asyncio.create_task(...)` 调度，与请求解耦：
     - claim_task 原子抢占：被其他实例抢占则直接返回，避免重复执行
-    - 语音路径：ASR 转写（失败 → failed + ASR_UNAVAILABLE，stage=asr）
+    - 语音路径：**`voice_file_id` 优先**（服务端从对象存储拉取），`audio_base64` 仅兜底
+      —— 否则 base64 会撞微信 callContainer 100KB 请求体上限（详见 routes/eval.resolve_audio_bytes）
     - 评分：LLM 调用 `asyncio.wait_for` 包裹（超时默认 300s）→ failed + LLM_TIMEOUT
     - **不降级**：LLM 不可用 / 输出非法 → failed（不回退 levenshtein / 混元 / 云函数）
     - 终态无条件写 evaluation 证据（成功/失败均写），随后 finish_task
@@ -368,11 +370,15 @@ async def run_translation_task(
     try:
         if input_mode == "voice":
             try:
-                audio_bytes = base64.b64decode(audio_base64 or "", validate=True)
-            except (binascii.Error, ValueError):
-                raise TranslationEvalError(
-                    "ASR_UNAVAILABLE", "asr", "audio_base64 不是合法 base64"
+                audio_bytes = await resolve_audio_bytes(
+                    voice_file_id,
+                    audio_base64,
+                    route="/eval/translate/v2(worker)",
+                    oversize_message="音频过大（16k/60s 上限约 5MB），请分段评测",
                 )
+            except InvalidAudio as e:
+                # fileID 下载失败 / base64 非法 / 超限 —— 统一 ASR_UNAVAILABLE + stage=asr
+                raise TranslationEvalError("ASR_UNAVAILABLE", "asr", e.message) from e
             if not audio_bytes:
                 raise TranslationEvalError("ASR_UNAVAILABLE", "asr", "音频内容为空")
             # 引擎选择（2026-09-02）：默认英语 `16k_en`（ce 语音 / 存量任务）；

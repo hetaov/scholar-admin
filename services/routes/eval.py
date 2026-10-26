@@ -35,8 +35,6 @@ POST /eval/transcribe — 纯语音转写（2026-09-03，AI 会话语音输入�
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import logging
 import time
 from typing import Optional
@@ -56,9 +54,14 @@ from services.asr import (
 from services.dependencies import get_db
 from services.database import CloudBaseNoSQLClient
 from services.evaluator import evaluate
-from services.infra.tcb_storage import (
-    CloudBaseStorageClient,
-    StorageAPIError,
+# 2026-10-26：音源取值（fileID 优先，绕开 callContainer 100KB 上限）下沉到中立模块，
+# 供本路由与 v2 后台 worker（translation_task）共用 —— 后者反向导入本文件会构成循环依赖。
+# ⚠️ `MAX_AUDIO_BYTES` 在此仅为**显式重导出**：大小校验已随取舍逻辑迁走，但
+#    `services/routes_eval.py` 兼容 shim 是用例读取该常量的路径，故保留不可删。
+from services.infra.audio_source import (
+    MAX_AUDIO_BYTES,  # noqa: F401  （见上行：刻意保留的重导出）
+    InvalidAudio,
+    resolve_audio_bytes,
 )
 from services.learning.translation_task import (
     STATUS_FAILED,
@@ -87,8 +90,14 @@ _background_tasks: set[asyncio.Task] = set()
 
 # F1-3 定标：16k / 单声道 / mp3|wav / ≤60s。16k mp3 60s 上限约 5MB，
 # 作为 P0 时长近似校验（精确时长解析依赖音频解码，留 F6 真机走查；SOE-N 服务端最终兜底超长）
-MAX_AUDIO_BYTES = 5 * 1024 * 1024
 
+
+VOICE_FILE_ID_DESC = (
+    "2026-10-26 新增：云存储 fileID（`wx.cloud.uploadFile` 回传的完整 cloud:// ID）。"
+    "与 `audio_base64` **二选一**且**优先**；服务端自行从对象存储拉取音频 ⇒ "
+    "绕开微信 callContainer 100KB 请求体上限（详见 `resolve_audio_bytes` 注释）。"
+    "⚠️ 长期走本字段，**勿再**用 base64 传长音频。"
+)
 
 class EvalTranslateRequest(BaseModel):
     """评估请求：文字与语音二选一（至少提供其一）"""
@@ -98,8 +107,13 @@ class EvalTranslateRequest(BaseModel):
         None, max_length=2000, description="用户文字输入（文字直评路径）"
     )
     audio_base64: Optional[str] = Field(
-        None, description="音频 base64（语音路径，ASR 转写后评分）"
+        None,
+        description=(
+            "音频 base64（语音路径，ASR 转写后评分）。⚠️ 与 `voice_file_id` 二选一，"
+            "**新客户端一律用 voice_file_id**：本字段受微信 callContainer 100KB 请求体上限约束"
+        ),
     )
+    voice_file_id: Optional[str] = Field(None, description=VOICE_FILE_ID_DESC)
     voice_format: Optional[str] = Field(
         "mp3", description="音频格式（mp3/wav/m4a/aac/pcm），默认 mp3"
     )
@@ -123,7 +137,10 @@ async def eval_translate(
 ) -> EvalTranslateResponse:
     # 区分「未提供」与「提供为空」：None = 未提供；"" = 提供了空内容
     has_text = body.user_input is not None
-    has_audio = body.audio_base64 is not None
+    # 2026-10-26：语音也算「已提供」的条件加上 fileID（否则纯 fileID 请求会被当成「两者都缺」）
+    has_audio = body.audio_base64 is not None or bool(
+        (body.voice_file_id or "").strip()
+    )
     if not has_text and not has_audio:
         return EvalTranslateResponse(
             success=False,
@@ -133,8 +150,19 @@ async def eval_translate(
 
     transcription = body.user_input or ""
     if has_audio:
-        # 语音路径：ASR 转写
-        if not body.audio_base64.strip():
+        # 语音路径：ASR 转写（先取音频：保持「空音频优先报 INVALID_AUDIO」的既有顺序）
+        try:
+            audio_bytes = await resolve_audio_bytes(
+                body.voice_file_id,
+                body.audio_base64,
+                route="/eval/translate",
+                oversize_message="音频过大（16k/60s 上限约 5MB），请分段评测",
+            )
+        except InvalidAudio as e:
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message=e.message
+            )
+        if not audio_bytes:
             return EvalTranslateResponse(
                 success=False, code="INVALID_AUDIO", message="音频内容为空"
             )
@@ -143,16 +171,6 @@ async def eval_translate(
                 success=False,
                 code="ASR_UNAVAILABLE",
                 message="ASR 服务未配置凭据（可回退云函数评估）",
-            )
-        try:
-            audio_bytes = base64.b64decode(body.audio_base64, validate=True)
-        except (binascii.Error, ValueError):
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
-            )
-        if not audio_bytes:
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="音频内容为空"
             )
         result = asr.recognize(audio_bytes, voice_format=body.voice_format or "mp3")
         if not result:
@@ -194,8 +212,13 @@ class EvalTranslateV2Request(BaseModel):
         None, max_length=2000, description="用户文字输入（文字直评路径）"
     )
     audio_base64: Optional[str] = Field(
-        None, description="音频 base64（语音路径，ASR 转写后评分）"
+        None,
+        description=(
+            "音频 base64（语音路径，ASR 转写后评分）。⚠️ 与 `voice_file_id` 二选一，"
+            "**新客户端一律用 voice_file_id**：本字段受微信 callContainer 100KB 请求体上限约束"
+        ),
     )
+    voice_file_id: Optional[str] = Field(None, description=VOICE_FILE_ID_DESC)
     voice_format: Optional[str] = Field(
         "mp3", description="音频格式（mp3/wav/m4a/aac/pcm），默认 mp3"
     )
@@ -253,7 +276,10 @@ async def _submit_translation_v2(
             success=False, code="INVALID_INPUT", message="original_text 不能为空"
         )
     has_text = body.user_input is not None
-    has_audio = body.audio_base64 is not None
+    # 2026-10-26：fileID 也算「已提供音频」
+    has_audio = body.audio_base64 is not None or bool(
+        (body.voice_file_id or "").strip()
+    )
     if not has_text and not has_audio:
         return EvalTranslateResponse(
             success=False,
@@ -264,26 +290,21 @@ async def _submit_translation_v2(
     input_mode = "voice" if has_audio else "text"
     user_input = body.user_input
     if has_audio:
-        # 音频同步校验（不调用 ASR，仅 base64/大小校验）
-        if not body.audio_base64.strip():
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="音频内容为空"
-            )
+        # 音频同步校验（不调用 ASR；fileID 路径由服务端下载后再校大小）
         try:
-            audio_bytes = base64.b64decode(body.audio_base64, validate=True)
-        except (binascii.Error, ValueError):
+            audio_bytes = await resolve_audio_bytes(
+                body.voice_file_id,
+                body.audio_base64,
+                route="/eval/translate/v2",
+                oversize_message="音频过大（16k/60s 上限约 5MB），请分段评测",
+            )
+        except InvalidAudio as e:
             return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
+                success=False, code="INVALID_AUDIO", message=e.message
             )
         if not audio_bytes:
             return EvalTranslateResponse(
                 success=False, code="INVALID_AUDIO", message="音频内容为空"
-            )
-        if len(audio_bytes) > MAX_AUDIO_BYTES:
-            return EvalTranslateResponse(
-                success=False,
-                code="INVALID_AUDIO",
-                message="音频过大（16k/60s 上限约 5MB），请分段评测",
             )
 
     # 2. 创建 pending 任务（落库，毫秒级返回）
@@ -316,6 +337,8 @@ async def _submit_translation_v2(
             input_mode=input_mode,
             user_input=user_input,
             audio_base64=body.audio_base64 if has_audio else None,
+            # 2026-10-26：fileID 一并透传给 worker（worker 侧自行从对象存储拉取）
+            voice_file_id=body.voice_file_id if has_audio else None,
             voice_format=body.voice_format or "mp3",
             scholar_id=body.scholar_id,
             sentence_id=body.sentence_id,
@@ -402,23 +425,13 @@ class EvalSpeechRequest(BaseModel):
     original_text: str = Field(
         ..., min_length=1, max_length=500, description="参考文本（句级 ≤30 词）"
     )
-    audio_base64: str = Field(..., description="音频 base64（16k/单声道/mp3 或 wav，≤60s）")
+    audio_base64: str = Field("", description="音频 base64（16k/单声道/mp3 或 wav，≤60s）")
+    voice_file_id: Optional[str] = Field(None, description=VOICE_FILE_ID_DESC)
     voice_format: Optional[str] = Field(
         "mp3", description="mp3（默认，SOE-N=2）、wav（=1）或 aac（送 SOE 前自动转 mp3）"
     )
 
 
-def _decode_audio_base64(raw_b64: str) -> Optional[bytes]:
-    """解码音频 base64（兼容 data URL 前缀）；非法返回 None。"""
-    s = raw_b64.strip()
-    if "," in s and s.split(",", 1)[0].startswith("data:"):
-        s = s.split(",", 1)[1]
-    if not s:
-        return None
-    try:
-        return base64.b64decode(s, validate=True)
-    except (binascii.Error, ValueError):
-        return None
 
 
 class EvalTranscribeRequest(BaseModel):
@@ -469,61 +482,22 @@ async def eval_transcribe(
     """
     # 1. 音频来源（二选一，业务失败 200 + success=false，无 4xx）
     #    优先 `voice_file_id`（2026-10-26 长音频修复）—— 理由见下方 fileID 分支注释。
-    file_id = (body.voice_file_id or "").strip()
-    if file_id:
-        try:
-            audio_bytes = await CloudBaseStorageClient().download_file(file_id)
-        except StorageAPIError as e:
-            logger.warning(
-                f"[eval] /eval/transcribe 云存储下载失败 file_id={file_id}: {e}"
-            )
-            return EvalTranslateResponse(
-                success=False,
-                code="INVALID_AUDIO",
-                message="语音文件已失效，请重新录制",
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.error(
-                f"[eval] /eval/transcribe 下载异常 file_id={file_id}: {e}", exc_info=True
-            )
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="语音读取失败，请重试"
-            )
-        if not audio_bytes:
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="音频内容为空"
-            )
-        if len(audio_bytes) > MAX_AUDIO_BYTES:
-            return EvalTranslateResponse(
-                success=False,
-                code="INVALID_AUDIO",
-                message="音频过大（上限约 5MB），请分段重试",
-            )
-    else:
-        # 兼容旧客户端：请求体自带 base64。
-        # ⚠️ 微信 `callContainer` 请求体上限 **100KB**（官方《调用服务问题排查指引》
-        #    `-606001 请求包大小超过 100KB`）⇒ 本分支**容纳不了长音频**（约 >75KB 原始音频必炸），
-        #   保留仅为兼容尚未升级的小程序；新客户端一律走上面的 fileID 分支。
-        if not body.audio_base64.strip():
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="音频内容为空"
-            )
-        # 2. 音频解码/大小校验（INVALID_AUDIO）
-        audio_bytes = _decode_audio_base64(body.audio_base64)
-        if audio_bytes is None:
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
-            )
-        if not audio_bytes:
-            return EvalTranslateResponse(
-                success=False, code="INVALID_AUDIO", message="音频内容为空"
-            )
-        if len(audio_bytes) > MAX_AUDIO_BYTES:
-            return EvalTranslateResponse(
-                success=False,
-                code="INVALID_AUDIO",
-                message="音频过大（16k/60s 上限约 5MB），请分段重试",
-            )
+    try:
+        audio_bytes = await resolve_audio_bytes(
+            body.voice_file_id,
+            body.audio_base64,
+            route="/eval/transcribe",
+            oversize_message="音频过大（16k/60s 上限约 5MB），请分段重试",
+        )
+    except InvalidAudio as e:
+        return EvalTranslateResponse(
+            success=False, code="INVALID_AUDIO", message=e.message
+        )
+    # 两个音源**都没给**（旧客户端原为 audio_base64 必填 → pydantic 422，今统一为业务错误）
+    if not audio_bytes:
+        return EvalTranslateResponse(
+            success=False, code="INVALID_AUDIO", message="音频内容为空"
+        )
     # 3. 引擎选择（2026-09-10）：lang=zh → 中文引擎 16k_zh（英译中语音作答，中文口述）；
     #    缺省 en → 依赖注入的英语引擎（AI 会话自由语音，行为不变）。
     if (body.lang or "en").strip().lower() == "zh":
@@ -560,11 +534,17 @@ async def eval_speech(
     provider: SpeechProvider = Depends(get_speech_provider),
 ) -> EvalTranslateResponse:
     # 1. 必填参数校验（契约：业务失败走 200 + success=false，无 4xx）
-    for name in ("scholar_id", "sentence_id", "original_text", "audio_base64"):
+    #    2026-10-26：音频不再必填 `audio_base64` —— 改由「`voice_file_id` 或 `audio_base64`
+    #    至少一个非空」表达（都空 → 沿用原 `audio_base64 不能为空` 文案）。
+    for name in ("scholar_id", "sentence_id", "original_text"):
         if not getattr(body, name).strip():
             return EvalTranslateResponse(
                 success=False, code="INVALID_INPUT", message=f"{name} 不能为空"
             )
+    if not (body.voice_file_id or "").strip() and not body.audio_base64.strip():
+        return EvalTranslateResponse(
+            success=False, code="INVALID_INPUT", message="audio_base64 不能为空"
+        )
     # 2026-10-15：新增 aac。微信小程序 RecorderManager 在部分真机上录不出 mp3
     # （mp3 需额外转码，失败时微信 onError 报 `file error`）⇒ 客户端降级录 aac。
     # aac 不由 SOE 直接消费：Provider 在送 SOE 前会转成 mp3（见 providers/speech_eval.py）。
@@ -575,21 +555,21 @@ async def eval_speech(
             message="voice_format 仅支持 mp3 / wav / aac",
         )
 
-    # 2. 音频校验（INVALID_AUDIO）
-    audio_bytes = _decode_audio_base64(body.audio_base64)
-    if audio_bytes is None:
+    # 2. 音频取值 + 校验（INVALID_AUDIO；fileID 优先，见 resolve_audio_bytes）
+    try:
+        audio_bytes = await resolve_audio_bytes(
+            body.voice_file_id,
+            body.audio_base64,
+            route="/eval/speech",
+            oversize_message="音频过大（16k/60s 上限约 5MB），请分段评测",
+        )
+    except InvalidAudio as e:
         return EvalTranslateResponse(
-            success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
+            success=False, code="INVALID_AUDIO", message=e.message
         )
     if not audio_bytes:
         return EvalTranslateResponse(
             success=False, code="INVALID_AUDIO", message="音频内容为空"
-        )
-    if len(audio_bytes) > MAX_AUDIO_BYTES:
-        return EvalTranslateResponse(
-            success=False,
-            code="INVALID_AUDIO",
-            message="音频过大（16k/60s 上限约 5MB），请分段评测",
         )
 
     # 3. SOE-N 评测（同步 WSS 阻塞，丢线程池避免卡事件循环）

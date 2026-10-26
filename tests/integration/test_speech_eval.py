@@ -230,3 +230,86 @@ class TestSpeechEvalFallback:
         after = int(time.time() * 1000)
         doc = fake_db.all("speech_evaluation")[0]
         assert before <= doc["created_at"] <= after
+
+
+class TestSpeechEvalVoiceFileId:
+    """2026-10-26：SOE 也支持 `voice_file_id`（绕开 callContainer 100KB 请求体上限）。
+
+    与 /eval/transcribe 同一口径：**fileID 优先**，服务端自行从对象存储拉取音频。
+    """
+
+    @staticmethod
+    def _patch_storage(monkeypatch, result):
+        """桩掉对象存储下载；result = bytes 或待抛异常。"""
+        from services.infra.tcb_storage import CloudBaseStorageClient
+
+        async def _fake_download(self, file_id, timeout=30.0):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(CloudBaseStorageClient, "download_file", _fake_download)
+
+    def test_file_id_audio_reaches_provider(self, make_client, fake_db, monkeypatch):
+        """fileID 路径：Provider 收到的应是**下载到的字节**（base64 完全不经请求体）。"""
+        self._patch_storage(monkeypatch, b"cloud-soe-bytes")
+        seen = {}
+
+        class RecordingProvider(FakeSpeechProvider):
+            def evaluate(self, audio_bytes, ref_text, voice_format="mp3"):
+                seen["audio_bytes"] = audio_bytes
+                return self.raw
+
+        client = _client(make_client, provider=RecordingProvider())
+        payload = speech_payload(audio_base64="")
+        payload["voice_file_id"] = "cloud://env.x/voice/a.mp3"
+        resp = client.post("/eval/speech", json=payload)
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert seen["audio_bytes"] == b"cloud-soe-bytes"
+
+    def test_file_id_preferred_over_base64(self, make_client, fake_db, monkeypatch):
+        """两者同给 → 优先 fileID（避免前端残留 base64 时又走回受限路径）。"""
+        self._patch_storage(monkeypatch, b"from-cloud")
+        seen = {}
+
+        class RecordingProvider(FakeSpeechProvider):
+            def evaluate(self, audio_bytes, ref_text, voice_format="mp3"):
+                seen["audio_bytes"] = audio_bytes
+                return self.raw
+
+        client = _client(make_client, provider=RecordingProvider())
+        payload = speech_payload(
+            audio_base64=base64.b64encode(b"from-base64").decode()
+        )
+        payload["voice_file_id"] = "cloud://env.x/voice/a.mp3"
+        resp = client.post("/eval/speech", json=payload)
+        assert resp.status_code == 200
+        assert seen["audio_bytes"] == b"from-cloud"
+
+    def test_file_id_download_failure_invalid_audio(self, make_client, fake_db, monkeypatch):
+        """下载失败（链接失效/文件不存在）→ INVALID_AUDIO，不 5xx、不落库。"""
+        from services.infra.tcb_storage import StorageAPIError
+
+        self._patch_storage(monkeypatch, StorageAPIError("STORAGE_FILE_NONEXIST"))
+        client = _client(make_client)
+        payload = speech_payload(audio_base64="")
+        payload["voice_file_id"] = "cloud://env.x/voice/gone.mp3"
+        resp = client.post("/eval/speech", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is False
+        assert body["code"] == "INVALID_AUDIO"
+        assert fake_db.all("speech_evaluation") == []
+
+    def test_file_id_oversize_invalid_audio(self, make_client, fake_db, monkeypatch):
+        """fileID 路径也受 5MB 上限约束 ⇒ 否则后端会被动下载超大对象。"""
+        self._patch_storage(monkeypatch, b"x" * (MAX_AUDIO_BYTES + 1))
+        client = _client(make_client)
+        payload = speech_payload(audio_base64="")
+        payload["voice_file_id"] = "cloud://env.x/voice/huge.mp3"
+        resp = client.post("/eval/speech", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is False
+        assert body["code"] == "INVALID_AUDIO"

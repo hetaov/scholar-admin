@@ -125,6 +125,10 @@ class EvaluateRequest(BaseModel):
     input_mode: str = Field("text")  # text | audio
     user_input: str = Field("")
     audio_base64: str | None = Field(None)
+    # 2026-10-26：转为 fileID 传输以绕过 callContainer 100KB 请求体上限。
+    # ⚠️ 注意：本链路的 `audio_base64` 至今**无人消费**（三级透传后从未解码），
+    #   故本字段同样只是被接收；留位是给后续真正启用语音评测时直接用。
+    voice_file_id: str | None = Field(None)
 
 
 class SaveReviewRequest(BaseModel):

@@ -670,3 +670,100 @@ class TestEvalTranslateV2ZhSubmit:
         evals = fake_db.all("evaluation")
         assert evals[0]["succeeded"] is False
         assert evals[0]["error_code"] == "ASR_UNAVAILABLE"
+
+
+class TestEvalTranslateV2VoiceFileId:
+    """2026-10-26：v2 支持 `voice_file_id`，且必须**透传给后台 worker**。
+
+    要点：v2 的音频最终由 `run_translation_task`（后台）解码转写，故光补齐路由入参不够，
+    worker 侧也得能吃 fileID —— 否则 fileID 提交的任务会在后台抛「音频内容为空」。
+    """
+
+    @staticmethod
+    def _patch_storage(monkeypatch, result):
+        from services.infra.tcb_storage import CloudBaseStorageClient
+
+        async def _fake_download(self, file_id, timeout=30.0):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(CloudBaseStorageClient, "download_file", _fake_download)
+
+    def test_route_accepts_file_id_only(self, make_client, monkeypatch, fake_db):
+        """只给 fileID（无 base64）→ 视为已提供音频，正常受理（input_mode=voice）。"""
+        captured = {}
+
+        def fake_runner(task_id, **kwargs):
+            captured.update(kwargs)
+            return asyncio.sleep(0)
+
+        monkeypatch.setattr(
+            "services.routes_eval.run_translation_task", fake_runner
+        )
+        self._patch_storage(monkeypatch, b"cloud-bytes")
+        client = _client(make_client, monkeypatch=monkeypatch)
+        resp = client.post(
+            "/eval/translate/v2",
+            json={
+                "original_text": "Hello world",
+                "voice_file_id": "cloud://env.x/voice/a.mp3",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True, body
+
+    def test_worker_transcribes_from_file_id(self, monkeypatch, fake_db):
+        """★ worker 侧按 fileID 取音频并 ASR 转写（不再是 b64decode）。"""
+        from tests.fakes.fake_providers import FakeAsrService
+
+        self._patch_storage(monkeypatch, b"worker-cloud-bytes")
+        seen = {}
+
+        class RecordingAsr(FakeAsrService):
+            def recognize(self, audio_bytes, voice_format="mp3"):
+                seen["audio_bytes"] = audio_bytes
+                return "hello world"
+
+        monkeypatch.setattr(
+            "services.translation_task.get_asr_service", lambda: RecordingAsr()
+        )
+        monkeypatch.setattr(
+            "services.translation_eval._call_translation_llm",
+            lambda *a, **k: MODEL_OK,
+        )
+        doc = seed_translation_task(
+            fake_db, status="pending", original_text="Hello world", input_mode="voice"
+        )
+        _run(
+            run_translation_task(
+                doc["task_id"],
+                original_text="Hello world",
+                mode="ec",
+                input_mode="voice",
+                voice_file_id="cloud://env.x/voice/a.mp3",
+            )
+        )
+        assert seen["audio_bytes"] == b"worker-cloud-bytes"
+
+    def test_worker_file_id_failure_marks_task_failed(self, monkeypatch, fake_db):
+        """worker 下载失败 → 任务 failed + ASR_UNAVAILABLE（stage=asr），不静默成功。"""
+        from services.infra.tcb_storage import StorageAPIError
+
+        self._patch_storage(monkeypatch, StorageAPIError("STORAGE_FILE_NONEXIST"))
+        doc = seed_translation_task(
+            fake_db, status="pending", original_text="Hello world", input_mode="voice"
+        )
+        _run(
+            run_translation_task(
+                doc["task_id"],
+                original_text="Hello world",
+                mode="ec",
+                input_mode="voice",
+                voice_file_id="cloud://env.x/voice/gone.mp3",
+            )
+        )
+        stored = fake_db.all("translation_task")
+        assert stored and stored[0]["status"] == "failed"
+        assert stored[0]["error"]["error_code"] == "ASR_UNAVAILABLE"

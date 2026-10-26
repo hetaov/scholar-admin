@@ -343,3 +343,69 @@ class TestEvalTranscribe:
         body = resp.json()
         assert body["success"] is False
         assert body["code"] == "INVALID_AUDIO"
+
+
+class TestEvalTranslateVoiceFileId:
+    """2026-10-26：`/eval/translate`（v1）也支持 `voice_file_id`。
+
+    v1 仍在用（`evaluateTranslation` 走它，含云函数兜底），故同样要能吃 fileID，
+    否则长音频仍会撞 callContainer 100KB 上限。
+    """
+
+    @staticmethod
+    def _patch_storage(monkeypatch, result):
+        from services.infra.tcb_storage import CloudBaseStorageClient
+
+        async def _fake_download(self, file_id, timeout=30.0):
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(CloudBaseStorageClient, "download_file", _fake_download)
+
+    def test_file_id_only_accepted_as_voice_input(self, make_client, monkeypatch):
+        """只给 fileID：不得被当成「两者都缺」而报 INVALID_INPUT。"""
+        self._patch_storage(monkeypatch, b"cloud-audio-bytes")
+        asr = FakeAsrService()
+        client = _client(make_client, monkeypatch, asr=asr)
+        resp = client.post(
+            "/eval/translate",
+            json={
+                "original_text": "It is a watch.",
+                "voice_file_id": "cloud://env.x/voice/a.mp3",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True, body
+        assert asr.calls[0][0] == b"cloud-audio-bytes"
+
+    def test_file_id_preferred_over_base64(self, make_client, monkeypatch):
+        self._patch_storage(monkeypatch, b"from-cloud")
+        asr = FakeAsrService()
+        client = _client(make_client, monkeypatch, asr=asr)
+        resp = client.post(
+            "/eval/translate",
+            json={
+                "original_text": "It is a watch.",
+                "voice_file_id": "cloud://env.x/voice/a.mp3",
+                "audio_base64": base64.b64encode(b"from-base64").decode(),
+            },
+        )
+        assert resp.status_code == 200
+        assert asr.calls[0][0] == b"from-cloud"
+
+    def test_file_id_download_failure(self, make_client, monkeypatch):
+        from services.infra.tcb_storage import StorageAPIError
+
+        self._patch_storage(monkeypatch, StorageAPIError("STORAGE_FILE_NONEXIST"))
+        client = _client(make_client, monkeypatch)
+        resp = client.post(
+            "/eval/translate",
+            json={
+                "original_text": "It is a watch.",
+                "voice_file_id": "cloud://env.x/voice/gone.mp3",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "INVALID_AUDIO"
