@@ -518,6 +518,13 @@ EXTENSION_RULE_FALLBACK_ENABLED = int(
 # 非连续短语（turn the light off → turn off）需多 span schema，仅在开关开启时启用。
 EXTENSION_USE_LANGGRAPH = int(os.environ.get("EXTENSION_USE_LANGGRAPH", 0))
 
+# ASR 转写后处理：智能标点（默认 0 关 ⇒ 今日行为逐字不变）
+# 置 1 → `POST /eval/transcribe` 在返回前用 `smart_punctuate` 补齐书面标点
+#   （空白归一 + 首字母大写 + 句末标点）；刻意不触碰 ITN / 句内逗号。
+# 2026-10-26：腾讯云「一句话识别」返回的是无标点裸文本，先把开关埋好，
+#   待实测确认对判分与展示有正收益后再决定是否全量。
+ASR_SMART_PUNCTUATION = os.environ.get("ASR_SMART_PUNCTUATION", "0") == "1"
+
 # 两集合（data-model-contract §4.24 / §4.25）
 EXTENSION_POINT_COLLECTION = os.environ.get(
     "EXTENSION_POINT_COLLECTION", "english_extension_point"

@@ -1372,8 +1372,6 @@ async def run_evaluate_pipeline(
     points_snapshot: list[dict],
     input_mode: str,
     user_input: str,
-    audio_base64: str | None = None,
-    voice_format: str = "mp3",
     scholar_id: str | None = None,
 ) -> dict:
     """E2 后台执行：L1 确定性判分 / L2 rubric 异步。

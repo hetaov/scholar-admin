@@ -43,7 +43,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from config import SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_APPID
+from config import ASR_SMART_PUNCTUATION, SECRET_ID, SECRET_KEY, SESSION_TOKEN, TCB_APPID
 from services.asr import (
     ASR_SERVICE_TYPE,
     ASR_SERVICE_TYPE_ZH,
@@ -63,6 +63,8 @@ from services.infra.audio_source import (
     InvalidAudio,
     resolve_audio_bytes,
 )
+# 2026-10-26：ASR 转写后处理（可选智能标点，见 config.ASR_SMART_PUNCTUATION）
+from services.infra.text_normalize import smart_punctuate
 from services.learning.translation_task import (
     STATUS_FAILED,
     create_translation_task,
@@ -524,6 +526,11 @@ async def eval_transcribe(
             code="ASR_UNAVAILABLE",
             message="语音识别失败，请重试",
         )
+    # 2026-10-26：可选「智能标点」后处理，默认关闭 ⇒ 今日行为逐字不变。
+    #   腾讯云一句话识别返回的是无标点裸文本；本钩子用于实测对比有/无标点对
+    #   rubric 判分与「你的回答」展示的影响，确认有正收益后再决定是否全量。
+    if ASR_SMART_PUNCTUATION:
+        result = smart_punctuate(result)
     return EvalTranslateResponse(success=True, data={"transcription": result})
 
 

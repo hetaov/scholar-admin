@@ -103,8 +103,6 @@ async def create_extension_task(
     points_snapshot: list[dict] | None = None,
     input_mode: str = "text",
     user_input: str | None = None,
-    audio_base64: str | None = None,
-    voice_format: str = "mp3",
     asr_engine: str = "16k_en",
     enable_fallback: bool = True,
     round_action: str | None = None,
@@ -114,7 +112,6 @@ async def create_extension_task(
     kind: extract | evaluate | round（三期追加）。
     evaluate 任务需传 task_type / selected_ids / points_snapshot；
     round 任务需传 round_action（start=开会话 / turn=提交第 k 轮）。
-    audio_base64 不落库（CloudBase 单文档 1MB 上限），以 None 占位。
     """
     validate_task_kind(kind, round_action)
     now = _now_ms()
@@ -132,8 +129,6 @@ async def create_extension_task(
         "points_snapshot": points_snapshot or [],
         "input_mode": input_mode,
         "user_input": user_input,
-        "audio_base64": None,  # 不落库，仅透传执行器
-        "voice_format": voice_format,
         "asr_engine": asr_engine,
         # 请求级「规则兜底」开关（实验页对照实验用）；与全局开关为「与」关系
         "enable_fallback": bool(enable_fallback),
@@ -292,8 +287,6 @@ async def run_extension_task(
     points_snapshot: list[dict] | None = None,
     input_mode: str = "text",
     user_input: str | None = None,
-    audio_base64: str | None = None,
-    voice_format: str = "mp3",
     scholar_id: str | None = None,
     original: str = "",
     translation: str = "",
@@ -368,8 +361,6 @@ async def run_extension_task(
                 points_snapshot=points_snapshot or [],
                 input_mode=input_mode,
                 user_input=user_input,
-                audio_base64=audio_base64,
-                voice_format=voice_format,
                 scholar_id=scholar_id,
             )
         elif kind == KIND_ROUND:

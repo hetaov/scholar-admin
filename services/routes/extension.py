@@ -117,18 +117,19 @@ class ExtractPointsRequest(BaseModel):
 
 
 class EvaluateRequest(BaseModel):
-    """E2 评测请求体。"""
+    """E2 评测请求体。
+
+    2026-10-26：**彻底移除 audio_base64 / voice_file_id**。
+    本链路历史上从未解码音频（三级透传后评分器只读 `user_input`），调用方一旦误传
+    音频会得到 `success=true + score=0` 的**静默 0 分**（不带任何 error code）。
+    语音统一由**前端 ASR 转写**后按 `input_mode='text'` 提交（ADR-0032 D17）。
+    """
 
     sentence_id: str = Field(..., min_length=1)
     selected_ids: list[str] = Field(default_factory=list)
     task_type: str = Field("l1_fill")  # l1_fill | l2_sentence
-    input_mode: str = Field("text")  # text | audio
+    input_mode: str = Field("text")  # 恒 'text'（语音已在前端转为文本）
     user_input: str = Field("")
-    audio_base64: str | None = Field(None)
-    # 2026-10-26：转为 fileID 传输以绕过 callContainer 100KB 请求体上限。
-    # ⚠️ 注意：本链路的 `audio_base64` 至今**无人消费**（三级透传后从未解码），
-    #   故本字段同样只是被接收；留位是给后续真正启用语音评测时直接用。
-    voice_file_id: str | None = Field(None)
 
 
 class SaveReviewRequest(BaseModel):
@@ -337,7 +338,6 @@ async def evaluate(body: EvaluateRequest, db=Depends(get_db)):
             points_snapshot=points,
             input_mode=body.input_mode,
             user_input=body.user_input,
-            audio_base64=body.audio_base64,
         )
     )
     _background_tasks.add(bg)

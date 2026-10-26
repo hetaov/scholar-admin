@@ -59,7 +59,9 @@ def test_create_extension_task_fields():
     assert doc["result"] is None
     assert doc["error"] is None
     assert doc["expires_at"] - doc["created_at"] == TASK_TTL_MS
-    assert doc["audio_base64"] is None  # 不落库
+    # 2026-10-26：E2 已从根上移除音频字段（audio_base64 / voice_file_id / voice_format）
+    assert "audio_base64" not in doc
+    assert "voice_format" not in doc
     assert doc["sentence_id"] == "s1"
 
 

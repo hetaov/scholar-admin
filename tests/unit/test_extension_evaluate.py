@@ -379,3 +379,36 @@ def test_r9_review_writes_only_user_collections():
         ("remove", "coat"),
         ("add", "scarf"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-26：E2 链路音频字段的根除（防「死透传 → 静默 0 分」复发）
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_pipeline_has_no_audio_params():
+    """E2 执行器不得再带任何音频入参 —— 历史上它们是三级死透传。
+
+    背景：`audio_base64` 曾一路透传到 `run_evaluate_pipeline` 却从未被解码，导致
+    「以语音提交」时评分器拿到空作答 ⇒ `success=true + score=0 + passed=false`
+    的**静默 0 分**（不带任何 error code）。现语音统一走前端 ASR 转写后按文本提交
+    （ADR-0032 D17），故从请求模型到执行器一并移除，杜绝隐患复发。
+    """
+    import inspect
+
+    from services.learning.extension_task import run_extension_task
+
+    forbidden = {"audio_base64", "voice_file_id", "voice_format"}
+    for fn in (run_evaluate_pipeline, run_extension_task):
+        params = set(inspect.signature(fn).parameters)
+        assert params & forbidden == set(), (
+            f"{fn.__name__} 仍带音频入参 {sorted(params & forbidden)}"
+        )
+
+
+def test_evaluate_request_has_no_audio_fields():
+    """E2 请求模型不得再接受音频字段（连带毒两种音源一并封死）。"""
+    from services.routes.extension import EvaluateRequest
+
+    fields = set(EvaluateRequest.model_fields)
+    assert fields & {"audio_base64", "voice_file_id"} == set(), sorted(fields)
