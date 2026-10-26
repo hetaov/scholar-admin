@@ -194,3 +194,43 @@ class CloudBaseStorageClient:
             return files[0].get("download_url", "")
         logger.warning(f"[storage] batchdownloadfile 无返回 URL cloud_path={cloud_path}")
         return ""
+
+    # ------------------------------------------------------------------
+    # 下载：fileID → 临时链接 → GET 二进制
+    # ------------------------------------------------------------------
+    async def download_file(self, file_id: str, timeout: float = 30.0) -> bytes:
+        """按 fileID 下载文件内容（2026-10-26：ASR 长音频转写走此路径）。
+
+        为什么必须有这条路：
+            微信 `wx.cloud.callContainer` 的**请求包体上限仅 100KB**（官方《调用服务问题
+            排查指引》`-606001 请求包大小超过 100KB`；同文档明确要求「请勿在请求体中加入
+            图片/视频/文件，上述类型先上传到对象存储后仅将 fileID 通过请求体传给后端」）。
+            base64 还要多 33% 开销 ⇒ 原始音频只能约 75KB ⇒ **长录音必然 -606001**。
+            官方推荐做法就是本方法支撑的方案：请求体只带 fileID，由服务端自行拉取。
+
+        Args:
+            file_id: `wx.cloud.uploadFile` 回传的完整 cloud:// fileID
+                （⚠️ 必须是**真实回传值**：按 `cloud://{env}/{path}` 拼出来的 ID 微信侧查不到，
+                见 `get_temp_file_url` 的 2026-10-23 修复说明）
+            timeout: 下载超时（秒；音频通常远小于 30s 够用，留足冗余防弱网）
+
+        Returns:
+            文件二进制内容
+
+        Raises:
+            StorageAPIError: 换链接失败 / 未换到 URL / HTTP 下载失败
+        """
+        # cloud_path 参数仅用于日志与兜底拼法；file_id 优先
+        url = await self.get_temp_file_url(file_id, file_id=file_id)
+        if not url:
+            raise StorageAPIError(f"未获取到下载链接 file_id={file_id}")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            raise StorageAPIError(
+                f"云存储下载失败 HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        logger.info(
+            f"[storage] DownloadFile ok file_id={file_id}, bytes={len(resp.content)}"
+        )
+        return resp.content

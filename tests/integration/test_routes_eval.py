@@ -236,10 +236,13 @@ class TestEvalTranscribe:
         assert resp.json()["code"] == "INVALID_AUDIO"
 
     def test_missing_audio(self, make_client, monkeypatch):
-        # audio_base64 为必填字段 → pydantic 422（同 /eval/speech）
+        # 2026-10-26：`audio_base64` 与 `voice_file_id` **二选一**（至少一个）⇒ 两者都缺
+        # 不再是 pydantic 422（原 audio_base64 必填），而是业务错误 200 + INVALID_AUDIO，
+        # 与本端点其余业务失败的契约一致。
         client = _client(make_client, monkeypatch)
         resp = client.post("/eval/transcribe", json={})
-        assert resp.status_code == 422
+        assert resp.status_code == 200
+        assert resp.json()["code"] == "INVALID_AUDIO"
 
     def test_invalid_base64(self, make_client, monkeypatch):
         client = _client(make_client, monkeypatch)
@@ -267,3 +270,76 @@ class TestEvalTranscribe:
         resp = client.post("/eval/transcribe", json={"audio_base64": self._audio()})
         assert resp.status_code == 200
         assert resp.json()["code"] == "ASR_UNAVAILABLE"
+
+    # ------------------------------------------------------------------
+    # 2026-10-26 长音频修复：`voice_file_id`（对象存储 fileID）路径
+    #
+    # 起因：微信 `wx.cloud.callContainer` 请求包体上限 **100KB**
+    # （官方《调用服务问题排查指引》`-606001 请求包大小超过 100KB`），
+    # 音频 base64 塞请求体必然超限 ⇒ 长录音必失败，且官方明确要求
+    # 「文件类先入对象存储，请求体只带 fileID」。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _patch_storage(monkeypatch, result):
+        """桩掉 `CloudBaseStorageClient.download_file`；result = bytes 或待抛出的异常。"""
+        from services.infra.tcb_storage import CloudBaseStorageClient  # noqa: PLC0415
+
+        async def _fake_download(self, file_id, timeout=30.0):  # noqa: ARG001
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(CloudBaseStorageClient, "download_file", _fake_download)
+
+    def test_transcribe_by_voice_file_id(self, make_client, monkeypatch):
+        """fileID 路径：服务端自行从对象存储拉取 ⇒ ASR 收到的是**下载到的字节**（不经请求体）。"""
+        self._block_scoring(monkeypatch)
+        self._patch_storage(monkeypatch, b"cloud-audio-bytes")
+        asr = FakeAsrService()
+        client = _client(make_client, monkeypatch, asr=asr)
+        resp = client.post(
+            "/eval/transcribe",
+            json={
+                "voice_file_id": "cloud://env.x/voice/a.mp3",
+                "voice_format": "aac",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["data"] == {"transcription": "it is a watch"}
+        assert asr.call_count == 1
+        assert asr.calls[0][0] == b"cloud-audio-bytes"  # 下载到的字节，非请求体
+        assert asr.calls[0][1] == "aac"  # 格式由请求体指定（cloudPath 恒 .mp3 后缀，不可推断）
+
+    def test_transcribe_file_id_preferred_over_base64(self, make_client, monkeypatch):
+        """两者同时给 → **优先 fileID**：避免前端残留 base64 时又走回 100KB 受限路径。"""
+        self._block_scoring(monkeypatch)
+        self._patch_storage(monkeypatch, b"from-cloud")
+        asr = FakeAsrService()
+        client = _client(make_client, monkeypatch, asr=asr)
+        resp = client.post(
+            "/eval/transcribe",
+            json={
+                "voice_file_id": "cloud://env.x/voice/a.mp3",
+                "audio_base64": self._audio(b"from-base64"),
+            },
+        )
+        assert resp.status_code == 200
+        assert asr.calls[0][0] == b"from-cloud"
+
+    def test_transcribe_file_id_download_failure(self, make_client, monkeypatch):
+        """对象存储下载失败（链接失效 / 文件不存在）→ INVALID_AUDIO，不 5xx、不崩。"""
+        from services.infra.tcb_storage import StorageAPIError  # noqa: PLC0415
+
+        self._block_scoring(monkeypatch)
+        self._patch_storage(monkeypatch, StorageAPIError("STORAGE_FILE_NONEXIST"))
+        client = _client(make_client, monkeypatch)
+        resp = client.post(
+            "/eval/transcribe", json={"voice_file_id": "cloud://env.x/voice/gone.mp3"}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is False
+        assert body["code"] == "INVALID_AUDIO"

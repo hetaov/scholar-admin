@@ -56,6 +56,10 @@ from services.asr import (
 from services.dependencies import get_db
 from services.database import CloudBaseNoSQLClient
 from services.evaluator import evaluate
+from services.infra.tcb_storage import (
+    CloudBaseStorageClient,
+    StorageAPIError,
+)
 from services.learning.translation_task import (
     STATUS_FAILED,
     create_translation_task,
@@ -425,7 +429,21 @@ class EvalTranscribeRequest(BaseModel):
     其 LLM 评分对会话语音从不被消费 → 白付一次 LLM 调用与同步等待）。
     """
 
-    audio_base64: str = Field(..., description="音频 base64（16k/单声道/mp3|wav，≤60s）")
+    audio_base64: str = Field(
+        "",
+        description=(
+            "音频 base64（16k/单声道/mp3|wav，≤60s）；与 `voice_file_id` **二选一**。"
+            "⚠️ 微信 `callContainer` 请求体上限 100KB ⇒ 该字段**放不下长音频**（超限必 -606001），"
+            "新客户端一律改用 `voice_file_id`；本字段仅为兼容旧客户端保留"
+        ),
+    )
+    voice_file_id: Optional[str] = Field(
+        None,
+        description=(
+            "2026-10-26 新增：云存储 fileID（`wx.cloud.uploadFile` 回传的完整 cloud:// ID）。"
+            "与 `audio_base64` 二选一，**优先**；服务端自行从对象存储拉取音频 ⇒ 彻底绕开 100KB 请求体上限"
+        ),
+    )
     voice_format: Optional[str] = Field(
         "mp3", description="音频格式（mp3/wav/m4a/aac/pcm），默认 mp3"
     )
@@ -449,27 +467,63 @@ async def eval_transcribe(
     2026-09-10 新增 `lang`：英译中语音作答（中文口述）传 `lang=zh` 走中文引擎 `16k_zh`
     （缺省英语引擎会把中文按英文音素转写为错文本）；缺省 `en` 行为不变。
     """
-    # 1. 基础校验（业务失败 200 + success=false，无 4xx）
-    if not body.audio_base64.strip():
-        return EvalTranslateResponse(
-            success=False, code="INVALID_AUDIO", message="音频内容为空"
-        )
-    # 2. 音频解码/大小校验（INVALID_AUDIO）
-    audio_bytes = _decode_audio_base64(body.audio_base64)
-    if audio_bytes is None:
-        return EvalTranslateResponse(
-            success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
-        )
-    if not audio_bytes:
-        return EvalTranslateResponse(
-            success=False, code="INVALID_AUDIO", message="音频内容为空"
-        )
-    if len(audio_bytes) > MAX_AUDIO_BYTES:
-        return EvalTranslateResponse(
-            success=False,
-            code="INVALID_AUDIO",
-            message="音频过大（16k/60s 上限约 5MB），请分段重试",
-        )
+    # 1. 音频来源（二选一，业务失败 200 + success=false，无 4xx）
+    #    优先 `voice_file_id`（2026-10-26 长音频修复）—— 理由见下方 fileID 分支注释。
+    file_id = (body.voice_file_id or "").strip()
+    if file_id:
+        try:
+            audio_bytes = await CloudBaseStorageClient().download_file(file_id)
+        except StorageAPIError as e:
+            logger.warning(
+                f"[eval] /eval/transcribe 云存储下载失败 file_id={file_id}: {e}"
+            )
+            return EvalTranslateResponse(
+                success=False,
+                code="INVALID_AUDIO",
+                message="语音文件已失效，请重新录制",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"[eval] /eval/transcribe 下载异常 file_id={file_id}: {e}", exc_info=True
+            )
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message="语音读取失败，请重试"
+            )
+        if not audio_bytes:
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message="音频内容为空"
+            )
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            return EvalTranslateResponse(
+                success=False,
+                code="INVALID_AUDIO",
+                message="音频过大（上限约 5MB），请分段重试",
+            )
+    else:
+        # 兼容旧客户端：请求体自带 base64。
+        # ⚠️ 微信 `callContainer` 请求体上限 **100KB**（官方《调用服务问题排查指引》
+        #    `-606001 请求包大小超过 100KB`）⇒ 本分支**容纳不了长音频**（约 >75KB 原始音频必炸），
+        #   保留仅为兼容尚未升级的小程序；新客户端一律走上面的 fileID 分支。
+        if not body.audio_base64.strip():
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message="音频内容为空"
+            )
+        # 2. 音频解码/大小校验（INVALID_AUDIO）
+        audio_bytes = _decode_audio_base64(body.audio_base64)
+        if audio_bytes is None:
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message="audio_base64 不是合法 base64"
+            )
+        if not audio_bytes:
+            return EvalTranslateResponse(
+                success=False, code="INVALID_AUDIO", message="音频内容为空"
+            )
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            return EvalTranslateResponse(
+                success=False,
+                code="INVALID_AUDIO",
+                message="音频过大（16k/60s 上限约 5MB），请分段重试",
+            )
     # 3. 引擎选择（2026-09-10）：lang=zh → 中文引擎 16k_zh（英译中语音作答，中文口述）；
     #    缺省 en → 依赖注入的英语引擎（AI 会话自由语音，行为不变）。
     if (body.lang or "en").strip().lower() == "zh":
