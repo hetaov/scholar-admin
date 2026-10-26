@@ -313,3 +313,55 @@ class TestSpeechEvalVoiceFileId:
         body = resp.json()
         assert body["success"] is False
         assert body["code"] == "INVALID_AUDIO"
+
+
+class TestSpeechHealthProbe:
+    """2026-10-26：`GET /eval/speech/health` —— 沉浸式页**进页探针**（零成本可用性自检）。
+
+    价值：把「语音评测不可用」的发现时机从「录满 60s 之后」提前到「进页瞬间」。
+    阶段一（突破）唯一推进入口是跟读评测，评测挂 ⇒ 永远卡在阶段一进不了第二/三/四阶段。
+
+    ⚠️ 本协议端点**自身存在与否即版本信号**：旧版后端没有它 ⇒ 前端探活得 404 ⇒
+    可区分「后端版本过旧」（旧 EvalSpeechRequest 会 422）与「网络/服务异常」。
+    """
+
+    def test_available(self, make_client, fake_db):
+        client = _client(make_client)
+        resp = client.get("/eval/speech/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["code"] == "OK"
+        assert body["data"]["available"] is True
+        assert body["data"]["reason"] == ""
+
+    def test_unavailable_reports_reason_without_5xx(self, make_client, fake_db):
+        """SOE 凭据缺失 → available=false + reason=no_credentials，仍 200（契约无 4xx/5xx）。"""
+        client = _client(make_client, provider=FakeSpeechProvider(available=False))
+        resp = client.get("/eval/speech/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["data"]["available"] is False
+        assert body["data"]["reason"] == "no_credentials"
+
+    def test_probe_never_triggers_real_evaluation(self, make_client, fake_db):
+        """★ 硬约束：探针必须**零成本** —— 绝不触发真实 SOE 评测（按次计费、耗时长）。"""
+
+        class CountingProvider(FakeSpeechProvider):
+            def evaluate_with_reason(self, *args, **kwargs):
+                seen["called"] = True
+                return None, "eval_failed"
+
+        seen: dict = {}
+        client = _client(make_client, provider=CountingProvider())
+        resp = client.get("/eval/speech/health")
+        assert resp.status_code == 200
+        assert seen == {}  # 评测一次都没被调用
+
+    def test_probe_does_not_persist(self, make_client, fake_db):
+        """探针只报状态，不落库 speech_evaluation（不污染评测存档）。"""
+        client = _client(make_client)
+        client.get("/eval/speech/health")
+        client.get("/eval/speech/health")
+        assert fake_db.all("speech_evaluation") == []

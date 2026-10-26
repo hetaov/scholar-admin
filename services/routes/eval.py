@@ -634,3 +634,27 @@ async def eval_speech(
         success=True,
         data=parsed,
     )
+
+
+@router.get("/eval/speech/health", response_model=EvalTranslateResponse)
+async def eval_speech_health(
+    provider: SpeechProvider = Depends(get_speech_provider),
+) -> EvalTranslateResponse:
+    """SOE-N 语音评测可用性自检（**零成本**：只查凭据，不发真实评测请求）。
+
+    2026-10-26：给沉浸式页做**进页探针**。目的：让「语音评测不可用」在**录音之前**
+    就被发现，而不是让用户录满 60s 才收到失败提示——阶段一（突破）唯一推进入口
+    就是跟读评测，评测挂 ⇒ 永远卡在阶段一、进不了第二/三/四阶段。
+
+    ⚠️ 本端点**存在与否本身就是版本信号**：旧版后端没有它 ⇒ 前端探活拿到 404 ⇒
+    可据此区分「网络/服务异常」与「后端版本过旧」（后者会让 `/eval/speech` 因
+    缺 `audio_base64` 而 422，见 4f1f513 前的 `EvalSpeechRequest`）。
+
+    契约：本链路业务失败走 200 + success=false；本端点只报能力状态，故恒 success=true，
+    可用性放在 `data.available`，原因 token 放 `data.reason`。
+    """
+    available = bool(provider.available)
+    return EvalTranslateResponse(
+        success=True,
+        data={"available": available, "reason": "" if available else "no_credentials"},
+    )
