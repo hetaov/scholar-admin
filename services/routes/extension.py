@@ -172,6 +172,11 @@ class SubmitRoundTurnRequest(BaseModel):
     client_turn_index: int | None = Field(
         None, description="乐观并发校验；与服务端不一致 → ROUND_TURN_MISMATCH"
     )
+    # 2026-10-26 逐轮难度递进（新特性）：本轮提交携带**下一轮**的档位。
+    # 不传 ⇒ `None` ⇒ 服务端回落会话级（E7 落库值）⇒ 发布版小程序（不带该字段）零改动仍可用。
+    difficulty: str | None = Field(
+        None, description="下一轮难度档位（same / harder）；不传 → 沿用会话级"
+    )
 
 
 # ===========================================================================
@@ -556,6 +561,13 @@ async def submit_round_turn(body: SubmitRoundTurnRequest, db=Depends(get_db)):
             f"轮次已变化，请按当前轮次重新提交（服务端当前第 {server_turn_index} 轮）",
         )
 
+    # 2026-10-26 逐轮难度递进：与 E7 同一枚举校验；`None`（未传）直接放行 → 走会话级回落
+    if body.difficulty is not None and body.difficulty not in (
+        DIFFICULTY_SAME,
+        DIFFICULTY_HARDER,
+    ):
+        return _fail("INVALID_INPUT", "difficulty 取值须为 same / harder")
+
     task = await create_extension_task(
         db,
         kind="round",
@@ -573,6 +585,7 @@ async def submit_round_turn(body: SubmitRoundTurnRequest, db=Depends(get_db)):
             round_id=body.round_id,
             user_input=body.user_input,
             client_turn_index=body.client_turn_index,
+            difficulty=body.difficulty,
         )
     )
     _background_tasks.add(bg)

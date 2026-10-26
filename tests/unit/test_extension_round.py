@@ -1339,3 +1339,86 @@ def test_build_summary_model_sentences_all_empty_is_empty():
     """全空（LLM 未给 + 无 `reference_en`）→ []，不产生空串条目。"""
     turns = [{"reference_en": "", "result": {"score": 5, "errors": [], "model_sentence": ""}}]
     assert build_summary(turns)["model_sentences"] == []
+
+
+# ===========================================================================
+# 逐轮难度递进（2026-10-26 新特性）：E8 入参 `difficulty` = **轮次级覆盖**
+# ⚠️ 不传必须回落会话级 —— 发布版小程序 E8 不带该字段，行为须逐字节不变。
+# ===========================================================================
+
+
+def test_resolve_round_settings_override_is_turn_level():
+    """`override_difficulty` 合法 ⇒ 覆盖会话级；不传 / 非法 ⇒ 回落会话级。"""
+    doc_same = {"difficulty": DIFFICULTY_SAME, "register": "auto"}
+    # ① 轮次级覆盖生效（会话是 same，本轮要 harder）
+    assert (
+        er._resolve_round_settings(doc_same, [], override_difficulty=DIFFICULTY_HARDER)[0]
+        == DIFFICULTY_HARDER
+    )
+    # ② 不传（发布版小程序 E8 不带该字段）⇒ 回落会话级
+    assert er._resolve_round_settings(doc_same, [])[0] == DIFFICULTY_SAME
+    # ③ 非法值（如已废弃的 easier）⇒ 回落会话级，不外泄未知档位
+    assert (
+        er._resolve_round_settings(doc_same, [], override_difficulty="easier")[0]
+        == DIFFICULTY_SAME
+    )
+    # ④ 会话级 harder + 本轮传 same ⇒ 以本轮为准（可降回标准档）
+    doc_harder = {"difficulty": DIFFICULTY_HARDER, "register": "auto"}
+    assert (
+        er._resolve_round_settings(doc_harder, [], override_difficulty=DIFFICULTY_SAME)[0]
+        == DIFFICULTY_SAME
+    )
+
+
+def test_turn_difficulty_override_drives_next_prompt(monkeypatch):
+    """E8 传 `harder` ⇒ 第 k+1 轮按 harder 出题，档位随轮次落库并回传。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3, difficulty=DIFFICULTY_SAME)
+    round_id = started["round_id"]
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])  # 未达标 → continue
+    prompts = _install_prompt_stub(monkeypatch, [PROMPTS[1], PROMPTS[2]])
+    res = _run(
+        run_round_turn(
+            db,
+            round_id=round_id,
+            scholar_id=SCHOLAR,
+            user_input=ANSWER_MISS,
+            client_turn_index=None,
+            difficulty=DIFFICULTY_HARDER,
+        )
+    )
+
+    assert res["action"] == "continue"
+    assert res["difficulty"] == DIFFICULTY_HARDER
+    assert res["next"]["difficulty"] == DIFFICULTY_HARDER
+    # 档位确实进了出题 prompt（harder ⇒「换场景 + 升一级语域」分支）
+    last_messages = prompts["messages"][-1]
+    assert any("升一级语域" in str(m.get("content", "")) for m in last_messages)
+    # 落库：E9 / turns[] 也能读到本轮实际档位
+    doc = db.all(config.EXTENSION_ROUND_COLLECTION)[0]
+    assert doc["turns"][-1]["difficulty"] == DIFFICULTY_HARDER
+
+
+def test_turn_difficulty_absent_falls_back_to_session(monkeypatch):
+    """E8 **不传** difficulty（发布版形态）⇒ 回落会话级，与改造前行为一致。"""
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3, difficulty=DIFFICULTY_HARDER)
+    round_id = started["round_id"]
+
+    _install_judge_stub(monkeypatch, [_RUBRIC_FAIL])
+    _install_prompt_stub(monkeypatch, [PROMPTS[1], PROMPTS[2]])
+    res = _run(
+        run_round_turn(
+            db,
+            round_id=round_id,
+            scholar_id=SCHOLAR,
+            user_input=ANSWER_MISS,
+            client_turn_index=None,
+            difficulty=None,
+        )
+    )
+
+    assert res["action"] == "continue"
+    assert res["difficulty"] == DIFFICULTY_HARDER  # 会话级
+    assert res["next"]["difficulty"] == DIFFICULTY_HARDER

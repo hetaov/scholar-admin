@@ -597,14 +597,23 @@ def _public_turn(turn: dict) -> dict:
         "focus_hint": turn.get("focus_hint", "") or "",
         "scene_tag": list(turn.get("scene_tag") or []),
         "must_use": list(turn.get("must_use") or []),
+        # 2026-10-26 逐轮难度（新特性）：本轮**实际生效**的档位，供前端徽标回显
+        # （前端不再自行按轮次推算 —— 那会与后端真实档位不一致）
+        "difficulty": turn.get("difficulty", "") or "",
     }
 
 
-def _resolve_round_settings(doc: dict, turns: list[dict]) -> tuple[str, str]:
+def _resolve_round_settings(
+    doc: dict, turns: list[dict], override_difficulty: str | None = None
+) -> tuple[str, str]:
     """F9：解析「第 k+1 轮」出题用的 `difficulty` / `register`。
 
-    会话偏好在 E7 落库（`create_round`），E8 入参不含二者 → 服务端自取。
+    会话偏好在 E7 落库（`create_round`）；E8 **可**携带 `difficulty`（逐轮递进新特性）覆盖之。
     补订前（老 doc 无字段）自动回落，**补订前后同一份代码**。
+
+    2026-10-26 逐轮难度递进（新特性）：E8 入参 `difficulty` 是**轮次级**覆盖 ——
+    传了且合法 ⇒ 用它出第 k+1 轮；**不传 / 非法 ⇒ 回落会话级 `doc.difficulty`**
+    （发布版小程序 E8 不带该字段 ⇒ 必须保持原行为不变）。
 
     | 会话 `register` | `difficulty` | 取到的 `register` | 依据 |
     |---|---|---|---|
@@ -616,7 +625,11 @@ def _resolve_round_settings(doc: dict, turns: list[dict]) -> tuple[str, str]:
     「升一级语域」与「语域偏好：neutral（`register` 字段按此填写）」两条打架的指令，
     模型服从更具体的偏好行 → **`harder` 静默失效**。
     """
-    difficulty = str(doc.get("difficulty") or DIFFICULTY_SAME)
+    difficulty = (
+        override_difficulty
+        if override_difficulty in (DIFFICULTY_SAME, DIFFICULTY_HARDER)
+        else str(doc.get("difficulty") or DIFFICULTY_SAME)
+    )
     register = str(doc.get("register") or "")
     if not register or register == REGISTER_AUTO:
         register = ""
@@ -714,14 +727,17 @@ async def run_round_turn(
     scholar_id: str,
     user_input: str,
     client_turn_index: int | None = None,
+    difficulty: str | None = None,
 ) -> dict:
     """E8 执行器：判分（LLM ①）→ 决策 →（continue 时）出题（LLM ②）。
 
     串行两次 LLM 合并为一个端点，是为省一次往返，并避免前端自行编排状态机时
     漏掉「出题失败不消耗轮次」（契约 §3.18 E8）。
 
-    返回 `{ round_id, turn_index, result, progress, action, next }`；
-    `next` 为第 k+1 轮的 `_public_turn`（**不含 `reference_en`**），终态为 None。
+    返回 `{ round_id, turn_index, result, progress, action, next, difficulty }`；
+    `next` 为第 k+1 轮的 `_public_turn`（**不含 `reference_en`**），终态为 None；
+    `difficulty` 为 continue 时**实际用于出第 k+1 轮**的档位（终态为 `None`），
+    由 E8 入参 `difficulty` 覆盖，未传则回落会话级（2026-10-26 逐轮递进新特性）。
 
     Raises:
         ExtensionError: ROUND_NOT_FOUND（R12：归属不符与不存在同码）/
@@ -803,6 +819,8 @@ async def run_round_turn(
     )
     action = decision["action"]
     next_turn = None
+    # 第 k+1 轮**实际生效**的档位（仅 continue 有值；终态为 None）
+    effective_difficulty: str | None = None
 
     if action == ACTION_FINISH_PASSED:
         await round_repo.close_round(
@@ -820,7 +838,9 @@ async def run_round_turn(
         )
     else:
         # continue → LLM ②：出第 k+1 轮（偏好自会话内取，F9）
-        difficulty, register = _resolve_round_settings(doc, updated["turns"])
+        effective_difficulty, register = _resolve_round_settings(
+            doc, updated["turns"], override_difficulty=difficulty
+        )
         prompt = await generate_round_prompt(
             points=selected,
             original=doc.get("original", ""),
@@ -830,10 +850,12 @@ async def run_round_turn(
                 "user_input": user_input,
                 "errors": result.get("errors", []),
             },
-            difficulty=difficulty,
+            difficulty=effective_difficulty,
             register=register,
             turn_index=k + 1,
         )
+        # 逐轮难度随轮次落库 + 经 `_public_turn` 下发（前端徽标读它，不再自行推算）
+        prompt["difficulty"] = effective_difficulty
         appended = await round_repo.append_turn(
             db,
             round_id,
@@ -864,4 +886,5 @@ async def run_round_turn(
         },
         "action": action,
         "next": next_turn,
+        "difficulty": effective_difficulty,
     }

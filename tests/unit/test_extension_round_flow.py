@@ -462,6 +462,49 @@ def test_route_turn_mismatch_returns_round_turn_mismatch(monkeypatch):
     assert out["code"] == "ROUND_TURN_MISMATCH"
 
 
+def test_route_turn_invalid_difficulty_returns_invalid_input(monkeypatch):
+    """2026-10-26 逐轮难度递进：E8 的 `difficulty` 与 E7 同枚举校验（非法 → INVALID_INPUT）。"""
+    monkeypatch.setattr(config, "EXTENSION_ROUND_ENABLED", 1)
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    out = _run(
+        submit_round_turn(
+            SubmitRoundTurnRequest(
+                round_id=started["round_id"],
+                scholar_id=SCHOLAR,
+                user_input=ANSWER_OK,
+                difficulty="easier",  # 已不在枚举内（后端仅 same / harder）
+            ),
+            db=db,
+        )
+    )
+    assert out["success"] is False
+    assert out["code"] == "INVALID_INPUT"
+    assert "same / harder" in out["message"]
+    assert db.write_calls["insert"] == 1  # 校验先于建任务 ⇒ 未建任务
+
+
+def test_route_turn_valid_difficulty_is_accepted(monkeypatch):
+    """合法档位 / 不传都放行（不传 ⇒ 回落会话级，兼容发布版小程序）。"""
+    monkeypatch.setattr(config, "EXTENSION_ROUND_ENABLED", 1)
+    db = FakeDB()
+    started = _start(db, monkeypatch, max_turns=3)
+    for value in ("harder", "same", None):
+        out = _run(
+            submit_round_turn(
+                SubmitRoundTurnRequest(
+                    round_id=started["round_id"],
+                    scholar_id=SCHOLAR,
+                    user_input=ANSWER_OK,
+                    client_turn_index=1,
+                    difficulty=value,
+                ),
+                db=db,
+            )
+        )
+        assert out["success"] is True, f"difficulty={value} 应被接受"
+
+
 def test_route_turn_not_found_raises_404(monkeypatch):
     """R12：归属不符 / 不存在 → HTTP 404（不区分，防 round_id 枚举）。"""
     monkeypatch.setattr(config, "EXTENSION_ROUND_ENABLED", 1)

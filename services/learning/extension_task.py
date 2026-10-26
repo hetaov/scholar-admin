@@ -303,7 +303,7 @@ async def run_extension_task(
     round_id: str | None = None,
     max_turns: int | None = None,
     register: str = "auto",
-    difficulty: str = "same",
+    difficulty: str | None = "same",
     client_turn_index: int | None = None,
 ) -> None:
     """后台执行扩展任务并写回结果。
@@ -401,6 +401,8 @@ async def run_extension_task(
                         scholar_id=scholar_id,
                         user_input=user_input or "",
                         client_turn_index=client_turn_index,
+                        # 逐轮难度递进（新特性）：`None` ⇒ run_round_turn 回落会话级
+                        difficulty=difficulty,
                     )
             except ExtensionError as e:
                 # 多轮面的业务码（ROUND_NOT_FOUND / ROUND_CLOSED / ROUND_TURN_MISMATCH /

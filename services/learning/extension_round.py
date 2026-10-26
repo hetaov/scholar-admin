@@ -290,6 +290,10 @@ async def append_turn(
         "user_input": None,
         "result": None,
         "repeat_risk": bool(src.get("repeat_risk", False)),
+        # 2026-10-26 逐轮难度递进：本轮**实际生效**的档位（第 1 轮为空串 ——
+        # 其题面恒贴近原句语境、不受 difficulty 影响）。随轮次落库 ⇒ E9 /
+        # `_public_turn` 下发都读得到，前端徽标不再自行按轮次推算。
+        "difficulty": src.get("difficulty", "") or "",
         "at": _now_ms(),
     }
 
