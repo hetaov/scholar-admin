@@ -112,6 +112,7 @@ from services.math.error_scanner import (
     classify_scan_upload,
     correct_scan_classify,
     create_scan_upload,
+    list_pending_scans,
 )
 from services.math import (
     ConfirmationMismatchError,
@@ -859,6 +860,28 @@ async def math_scan_correct(
 # F4.6 学者错题列表（契约 api-contract.md §3.10 接口 25 · MVP 原始列表版）
 # ===========================================================================
 
+
+@router.get("/scan/pending")
+async def math_scan_pending(
+    scholar_id: str = Query("", description="学者 id（必）"),
+    limit: int = Query(20, ge=1, le=100, description="最多返回条数，按 created_at 倒序"),
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET 学者名下「待人工确认」的历史扫描件（P-61）。
+
+    出参：{ success, data: { total, items: [{ scan_id, status, items, image_url,
+      created_at }] } }
+
+    背景：D6 裁决（错题双入口）接线时发现，前端扫完只弹 toast 告知「N 张待人工
+    确认」，而服务层没有「拉历史待确认」的接口 —— 跳走或重进页面就查不到，人工
+    归类只能「当场做完」。本接口补齐这一查询能力，items 直接是 classify_result
+    （归类产出），前端拿到即可渲染进既有的「选知识点 / 错因 → correctScan」链路。
+    """
+    if not scholar_id:
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+
+    data = await list_pending_scans(db, scholar_id=scholar_id, limit=limit)
+    return {"success": True, "data": data}
 
 @router.get("/error-stats")
 async def math_error_stats(

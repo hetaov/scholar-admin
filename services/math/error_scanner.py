@@ -1507,6 +1507,70 @@ async def classify_scan_upload(
 
 
 # ===========================================================================
+# F4.5 待人工确认列表（契约 api-contract.md §3.10 GET /math/scan/pending）
+# ===========================================================================
+
+async def list_pending_scans(
+    db: Any,
+    scholar_id: str,
+    limit: int = 20,
+) -> dict:
+    """列出学者名下「待人工确认」的历史扫描件（P-61）。
+
+    为什么要有这个接口：此前链路只有 upload / classify / correct 三个动作，
+    前端扫完才知道有几张待确认，跳走或重进页面就再也查不到 —— 人工归类
+    只能「当场做完」，做不到「以后再补」。本接口把「历史待确认」变成可查询，
+    前端据此常驻入口（不再依赖本次会话的内存明细）。
+
+    只返回 classify_status=needs_review 的记录（success / failed / classifying
+    不属于人工待办）；items 取落库的 classify_result（归类产出，可能为空数组
+    —— 表示整张图未能定位知识点，需要人工从零填）。
+
+    Args:
+        db: 数据库客户端
+        scholar_id: 学者 id（必）
+        limit: 最多返回条数（按 created_at 倒序）
+
+    Returns:
+        { total: int, items: [{ scan_id, status, items, image_url, created_at }] }
+
+    Raises:
+        MissingScholarError: 未传 scholar_id
+    """
+    if not scholar_id:
+        raise MissingScholarError("缺少 scholar_id")
+
+    # 注意：不能用「limit or 20」—— 0 是合法入参（会被夹成 1），不该当成「未传」
+    safe_limit = 20 if limit is None else int(limit)
+    safe_limit = max(1, min(safe_limit, 100))
+    res = await db.query(
+        MATH_SCAN_UPLOAD_COLLECTION,
+        where={
+            "scholar_id": scholar_id,
+            "classify_status": CLASSIFY_STATUS_NEEDS_REVIEW,
+        },
+        order=[{"field": "created_at", "direction": "desc"}],
+        limit=safe_limit,
+    )
+    rows = res.get("records") or []
+    items = [
+        {
+            "scan_id": r.get("scan_id") or "",
+            "status": CLASSIFY_STATUS_NEEDS_REVIEW,
+            "items": r.get("classify_result") or [],
+            "image_url": r.get("image_url") or "",
+            "created_at": r.get("created_at") or 0,
+        }
+        for r in rows
+    ]
+    total = res.get("total")
+    return {
+        "total": int(total) if isinstance(total, (int, float)) else len(items),
+        "items": items,
+    }
+
+
+# ===========================================================================
 # F4.4 人工修正归类（契约 api-contract.md §3.10 POST /math/scan/{scan_id}/correct）
 # ===========================================================================
 #
