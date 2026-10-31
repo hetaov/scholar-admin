@@ -412,3 +412,158 @@ def test_evaluate_request_has_no_audio_fields():
 
     fields = set(EvaluateRequest.model_fields)
     assert fields & {"audio_base64", "voice_file_id"} == set(), sorted(fields)
+
+
+# ---------------------------------------------------------------------------
+# 第六期（2026-10-31）：E2 单轮 L2 的 ASR 判前修复
+#
+# 与多轮 `run_round_turn` **同一子图、同一红线**（R15 只减不增 / R16 失败回落 /
+# R17 原文不覆盖 / R18 关开关逐字不变）。差异只在语境：单轮没有 `prompt_zh` / `must_use`
+# （学习者自由造句）⇒ `context` 为空字典。
+# ---------------------------------------------------------------------------
+
+
+def _l2_ok_rubric():
+    return {
+        "scores": {"target_usage": 2, "grammar": 2, "semantics": 2, "register_collocation": 2},
+        "total": 8,
+        "passed": True,
+        "errors": [],
+        "suggestion": "",
+        "model_sentence": "He took up the question.",
+    }
+
+
+def test_e2_asr_repair_applied_grades_the_repaired_text(monkeypatch):
+    """修复生效 ⇒ 判分与 `must_use_hit` 都用**修复后**文本（同源，与多轮一致），返回体带两字段。"""
+    import services.english.extension as ext
+
+    seen = {}
+
+    async def _fake_repair(raw, *, context=None):
+        seen["raw"] = raw
+        seen["context"] = context
+        return {
+            "repaired_input": "He finally took up the question.",
+            "asr_repair": {
+                "applied": True, "source": "llm", "fallback": False,
+                "reasons": ["fragmented"], "dropped": [], "prompt_version": "asr_repair_v1",
+            },
+        }
+
+    async def _fake_llm(points, user_answer):
+        seen["graded"] = user_answer  # 判分实际看到的文本
+        return _l2_ok_rubric()
+
+    monkeypatch.setattr(ext, "run_asr_repair", _fake_repair)
+    monkeypatch.setattr(ext, "_call_l2_rubric_llm", _fake_llm)
+
+    raw = "He finally. Took up the question"
+    out = _run(
+        run_evaluate_pipeline(
+            FakeDB(),
+            task_type="l2_sentence",
+            selected_ids=["s1#0"],
+            points_snapshot=[{"id": "s1#0", "type": "phrase", "text": "take up", "origin": "ai"}],
+            input_mode="text",
+            user_input=raw,
+        )
+    )
+    # 判分看到的是修复文（不是原始碎片）
+    assert seen["graded"] == "He finally took up the question."
+    # 单轮无题面 ⇒ 语境为空字典（不是 None，也不是多轮的 prompt_zh 形态）
+    assert seen["context"] == {}
+    assert seen["raw"] == raw
+    # 回显两字段
+    assert out["repaired_input"] == "He finally took up the question."
+    assert out["asr_repair"]["applied"] is True
+
+
+def test_e2_asr_repair_switch_off_no_fields(monkeypatch):
+    """R18：关开关 ⇒ 判分用原文、返回体**不出现**两键（今日行为逐字不变）。"""
+    import services.english.extension as ext
+
+    seen = {}
+
+    async def _fake_llm(points, user_answer):
+        seen["graded"] = user_answer
+        return _l2_ok_rubric()
+
+    monkeypatch.setattr(config, "EXTENSION_ROUND_ASR_REPAIR_ENABLED", 0)
+    monkeypatch.setattr(ext, "_call_l2_rubric_llm", _fake_llm)
+
+    raw = "He finally. Took up the question"
+    out = _run(
+        run_evaluate_pipeline(
+            FakeDB(),
+            task_type="l2_sentence",
+            selected_ids=["s1#0"],
+            points_snapshot=[{"id": "s1#0", "type": "phrase", "text": "take up", "origin": "ai"}],
+            input_mode="text",
+            user_input=raw,
+        )
+    )
+    assert seen["graded"] == raw  # 原文判分
+    assert "repaired_input" not in out
+    assert "asr_repair" not in out
+
+
+def test_e2_asr_repair_no_fields_when_grading_failed(monkeypatch):
+    """判分**没发生**（LLM 抛错）⇒ **不带**修复字段 —— 否则会显示「判分依据的句子」却根本没判过。"""
+    import services.english.extension as ext
+    from services.providers.extension_llm import ERR_LLM_TIMEOUT, ExtensionError, STAGE_PARSE
+
+    async def _fake_repair(raw, *, context=None):
+        return {
+            "repaired_input": "He finally took up the question.",
+            "asr_repair": {"applied": True, "source": "llm", "fallback": False},
+        }
+
+    async def _boom(points, user_answer):  # noqa: ANN001 - 测试桩
+        raise ExtensionError(ERR_LLM_TIMEOUT, STAGE_PARSE, "判分超时")
+
+    monkeypatch.setattr(ext, "run_asr_repair", _fake_repair)
+    monkeypatch.setattr(ext, "_call_l2_rubric_llm", _boom)
+
+    out = _run(
+        run_evaluate_pipeline(
+            FakeDB(),
+            task_type="l2_sentence",
+            selected_ids=["s1#0"],
+            points_snapshot=[{"id": "s1#0", "type": "phrase", "text": "take up", "origin": "ai"}],
+            input_mode="text",
+            user_input="He finally. Took up the question",
+        )
+    )
+    assert out["score"] == 0
+    assert out["errors"] == ["评测失败：LLM_TIMEOUT"]
+    assert "repaired_input" not in out
+    assert "asr_repair" not in out
+
+
+def test_e2_asr_repair_not_applied_to_l1_fill(monkeypatch):
+    """`l1_fill` 是确定性填空判分（答案是词 / 短语，无 ASR 断句问题）⇒ **不走**修复。"""
+    import services.english.extension as ext
+
+    called = []
+
+    async def _spy_repair(raw, *, context=None):
+        called.append(raw)
+        return {"repaired_input": None, "asr_repair": None}
+
+    monkeypatch.setattr(config, "EXTENSION_ROUND_ASR_REPAIR_ENABLED", 1)
+    monkeypatch.setattr(ext, "run_asr_repair", _spy_repair)
+
+    out = _run(
+        run_evaluate_pipeline(
+            FakeDB(),
+            task_type="l1_fill",
+            selected_ids=["s1#0"],
+            points_snapshot=[{"id": "s1#0", "type": "phrase", "text": "take part in", "origin": "ai"}],
+            input_mode="text",
+            user_input="take part in",
+        )
+    )
+    assert called == []  # 开关虽开，l1_fill 也不调修复
+    assert "repaired_input" not in out
+    assert "asr_repair" not in out

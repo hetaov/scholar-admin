@@ -39,6 +39,7 @@ import time
 from typing import Any
 
 import config
+from services.english.asr_repair_graph import run_asr_repair
 from services.english.extension_candidates import (
     RISKY_TERMS,
     STOPWORDS as _STOPWORDS,
@@ -1400,11 +1401,22 @@ async def run_evaluate_pipeline(
         }
 
     elif task_type == "l2_sentence":
-        # L2 rubric：LLM 4 维评测 + 后端独立 must_use_hit 判定
-        must_info = grade_l2_rubric(selected, user_input)
+        # 第六期（2026-10-31）：ASR 判前修复 —— 与多轮 `run_round_turn` **同一子图、同一红线**。
+        #   - 开关关（R18）→ `repaired_input=None` ⇒ 判分用原文、**返回体不加字段**（逐字不变）；
+        #   - 失败 / 超时 / 护栏不过 → 子图内部已回落原文，**永不抛错**（R16）。
+        # ⚠️ 与多轮的**唯一差异**：多轮有 `prompt_zh` / `must_use` 作语境，单轮没有题面
+        #   （学习者自由造句）⇒ `context` 传空字典，语境键缺失由子图按「无语境」处理。
+        repair = await run_asr_repair(user_input, context={})
+        graded_input = repair["repaired_input"]
+        if graded_input is None:
+            graded_input = user_input
+        # L2 rubric：LLM 4 维评测 + 后端独立 must_use_hit 判定（与判分共用 graded_input ⇒ 同源）
+        must_info = grade_l2_rubric(selected, graded_input)
         try:
-            rubric = await _call_l2_rubric_llm(selected, user_input)
+            rubric = await _call_l2_rubric_llm(selected, graded_input)
         except ExtensionError as e:
+            # ⚠️ 判分**没发生** ⇒ **不带**修复字段：此时显示「判分依据的句子」会误导
+            # （学习者会以为这句已被判过）。多轮侧判分失败是直接抛错、同样没有修复回显。
             return {
                 "task_type": "l2_sentence",
                 "must_use_hit": must_info["must_use_hit"],
@@ -1417,7 +1429,7 @@ async def run_evaluate_pipeline(
             }
         scores = rubric.get("scores", {})
         total = rubric.get("total", sum(scores.values()))
-        return {
+        payload = {
             "task_type": "l2_sentence",
             "must_use_hit": must_info["must_use_hit"],
             "used_points": must_info["used_points"],
@@ -1428,5 +1440,10 @@ async def run_evaluate_pipeline(
             "model_sentence": rubric.get("model_sentence", ""),
             "rubric_scores": scores,
         }
+        # R18：仅开关开启时下发修复字段；关开关 → 返回体**逐字不变**（老前端零感知）
+        if repair["repaired_input"] is not None:
+            payload["repaired_input"] = repair["repaired_input"]
+            payload["asr_repair"] = repair["asr_repair"]
+        return payload
 
     return {"score": 0, "passed": False, "errors": ["unknown task_type"]}
