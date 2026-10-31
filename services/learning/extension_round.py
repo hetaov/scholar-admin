@@ -368,12 +368,22 @@ async def append_turn_result(
     result: dict,
     user_input: str | None = None,
     repeat_risk: bool | None = None,
+    repaired_input: str | None = None,
+    asr_repair: dict | None = None,
 ) -> dict:
     """写回本轮判分结果（**不前进 `turn_index`** —— 推进由 `append_turn` 负责）。
 
     - `turn_index` 与服务端当前轮不一致 → ROUND_TURN_MISMATCH（防重复 / 乱序提交）；
     - `user_input` 长度超过 `EXTENSION_ROUND_MAX_INPUT_LEN` → INVALID_INPUT（R14）；
     - LLM 失败不该调用本函数：失败时本轮保持 `result=None`、`turn_index` 不变（R13）。
+
+    第六期（2026-10-30）**纯 schema 追加**：`repaired_input` / `asr_repair` 两个可选字段。
+
+    - **R17 原文不覆盖**：`user_input` 恒为原始 ASR 文本，修复结果另存 `repaired_input`；
+    - **零迁移**：老文档无这两个键，读取侧一律 `.get()` 回落（同 `register` / `difficulty`
+      的 F9 范式 —— 补订前后同一份代码）；
+    - 二者为 `None` 时**不写键**（不是写 `null`），保持老文档形态逐字不变；
+    - `repaired_input` 同样受 `EXTENSION_ROUND_MAX_INPUT_LEN` 约束（R14 文档体积）。
     """
     doc = _require_active(await _load(db, round_id))
     turns = [dict(t) for t in (doc.get("turns") or [])]
@@ -405,6 +415,19 @@ async def append_turn_result(
                 f"user_input 超过 {config.EXTENSION_ROUND_MAX_INPUT_LEN} 字符",
             )
         turns[idx]["user_input"] = user_input
+
+    # 第六期：ASR 判前修复留痕（R17 —— 不覆盖 user_input，另存新字段）
+    if repaired_input is not None:
+        if len(str(repaired_input)) > config.EXTENSION_ROUND_MAX_INPUT_LEN:
+            raise ExtensionError(
+                ERR_INVALID_INPUT,
+                STAGE_INPUT,
+                f"repaired_input 超过 {config.EXTENSION_ROUND_MAX_INPUT_LEN} 字符",
+            )
+        turns[idx]["repaired_input"] = repaired_input
+    if asr_repair is not None:
+        turns[idx]["asr_repair"] = dict(asr_repair)
+
     turns[idx]["result"] = dict(result or {})
     if repeat_risk is not None:
         turns[idx]["repeat_risk"] = bool(repeat_risk)

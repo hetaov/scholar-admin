@@ -31,6 +31,7 @@ import re
 import time
 
 import config
+from services.english.asr_repair_graph import run_asr_repair
 from services.english.extension import _call_l2_rubric_llm, grade_l2_rubric
 from services.learning import extension_round as round_repo
 from services.learning.extension_round import build_prompt_fingerprint
@@ -501,8 +502,9 @@ def build_summary(
     `{ turns_used, passed, best_score, top_errors[], model_sentences[] }`：
     - `turns_used`：有判分结果的轮数（未判分的作废轮不计）；
     - `best_score`：各轮最高分；
-    - `top_errors`：跨轮错误按出现次数取 **Top3**；次数相同按**最近一次出现**优先，
-      仍相同则按该轮内出现序稳定兜底（2026-10-13 真机修复，见下方「★ 排序口径」）；
+    - `top_errors`：**末轮**（最后一个有判分结果的轮次）的 `errors`，按**轮内出现序**取前
+      `TOP_ERRORS_LIMIT` 条（去空、按字符串全等去重、保首次出现序）。**不跨轮累计**
+      （2026-10-31 口径变更，见下方「★ 口径变更」）；
     - `model_sentences`：按轮序的示范句（LLM 未给则 `reference_en` 兜底）；
       **按字符串全等去重、保首次出现序**（ADR-0034，data-model §4.28）。
 
@@ -512,34 +514,26 @@ def build_summary(
     scores = [int((t["result"] or {}).get("score") or 0) for t in judged]
     best_score = max(scores) if scores else 0
 
-    counts: dict[str, int] = {}
-    order: list[str] = []
-    last_seen: dict[str, int] = {}
-    for i, t in enumerate(judged):
-        for e in (t["result"] or {}).get("errors") or []:
+    # ★ 口径变更（2026-10-31 真机缺陷修复 —— **取代** 2026-10-13 的「跨轮累计 + 最近优先」）：
+    #   `top_errors` 改为**只取末轮**的 errors，不再跨轮累计。
+    #
+    #   为什么 2026-10-13 的修法不够：那次只把「次数相同」的排序改成最近优先，但只要
+    #   **末轮错误不足 3 条**，旧轮错误仍会填榜 —— 实测（轮1 三条 + 轮2 一条）：
+    #       旧口径 → ['主谓一致'(新), '时态不准确'(旧), '冠词缺失'(旧)]   ← 2/3 仍是上一轮的
+    #   学习者已按反馈改过，却仍看到旧错误 ⇒ 观感「小结还是上一次提交的错误」。
+    #
+    #   新口径：末轮 errors 按**轮内出现序**取前 TOP_ERRORS_LIMIT 条。
+    #   ⚠️ 取舍：不再标识「跨轮反复犯的真·常错」（该语义由 `model_sentences` / 分数趋势承载），
+    #      换来确定性 —— 小结恒等于学习者**最近一次提交**拿到的反馈，与结果区「本轮主要问题」
+    #      同源，不再出现「两处说法不一致」。
+    top_errors: list[str] = []
+    if judged:
+        for e in (judged[-1]["result"] or {}).get("errors") or []:
             text = str(e or "").strip()
-            if not text:
-                continue
-            if text not in counts:
-                counts[text] = 0
-                order.append(text)
-            counts[text] += 1
-            last_seen[text] = i
-    # ★ 排序口径（2026-10-13 真机缺陷修复）：
-    #   ① 出现次数**降序**（跨轮反复犯 = 真·常错，语义不变）；
-    #   ② 次数相同 ⇒ **最近一次出现优先**（`-last_seen`）。
-    #      原口径此处为「首次出现序」⇒ **同题重提（「按反馈改一次」）时旧错误永久占榜**：
-    #      学习者已按反馈改过，第 2 轮的 errors 与第 1 轮不同，但两者计数同为 1，
-    #      旧口径让第 1 轮的三条稳居前三，新错误被 `[:3]` 截断 ⇒ 真机现象
-    #      「轮数 / 最高分都变了，只有常错 Top3 还是上一次提交的那三条」。
-    #   ③ 仍相同（同一轮内的多个错误）⇒ 按轮内出现序稳定兜底，保证输出确定性。
-    top_errors = [
-        e
-        for e in sorted(
-            order,
-            key=lambda x: (-counts[x], -last_seen[x], order.index(x)),
-        )
-    ][:TOP_ERRORS_LIMIT]
+            # 去空 + 按字符串全等去重（保首次出现序），与 `model_sentences` 同式（ADR-0034）
+            if text and text not in top_errors:
+                top_errors.append(text)
+    top_errors = top_errors[:TOP_ERRORS_LIMIT]
 
     # ★ ADR-0034（第五期 P2）：按字符串全等去重、**保首次出现序**（dict.fromkeys 语义）。
     # 禁 list(set(...)) / sorted(set(...)) —— 轮次语义优先于展示丰富度；
@@ -796,10 +790,25 @@ async def run_round_turn(
     current = turns[-1]
     selected = _select_points(doc.get("points_snapshot"), doc.get("selected_ids"))
 
+    # 第六期：ASR 判前修复（设计 §4.5；红线 R15 / R16 / R18）
+    #   - 关开关 → repaired_input=None ⇒ 判分用原始文本、返回体不加字段（**逐字不变**）；
+    #   - 失败 / 超时 / 护栏不过 → 子图内部已回落原文，**永不抛错**（R16）；
+    #   - `must_use_hit` 是后端确定性子串匹配，与判分共用 graded_input ⇒ 天然同源（D5）。
+    repair = await run_asr_repair(
+        user_input,
+        context={
+            "prompt_zh": current.get("prompt_zh", ""),
+            "must_use": current.get("must_use") or [],
+        },
+    )
+    graded_input = repair["repaired_input"]
+    if graded_input is None:
+        graded_input = user_input
+
     # LLM ①：判分。失败即抛 —— 不写 result、turn_index 不前进（R13）
     result = await judge_round_turn(
         points=selected,
-        user_input=user_input,
+        user_input=graded_input,
         prompt_zh=current.get("prompt_zh", ""),
         reference_en=current.get("reference_en", ""),
     )
@@ -808,7 +817,10 @@ async def run_round_turn(
         round_id,
         turn_index=k,
         result=result,
+        # R17：原始 ASR 文本恒不覆盖，修复结果另存新字段
         user_input=user_input,
+        repaired_input=repair["repaired_input"],
+        asr_repair=repair["asr_repair"],
     )
 
     decision = decide_next_action(
@@ -846,8 +858,9 @@ async def run_round_turn(
             original=doc.get("original", ""),
             translation=doc.get("translation", ""),
             used_prompts=updated.get("used_prompts") or [],
+            # D5：出题看到的应是**修复后**句子，否则下一轮的 focus_hint 仍盯着碎片
             prev_turn={
-                "user_input": user_input,
+                "user_input": graded_input,
                 "errors": result.get("errors", []),
             },
             difficulty=effective_difficulty,
@@ -871,7 +884,7 @@ async def run_round_turn(
         f"[extension_round] turn → round_id={round_id}, turn_index={k}, "
         f"action={action}, score={result.get('score')}"
     )
-    return {
+    payload = {
         "round_id": round_id,
         "turn_index": k,
         "result": result,
@@ -888,3 +901,10 @@ async def run_round_turn(
         "next": next_turn,
         "difficulty": effective_difficulty,
     }
+    # R18：仅开关开启时下发修复字段；关开关 → 返回体**逐字不变**（老前端零感知）。
+    # 该 payload 整体作为任务结果经 E3 轮询下发（extension_task 未做字段白名单），
+    # 故无需改动任务层，也不新增端点。
+    if repair["repaired_input"] is not None:
+        payload["repaired_input"] = repair["repaired_input"]
+        payload["asr_repair"] = repair["asr_repair"]
+    return payload

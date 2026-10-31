@@ -1239,15 +1239,16 @@ def test_build_summary_top_errors_and_fallback():
     ]
 
 
-def test_build_summary_top_errors_recency_breaks_tie():
-    """★ 真机缺陷（2026-10-13）：**同题重提（「按反馈改一次」）后常错 Top3 仍是上一轮的三条**。
+def test_build_summary_top_errors_last_turn_only():
+    """★ 真机缺陷（2026-10-31）：**小结里的错误还是上一次提交的那几条**。
 
-    复现路径：第 1 轮提交 → 点「按反馈改一次（同题）」→ 第 2 轮录音重提 → 出小结卡。
-    学习者已按反馈改过，第 2 轮的 errors 与第 1 轮**不同**；而旧排序在「出现次数相同」时按
-    **首次出现序** ⇒ 第 1 轮的三条永久占据 Top3，第 2 轮的新错误被 `[:3]` 截断掉
-    ⇒ 用户观感「轮数 / 最高分都变了，只有常错 Top3 还是上一次的三条」。
+    复现路径：第 1 轮提交 → 点「按反馈改一次（同题）」/ 进入下一轮 → 再提交 → 出小结卡。
+    学习者已按反馈改过，末轮的 errors 与之前**不同**；而旧口径是**跨轮累计**
+    （2026-10-13 只把「次数相同」改成最近优先，但只要**末轮错误不足 3 条**，
+    旧轮错误仍会填榜）⇒ 实测轮1 三条 + 轮2 一条 → `['主谓一致', '时态不准确', '冠词缺失']`，
+    **2/3 仍是上一轮的** ⇒ 观感「轮数 / 最高分都变了，只有错误还是上一次的」。
 
-    修复口径：次数相同 ⇒ **最近一次出现优先**（`-last_seen`），同轮内按轮内出现序稳定兜底。
+    新口径：`top_errors` **只取末轮**的 errors，按轮内出现序取前 TOP_ERRORS_LIMIT 条。
     """
     turns = [
         {
@@ -1260,21 +1261,33 @@ def test_build_summary_top_errors_recency_breaks_tie():
         },
     ]
     s = build_summary(turns)
-    # 第 2 轮仍在犯的错误优先；已改掉的旧错误降位（但仍在榜，跨轮计数语义保留）
-    assert s["top_errors"] == ["冠词缺失", "拼写错误", "时态不一致"]
+    # 恒等于末轮反馈；第 1 轮的旧错误**完全不进榜**（不再填榜）
+    assert s["top_errors"] == ["冠词缺失", "拼写错误"]
     # 其余字段口径零改
     assert s["turns_used"] == 2
     assert s["best_score"] == 7
 
 
-def test_build_summary_top_errors_count_still_dominates():
-    """回归护栏：真·常错（跨轮反复出现）**仍以次数优先**，不被「最近出现」反超。"""
+def test_build_summary_top_errors_ignores_earlier_turns():
+    """回归护栏：旧轮错误**无论出现多少次**都不再进榜（跨轮累计语义已废弃）。"""
     turns = [
         {"reference_en": "", "result": {"score": 4, "errors": ["时态不一致", "搭配生硬"], "model_sentence": ""}},
         {"reference_en": "", "result": {"score": 5, "errors": ["时态不一致"], "model_sentence": ""}},
+        {"reference_en": "", "result": {"score": 6, "errors": ["主谓一致"], "model_sentence": ""}},
     ]
     s = build_summary(turns)
-    assert s["top_errors"] == ["时态不一致", "搭配生硬"]
+    # 「时态不一致」跨 2 轮反复出现（旧口径会凭次数占榜首），新口径下只剩末轮的 1 条
+    assert s["top_errors"] == ["主谓一致"]
+
+
+def test_build_summary_top_errors_last_turn_capped_and_dedup():
+    """末轮 errors 超过 TOP_ERRORS_LIMIT ⇒ 按**轮内出现序**截断；轮内重复去重、空串剔除。"""
+    turns = [
+        {"reference_en": "", "result": {"score": 4, "errors": ["旧错误"], "model_sentence": ""}},
+        {"reference_en": "", "result": {"score": 5, "errors": ["a", "b", "a", "  ", "c", "d"], "model_sentence": ""}},
+    ]
+    s = build_summary(turns)
+    assert s["top_errors"] == ["a", "b", "c"]  # 去重保序 + 去空 + 截断到 3
 
 
 def test_build_summary_passed_from_terminal_status():

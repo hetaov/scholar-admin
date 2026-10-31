@@ -621,3 +621,45 @@ EXTENSION_ROUND_LLM_TIMEOUT_SECONDS = int(
 EXTENSION_ROUND_MAX_INPUT_LEN = int(
     os.environ.get("EXTENSION_ROUND_MAX_INPUT_LEN", 500)
 )
+
+# ---- ASR 判前修复（第六期，2026-10-30）------------------------------------------
+#
+# 设计稿：docs_v1/扩展/第六期-ASR断句修复与判句回显-修改方案-v1.md §4.8
+# 触发：docs_v1/扩展/issue.md（语音造句被 ASR 切成碎片 → 反馈失真）
+#
+# 定位：只 append，既有键零改动。修复 = 判分前对 ASR 文本做「合并误断句 + 删紧邻重复 +
+#      最小书写格式」，**不纠错、不加词、不重排**（R15）。
+# 范式：对齐 ASR_SMART_PUNCTUATION —— 默认关 ⇒ 今日行为**逐字不变**（R18）。
+# 边界：与 ASR_SMART_PUNCTUATION 的区别：那个管 `/eval/transcribe` 的标点挂载点，
+#      本组管 extension 多轮判分前的文本整理，二者互不影响。
+
+# 修复子开关（默认 0 关）：关 → `run_round_turn` 返回体**不出现** repaired_input /
+# asr_repair 两个键，判分用原始 user_input（R18：关开关逐字不变）。
+EXTENSION_ROUND_ASR_REPAIR_ENABLED = int(
+    os.environ.get("EXTENSION_ROUND_ASR_REPAIR_ENABLED", 0)
+)
+
+# 单次修复 LLM 上限（秒，默认 30）：**刻意短于** EXTENSION_ROUND_LLM_TIMEOUT_SECONDS(120)。
+# 理由：修复是可选增强，超时即回落原文继续判分（R16），不值得让学习者等 120s。
+EXTENSION_ROUND_ASR_REPAIR_TIMEOUT_SECONDS = int(
+    os.environ.get("EXTENSION_ROUND_ASR_REPAIR_TIMEOUT_SECONDS", 30)
+)
+
+# 修复采样温度（默认 0）：整理任务是确定性的，比出题的 0.3、判分的 0.2 都低。
+EXTENSION_ROUND_ASR_REPAIR_TEMPERATURE = float(
+    os.environ.get("EXTENSION_ROUND_ASR_REPAIR_TEMPERATURE", 0)
+)
+
+# 修复 prompt 版本（独立键）：与 EXTENSION_ROUND_PROMPT_VERSION（出题）互不牵动。
+EXTENSION_ROUND_ASR_REPAIR_PROMPT_VERSION = os.environ.get(
+    "EXTENSION_ROUND_ASR_REPAIR_PROMPT_VERSION", "v1"
+)
+
+# 护栏 G3 兜底：净删除比例上限（默认 0.5）。
+# ⚠️ 它**不是**主判据 —— 主判据是"删除是否有据"（被删词 ⊆ 紧邻重复富余 + 填充词）。
+#    比例只能当兜底：短句里删一个结巴就是高比例（`he he finally` → 33%），
+#    若把本值卡到 0.3，会把**正确的**去重一起拒掉（实测踩过）。
+# 0.5 的语义：整句被删掉一半以上才拦，其余交给"是否有据"判据。
+EXTENSION_ROUND_ASR_REPAIR_MAX_DROP_RATIO = float(
+    os.environ.get("EXTENSION_ROUND_ASR_REPAIR_MAX_DROP_RATIO", 0.5)
+)
