@@ -37,7 +37,9 @@ from services.audit import (
     write_audit,
 )
 
+from services.asr import ASR_SERVICE_TYPE_ZH, get_asr_service_for
 from services.auth import get_request_openid
+from services.infra.audio_source import InvalidAudio, resolve_audio_bytes
 from services.database import (
     CURRICULUM_NODE_COLLECTION,
     ERROR_RECORD_COLLECTION,
@@ -1526,7 +1528,55 @@ async def math_quiz_intent(
     return {"success": True, "data": data}
 
 
-@router.post("/quiz/generate")
+class MathAsrTranscribeRequest(BaseModel):
+    """POST /math/asr/transcribe 请求体（语音描述出题 · 阶段 A）
+
+    音源二选一：`voice_file_id`（云存储 fileID，**优先**，绕开 callContainer
+    100KB 请求体上限）或 `audio_base64`。数学需求描述为中文口述 → 恒定走
+    中文引擎 `16k_zh`（不做 lang 参数，避免英语引擎把中文按英文音素转写）。
+    """
+
+    voice_file_id: str = Field("", description="云存储 fileID（优先）")
+    audio_base64: str = Field("", description="音频 base64（小段兜底）")
+    voice_format: str = Field("mp3", description="音频格式（mp3/wav/aac）")
+
+
+@router.post("/asr/transcribe")
+async def math_asr_transcribe(body: MathAsrTranscribeRequest):
+    """POST 语音转写（语音描述出题 · 方案 §7.1 阶段 A）
+
+    纯转写不评分，契约对齐 `/eval/transcribe`：业务失败 200 + `success=false` + `code`
+    （`INVALID_AUDIO` / `ASR_UNAVAILABLE`），仅技术异常走 5xx。
+    """
+    try:
+        audio_bytes = await resolve_audio_bytes(
+            body.voice_file_id,
+            body.audio_base64,
+            route="/math/asr/transcribe",
+            oversize_message="音频过大（16k/60s 上限约 5MB），请分段重试",
+        )
+    except InvalidAudio as e:
+        return {"success": False, "code": "INVALID_AUDIO", "message": e.message}
+    if not audio_bytes:
+        return {"success": False, "code": "INVALID_AUDIO", "message": "音频内容为空"}
+    asr = get_asr_service_for(ASR_SERVICE_TYPE_ZH)
+    if not asr.available:
+        logger.warning("[math] /math/asr/transcribe ASR 未配置凭据（语音输入暂不可用）")
+        return {
+            "success": False,
+            "code": "ASR_UNAVAILABLE",
+            "message": "ASR 服务未配置凭据（语音输入暂不可用）",
+        }
+    text = await asyncio.to_thread(
+        asr.recognize, audio_bytes, voice_format=body.voice_format or "mp3"
+    )
+    if not text:
+        return {
+            "success": False,
+            "code": "ASR_UNAVAILABLE",
+            "message": "语音识别失败，请重试",
+        }
+    return {"success": True, "data": {"transcription": text}}
 async def math_quiz_generate(
     body: GenerateQuizRequest,
     request: Request,
