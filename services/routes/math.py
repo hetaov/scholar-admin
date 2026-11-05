@@ -98,6 +98,7 @@ from services.math.quiz import (
     _persist_quiz,
     generateQuiz,
     getQuizById,
+    getRecentDescQuiz,
 )
 from services.math.quiz_desc import generateQuizFromDescription, validate_desc_intent
 from services.math.quiz_intent import parseQuizIntent
@@ -1817,6 +1818,32 @@ async def math_quiz_render(
             "render_message": "",
         },
     }
+
+
+@router.get("/quiz/recent")
+async def math_get_recent_quiz(
+    scholar_id: str = "",
+    mode: str = "desc",
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """GET 最近一次描述出题（页面恢复入口）
+
+    描述出题是异步任务（30~120s）：用户切走页面再回来，前端没有 quiz_id 可用，
+    结果就「丢了」。本接口按 scholar 取时间窗内最近一条描述出题，前端据此
+    - `generating` → 续轮询（等后台任务完成）
+    - `generated` → 直接回填结果列表 + 「已恢复」提示
+    - `failed` → 展示 `error_message`
+
+    注意：路由注册顺序必须在 `/quiz/{quiz_id}` **之前**，否则 "recent" 会被
+    当作 quiz_id 匹配（真机 405 排查时的同类坑）。
+    """
+    sid = (scholar_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+    if mode != "desc":
+        raise HTTPException(status_code=400, detail="mode 仅支持 desc")
+    data = await getRecentDescQuiz(db, scholar_id=sid)
+    return {"success": True, "data": data}
 
 
 @router.get("/quiz/{quiz_id}")

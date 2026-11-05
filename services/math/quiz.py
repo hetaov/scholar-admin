@@ -683,6 +683,38 @@ async def getQuizById(db, *, quiz_id: str) -> dict | None:
     return _to_public_quiz(records[0])
 
 
+# 恢复入口时间窗：半天内的描述出题才在页面重进时回显（避免旧练习反复被唤醒）
+RECENT_DESC_QUIZ_WINDOW_MS = 12 * 3600 * 1000
+
+
+async def getRecentDescQuiz(
+    db, *, scholar_id: str, within_ms: int = RECENT_DESC_QUIZ_WINDOW_MS
+) -> dict | None:
+    """最近一次**描述模式**出题（页面恢复入口）。
+
+    真机问题：描述出题是异步任务（30~120s），用户切走页面再回来拿不到 quiz_id，
+    结果就「丢了」。本函数按 scholar 取最近一条 `mode="desc"` 文档：
+
+    - 只在时间窗内返回（默认 12h），过期返回 None；
+    - 拍照模式文档无 `mode` 字段（存量文档同样如此），天然被过滤；
+    - 出参 `_to_public_quiz`（红线 R3：`answer` / `hint` 恒不出参）；
+    - `status` 原样返回（`generating` 供前端续轮询，`failed` 带 `error_message`）。
+    """
+    res = await db.query(
+        MATH_QUIZ_COLLECTION,
+        where={"scholar_id": scholar_id, "mode": "desc"},
+        order=[{"field": "created_at", "direction": "desc"}],
+        limit=1,
+    )
+    records = res.get("records") or []
+    if not records:
+        return None
+    doc = records[0]
+    if _now_ms() - int(doc.get("created_at") or 0) > within_ms:
+        return None
+    return _to_public_quiz(doc)
+
+
 # ---------------------------------------------------------------------------
 # 业务异常（供路由层映射 HTTP 状态码）
 # ---------------------------------------------------------------------------
