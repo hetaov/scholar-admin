@@ -1577,6 +1577,9 @@ async def math_asr_transcribe(body: MathAsrTranscribeRequest):
             "message": "语音识别失败，请重试",
         }
     return {"success": True, "data": {"transcription": text}}
+
+
+@router.post("/quiz/generate")
 async def math_quiz_generate(
     body: GenerateQuizRequest,
     request: Request,
