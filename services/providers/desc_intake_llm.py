@@ -19,8 +19,8 @@ import httpx
 from config import (
     DESC_INTAKE_LLM_MODEL,
     DESC_INTAKE_LLM_TIMEOUT_SECONDS,
-    HUNYUAN_BASE_URL,
-    HUNYUAN_SECRET_KEY,
+    VOLCANO_API_KEY,
+    VOLCANO_BASE_URL,
 )
 
 logger = logging.getLogger("scholar-admin.math.desc_intake_llm")
@@ -139,9 +139,10 @@ async def call_slot_extract(
     try:
         async with httpx.AsyncClient(timeout=DESC_INTAKE_LLM_TIMEOUT_SECONDS) as client:
             resp = await client.post(
-                f"{HUNYUAN_BASE_URL}/chat/completions",
+                # 2026-11-05：混元 tokenhub → 火山方舟（该网关不认 hunyuan-pro，恒 400）
+                f"{VOLCANO_BASE_URL}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {HUNYUAN_SECRET_KEY}",
+                    "Authorization": f"Bearer {VOLCANO_API_KEY}",
                     "Content-Type": "application/json",
                 },
                 json={

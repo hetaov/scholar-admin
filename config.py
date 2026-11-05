@@ -261,8 +261,9 @@ DESC_QUIZ_EXTEND_MAX_DOWNGRADE = int(os.environ.get("DESC_QUIZ_EXTEND_MAX_DOWNGR
 # 槽位低置信门限：低于它的非 optional 槽位不直接采纳，转意图卡可编辑项（方案 §4.2）
 DESC_INTAKE_SLOT_CONFIDENCE_MIN = float(os.environ.get("DESC_INTAKE_SLOT_CONFIDENCE_MIN", 0.6))
 
-# slot_extract LLM 模型与超时（走混元通道，复用 HUNYUAN 鉴权）
-DESC_INTAKE_LLM_MODEL = os.environ.get("DESC_INTAKE_LLM_MODEL", "hunyuan-pro")
+# slot_extract/意图解析 LLM 模型与超时（走火山方舟通道，对齐 scholar-admin 既有范式；
+# 2026-11-05 由混元 tokenhub 切换：该网关不认 hunyuan-pro 等服务 ID → 恒 400 → 慢路径恒降级）
+DESC_INTAKE_LLM_MODEL = os.environ.get("DESC_INTAKE_LLM_MODEL", "") or VOLCANO_CHAT_MODEL
 DESC_INTAKE_LLM_TIMEOUT_SECONDS = int(os.environ.get("DESC_INTAKE_LLM_TIMEOUT_SECONDS", 15))
 
 # ==================== 翻译评估 v2 配置（ADR-0022 决策 B） ====================

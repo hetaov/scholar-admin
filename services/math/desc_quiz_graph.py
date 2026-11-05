@@ -28,8 +28,8 @@ from langgraph.graph import END, START, StateGraph
 from config import (
     DESC_QUIZ_BASIC_MAX_RETRIES,
     DESC_INTAKE_LLM_MODEL,
-    HUNYUAN_BASE_URL,
-    HUNYUAN_SECRET_KEY,
+    VOLCANO_API_KEY,
+    VOLCANO_BASE_URL,
 )
 from services.math.desc_validators import (
     check_answer,
@@ -111,12 +111,16 @@ _BASIC_USER_TEMPLATE = """依据「题目结构卡」出 {question_count} 道同
 
 
 async def _call_chat(*, system: str, user: str) -> str:
-    """混元 chat 调用（返回原始 content 字符串；网络/超时异常由调用方捕获降级）。"""
+    """火山方舟 chat 调用（返回原始 content 字符串；网络/超时异常由调用方捕获降级）。
+
+    2026-11-05 由混元 tokenhub 切换：该网关不认 hunyuan-pro 等服务 ID（恒 400
+    Bad Request）→ 慢路径恒降级、意图卡全空。对齐既有出题链路（VOLCANO_*）。
+    """
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            f"{HUNYUAN_BASE_URL}/chat/completions",
+            f"{VOLCANO_BASE_URL}/chat/completions",
             headers={
-                "Authorization": f"Bearer {HUNYUAN_SECRET_KEY}",
+                "Authorization": f"Bearer {VOLCANO_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
