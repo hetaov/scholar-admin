@@ -219,6 +219,16 @@ def _to_public_desc_quiz(quiz: dict) -> dict:
     }
 
 
+def validate_desc_intent(intent: dict) -> int:
+    """描述模式出题入参预校验（题量边界），返回规范化题量。
+
+    路由层在**派发异步任务前**调用：非法入参必须同步 400，不能等后台任务失败。
+    """
+    return _normalize_count(
+        (intent or {}).get("question_count") or _DEFAULT_QUESTION_COUNT
+    )
+
+
 async def generateQuizFromDescription(
     db,
     *,
@@ -230,8 +240,16 @@ async def generateQuizFromDescription(
     structure_mode: bool = True,
     scan_id: str | None = None,
     actor: str = "",
+    persist: bool = True,
+    quiz_id: str = "",
 ) -> dict:
-    """描述模式出题（LLM/图异常永不抛出；入参非法 400 由路由层拦截）。"""
+    """描述模式出题（LLM/图异常永不抛出；入参非法 400 由路由层拦截）。
+
+    Args:
+        persist: False → **不落库**，返回完整落库文档（含 answer/hint/fingerprint），
+            供异步任务以 `$set` 回写骨架文档（见 routes `_desc_quiz_generate_task`）。
+        quiz_id: 指定出题 ID（异步任务用骨架已占用 ID，保证轮询可查）。
+    """
     count = _normalize_count(intent.get("question_count") or _DEFAULT_QUESTION_COUNT)
     use_graph = bool(USE_LANGGRAPH_DESC_QUIZ and structure_mode)
     neighbors: list[dict] = []
@@ -280,43 +298,53 @@ async def generateQuizFromDescription(
     )
 
     if not ok:
+        reason = next(
+            (w for w in warnings if w.startswith("DESC_GRAPH_ERROR")),
+            "未生成有效题目，请补充描述后重试",
+        )
         return {
             "quiz_id": "",
             "status": "failed",
             "items": [],
             "warnings": warnings,
             "graph_version": graph_version,
+            "error_message": reason,
             "intent_missing": list((intake_meta or {}).get("missing_required") or []),
         }
 
-    quiz_id = _gen_quiz_id()
-    saved = await _persist_quiz(
-        db,
-        {
-            "quiz_id": quiz_id,
-            "scholar_id": scholar_id,
-            "source_scan_id": scan_id or "",
-            "sources": [],
-            "source_count": 0,
-            "count_per_source": count,
-            "items": items,
-            "include_extended": bool(include_extended),
-            "extended_count": sum(1 for i in items if i["is_extended"]),
-            "signature": _desc_quiz_signature(
-                scholar_id=scholar_id,
-                intent=intent,
-                structure_mode=structure_mode,
-                include_extended=include_extended,
-            ),
-            "warnings": warnings,
-            "audit_log_id": (audit or {}).get("log_id") or "",
-            "graph_version": graph_version,
-            "intake_meta": dict(intake_meta or {}),
-            "validation_reasons": _validation_reasons(warnings),
-            "created_at": _now_ms(),
-        },
-    )
+    doc = {
+        "quiz_id": quiz_id or _gen_quiz_id(),
+        "scholar_id": scholar_id,
+        "mode": "desc",
+        "source_scan_id": scan_id or "",
+        "sources": [],
+        "source_count": 0,
+        "count_per_source": count,
+        "items": items,
+        "include_extended": bool(include_extended),
+        "extended_count": sum(1 for i in items if i["is_extended"]),
+        "signature": _desc_quiz_signature(
+            scholar_id=scholar_id,
+            intent=intent,
+            structure_mode=structure_mode,
+            include_extended=include_extended,
+        ),
+        "warnings": warnings,
+        "audit_log_id": (audit or {}).get("log_id") or "",
+        "graph_version": graph_version,
+        "intake_meta": dict(intake_meta or {}),
+        "validation_reasons": _validation_reasons(warnings),
+        "created_at": _now_ms(),
+    }
+    if not persist:
+        # 异步任务模式：返回完整落库文档，由路由层 $set 回写骨架（status 由骨架保留）
+        logger.info(
+            f"[quiz_desc] 出题完成（异步） quiz_id={doc['quiz_id']} "
+            f"mode={'graph' if use_graph else 'single'} 出题={len(items)}"
+        )
+        return doc
+    saved = await _persist_quiz(db, doc)
     logger.info(
-        f"[quiz_desc] 出题完成 quiz_id={quiz_id} mode={'graph' if use_graph else 'single'} 出题={len(items)}"
+        f"[quiz_desc] 出题完成 quiz_id={doc['quiz_id']} mode={'graph' if use_graph else 'single'} 出题={len(items)}"
     )
     return _to_public_desc_quiz(saved)

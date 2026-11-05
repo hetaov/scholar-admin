@@ -146,6 +146,7 @@ QUIZ_EXTENDED_COUNT_PER_SOURCE = 1  # P1 拔高题：每道源题追加 1 道（
 # 状态常量（D3 两阶段：generate → render）
 # ---------------------------------------------------------------------------
 
+QUIZ_STATUS_GENERATING = "generating"  # 描述模式异步出题中（前端轮询接口 31）
 QUIZ_STATUS_GENERATED = "generated"
 QUIZ_STATUS_RENDERING = "rendering"
 QUIZ_STATUS_RENDERED = "rendered"
@@ -659,6 +660,13 @@ def _to_public_quiz(quiz: dict) -> dict:
         "render_status": quiz.get("render_status") or "",
         # 渲染结果的用户可见原因（失败 / 降级时非空，供前端直接展示）
         "render_message": quiz.get("render_message") or "",
+        # 异步出题失败原因（描述模式 status=failed 时非空，前端轮询直接展示）
+        "error_message": quiz.get("error_message") or "",
+        # 描述模式出参扩展（拍照模式恒为缺省 0 / 空，前端字段探测不受影响）
+        "graph_version": quiz.get("graph_version") or 0,
+        "intent_missing": list(
+            (quiz.get("intake_meta") or {}).get("missing_required") or []
+        ),
     }
 
 

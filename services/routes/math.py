@@ -84,16 +84,22 @@ from services.math.practice_sheet import (
     listKnowledgeSummaries,
 )
 from services.math.quiz import (
+    MATH_QUIZ_COLLECTION,
     QUIZ_DEFAULT_COUNT_PER_SOURCE,
+    QUIZ_STATUS_FAILED,
     QUIZ_STATUS_GENERATED,
+    QUIZ_STATUS_GENERATING,
     QUIZ_STATUS_RENDERED,
     QUIZ_STATUS_RENDERING,
     InvalidQuizSourceError,
     NodeCodeNotFoundError,
+    _gen_quiz_id,
+    _now_ms,
+    _persist_quiz,
     generateQuiz,
     getQuizById,
 )
-from services.math.quiz_desc import generateQuizFromDescription
+from services.math.quiz_desc import generateQuizFromDescription, validate_desc_intent
 from services.math.quiz_intent import parseQuizIntent
 from services.math.quiz_recognizer import recognize_quiz_scan
 from services.math.skill_progress import build_skill_progress
@@ -1351,6 +1357,7 @@ async def math_delete_curriculum_node(
 
 # 渲染后台任务集合：持有强引用，避免 create_task 被 GC 回收
 _QUIZ_RENDER_TASKS: set = set()
+_DESC_QUIZ_TASKS: set = set()  # 描述出题后台任务强引用（防 GC）
 
 
 class QuizRecognizeRequest(BaseModel):
@@ -1598,21 +1605,47 @@ async def math_quiz_generate(
             raise HTTPException(
                 status_code=400, detail="intent 与 source_questions 不可同时提供"
             )
+        # 入参校验必须同步 400（不能等后台任务失败才暴露）
         try:
-            data = await generateQuizFromDescription(
-                db,
-                scholar_id=body.scholar_id,
-                intent=body.intent.model_dump(),
-                grounded_kps=body.grounded_kps or [],
-                intake_meta=body.intake_meta,
-                include_extended=body.intent.include_extended,
-                structure_mode=body.structure_mode,
-                scan_id=body.scan_id or None,
-                actor=actor,
-            )
-            return {"success": True, "data": data}
+            count = validate_desc_intent(body.intent.model_dump())
         except InvalidQuizSourceError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        # 异步出题：LLM（推理型）单次出题常见 30~120s，超过 callContainer 15s 上限
+        # ⇒ 骨架文档 + 后台任务，前端轮询接口 31（status: generating → generated/failed）
+        quiz_id = _gen_quiz_id()
+        await _persist_quiz(
+            db,
+            {
+                "quiz_id": quiz_id,
+                "scholar_id": body.scholar_id,
+                "mode": "desc",
+                "source_scan_id": body.scan_id or "",
+                "sources": [],
+                "source_count": 0,
+                "count_per_source": count,
+                "items": [],
+                "status": QUIZ_STATUS_GENERATING,
+                "warnings": [],
+                "intake_meta": dict(body.intake_meta or {}),
+                "created_at": _now_ms(),
+            },
+        )
+        _spawn_desc_quiz_task(
+            db,
+            quiz_id=quiz_id,
+            scholar_id=body.scholar_id,
+            intent=body.intent.model_dump(),
+            grounded_kps=body.grounded_kps or [],
+            intake_meta=body.intake_meta,
+            include_extended=bool(body.intent.include_extended),
+            structure_mode=body.structure_mode,
+            scan_id=body.scan_id or None,
+            actor=actor,
+        )
+        return {
+            "success": True,
+            "data": {"quiz_id": quiz_id, "status": QUIZ_STATUS_GENERATING},
+        }
     try:
         data = await generateQuiz(
             db,
@@ -1648,6 +1681,75 @@ def _spawn_quiz_render_task(db, quiz_id: str) -> None:
     task = asyncio.create_task(_quiz_render_task(db, quiz_id))
     _QUIZ_RENDER_TASKS.add(task)
     task.add_done_callback(_QUIZ_RENDER_TASKS.discard)
+
+
+async def _desc_quiz_generate_task(
+    db,
+    *,
+    quiz_id: str,
+    scholar_id: str,
+    intent: dict,
+    grounded_kps: list[dict],
+    intake_meta: dict | None,
+    include_extended: bool,
+    structure_mode: bool,
+    scan_id: str | None,
+    actor: str,
+) -> None:
+    """描述出题后台任务：结果/失败原因都回写 `math_quiz`（供接口 31 轮询）。
+
+    失败不抛出（前端靠 status=failed + error_message 展示原因）。
+    """
+    try:
+        doc = await generateQuizFromDescription(
+            db,
+            scholar_id=scholar_id,
+            intent=intent,
+            grounded_kps=grounded_kps,
+            intake_meta=intake_meta,
+            include_extended=include_extended,
+            structure_mode=structure_mode,
+            scan_id=scan_id,
+            actor=actor,
+            persist=False,  # 骨架已存在，这里只产出待回写文档
+            quiz_id=quiz_id,
+        )
+        if doc.get("status") == QUIZ_STATUS_FAILED:
+            await db.update(
+                MATH_QUIZ_COLLECTION,
+                {"quiz_id": quiz_id},
+                {
+                    "$set": {
+                        "status": QUIZ_STATUS_FAILED,
+                        "error_message": doc.get("error_message") or "出题失败，请重试",
+                        "warnings": doc.get("warnings") or [],
+                        "graph_version": doc.get("graph_version") or 0,
+                    }
+                },
+            )
+            return
+        await db.update(
+            MATH_QUIZ_COLLECTION,
+            {"quiz_id": quiz_id},
+            {"$set": {"status": QUIZ_STATUS_GENERATED, **doc}},
+        )
+    except Exception as e:  # noqa: BLE001 —— 失败原因落库，不抛出
+        logger.error("[quiz] desc 出题后台任务异常 quiz_id=%s: %s", quiz_id, e)
+        try:
+            await db.update(
+                MATH_QUIZ_COLLECTION,
+                {"quiz_id": quiz_id},
+                {"$set": {"status": QUIZ_STATUS_FAILED, "error_message": f"出题失败: {e}"}},
+            )
+        except Exception as inner:  # noqa: BLE001
+            logger.error("[quiz] desc 失败状态回写异常 quiz_id=%s: %s", quiz_id, inner)
+
+
+def _spawn_desc_quiz_task(db, **kwargs) -> None:
+    """启动描述出题后台任务并持有强引用（防 GC）"""
+    task = asyncio.create_task(_desc_quiz_generate_task(db, **kwargs))
+    _DESC_QUIZ_TASKS.add(task)
+    task.add_done_callback(_DESC_QUIZ_TASKS.discard)
 
 
 @router.post("/quiz/{quiz_id}/render")
