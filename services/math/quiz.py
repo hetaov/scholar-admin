@@ -41,6 +41,7 @@ from services.math.knowledge_summary import (
     LLMResponseError,
     _get_llm_client,
 )
+from services.math.math_text import normalize_math_text
 from services.audit import (
     AUDIT_RESULT_FAILED,
     AUDIT_RESULT_SUCCESS,
@@ -170,6 +171,8 @@ def _now_ms() -> int:
 
 _QUIZ_QUESTION_SYSTEM_PROMPT = (
     "你是小学数学命题助手。请参考给定的原题，出与它题型完全相同、题意结构一致的练习题。"
+    "question / answer / hint 中的数学符号一律使用 Unicode 字符（× ÷ ± ≤ ≥ − ° ·），"
+    "禁止输出 LaTeX 命令（如 \\times、\\div、\\frac、$...$）。"
     "只输出合法 JSON，不要输出任何其他文字、markdown 或解释。"
 )
 
@@ -511,7 +514,7 @@ def _validate_quiz_items(
     for idx, raw in enumerate(raw_items):
         if not isinstance(raw, dict):
             continue
-        question = str(raw.get("question") or "")
+        question = normalize_math_text(str(raw.get("question") or ""))
         if _is_near_duplicate(question, source_question):
             warnings.append(f"第 {idx + 1} 道题与原题重复，已剔除")
             continue
@@ -526,7 +529,7 @@ def _validate_quiz_items(
                 "quiz_item_id": _gen_quiz_item_id(),
                 "source_index": source_index,
                 "question": question,
-                "answer": str(raw.get("answer") or ""),
+                "answer": normalize_math_text(str(raw.get("answer") or "")),
                 "answer_type": answer_type,
                 "variant_level": (
                     "L1"
@@ -534,7 +537,7 @@ def _validate_quiz_items(
                     else "L2"
                 ),
                 "difficulty": _difficulty_of(raw),
-                "hint": str(raw.get("hint") or ""),
+                "hint": normalize_math_text(str(raw.get("hint") or "")),
             }
         )
         references.append(question)
@@ -621,7 +624,14 @@ def _to_public_quiz(quiz: dict) -> dict:
         "status": quiz.get("status"),
         "source_count": quiz.get("source_count") or 0,
         "count_per_source": quiz.get("count_per_source") or 0,
-        "sources": [dict(s) for s in (quiz.get("sources") or [])],
+        "sources": [
+            (
+                {**s, "question_text": normalize_math_text(s.get("question_text"))}
+                if isinstance(s.get("question_text"), str)
+                else dict(s)
+            )
+            for s in (quiz.get("sources") or [])
+        ],
         "items": [
             {
                 **{
@@ -636,6 +646,9 @@ def _to_public_quiz(quiz: dict) -> dict:
                     )
                     if it.get(k) not in (None, "")
                 },
+                # 存量兜底：修复前落库的题干可能带 mojibake / LaTeX 泄漏，出参前再洗一遍
+                # （与 _validate_quiz_items 落库前清洗同口径，幂等不二次变形）
+                **({"question": q} if (q := normalize_math_text(it.get("question"))) else {}),
                 # P1 拔高题标记（前端 / 打印稿据此打「奥数拔高」角标）
                 "is_extended": bool(it.get("is_extended")),
             }

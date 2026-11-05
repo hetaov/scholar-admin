@@ -41,6 +41,7 @@ from services.math.error_scanner import (
     _parse_photo_context,
     _photo_context_anchor,
 )
+from services.math.math_text import normalize_math_text
 
 try:  # B13 之后由 services.metrics.audit 提供常量；在此之前用同名字面量，口径一致
     from services.metrics.audit import AUDIT_ACTION_QUIZ_RECOGNIZE
@@ -56,6 +57,8 @@ logger = logging.getLogger("scholar-admin.math.quiz_recognizer")
 _QUIZ_RECOGNIZE_SYSTEM_PROMPT = (
     "你是小学数学题目识别助手。根据给定的 OCR 文本与知识点候选集，"
     "把文本切分成一道道独立的题目，并为每道题定位最匹配的知识点。"
+    "question_text 中的数学符号一律使用 Unicode 字符（× ÷ ± ≤ ≥ − ° ·），"
+    "禁止输出 LaTeX 命令（如 \\times、\\div、\\frac、$...$）。"
     "只输出合法 JSON，不要输出任何其他文字、markdown 或解释。"
 )
 
@@ -105,7 +108,9 @@ def _validate_quiz_recognize_result(result: dict) -> None:
             raise JudgeResponseError(f"confidence 必须在 0~1 之间，得到 {conf_val}")
         item["confidence"] = conf_val
         qt = item.get("question_text")
-        item["question_text"] = qt.strip() if isinstance(qt, str) else ""
+        # 符号归一化（乘号乱码 / LaTeX 泄漏根修，2026-11-04）：原文截取后统一清洗，
+        # 与小程序端 services/_utils/math-text.js 同口径且幂等
+        item["question_text"] = normalize_math_text(qt)
         kp = item.get("knowledge_point_name")
         item["knowledge_point_name"] = kp.strip() if isinstance(kp, str) else ""
         nc = item.get("node_code")
