@@ -122,6 +122,21 @@ class TestParseIntentResponse:
         out = qi.parse_intent_response('{"knowledge_points": "分数"}')
         assert out["knowledge_points"] == ["分数"]
 
+    def test_type_word_filtered_from_kps(self):
+        """真机回归：LLM 把题型词「应用题」塞进 knowledge_points → 剔除并回填 hint。"""
+        out = qi.parse_intent_response(
+            '{"knowledge_points": ["进排水问题", "应用题"], "question_type_hint": null}'
+        )
+        assert out["knowledge_points"] == ["进排水问题"]
+        assert out["question_type_hint"] == "应用题"
+
+    def test_type_word_hint_kept_when_present(self):
+        out = qi.parse_intent_response(
+            '{"knowledge_points": ["分数", "口算"], "question_type_hint": "竖式"}'
+        )
+        assert out["knowledge_points"] == ["分数"]
+        assert out["question_type_hint"] == "竖式"  # 已有 hint 不被覆盖
+
     def test_invalid_raises(self):
         with pytest.raises(Exception):
             qi.parse_intent_response("垃圾")
@@ -161,6 +176,27 @@ class TestParseQuizIntent:
         assert out["fallback"] is False
         assert out["intent"]["knowledge_points"] == ["分数的简单加减"]
         assert out["grounded_kps"]  # grounding 命中
+        assert out["intent_missing"] == []  # 槽齐全 → 无缺槽
+
+    def test_slow_path_missing_count_derived(self, monkeypatch):
+        """真机回归：慢路径 question_count=null → 缺槽推导出 question_count（追问条数据源）。"""
+        _stub_chat(
+            monkeypatch,
+            ['{"knowledge_points": ["进排水问题"], "question_count": null}'],
+        )
+        out = _run(
+            parseQuizIntent(_db(), scholar_id="sch_1", description="水池进排水应用题")
+        )
+        assert out["intent"]["question_count"] is None
+        assert out["intent_missing"] == ["question_count"]
+
+    def test_slow_path_missing_kps_derived(self, monkeypatch):
+        _stub_chat(
+            monkeypatch,
+            ['{"knowledge_points": [], "question_count": 5}'],
+        )
+        out = _run(parseQuizIntent(_db(), scholar_id="sch_1", description="出题"))
+        assert out["intent_missing"] == ["knowledge_points"]
 
     def test_slow_path_prefers_canonical_text(self, monkeypatch):
         calls = _stub_chat(monkeypatch, [_intent_json()])

@@ -45,7 +45,7 @@ _INTENT_USER_TEMPLATE = """请解析下面的出题需求：
 
 输出 JSON（未提及的字段必须为 null 或空数组，禁止编造）：
 {{
-  "knowledge_points": ["考点名称", …],   // 空数组表示未提及
+  "knowledge_points": ["考点名称", …],   // 空数组表示未提及；**只放知识点**，题型词（应用题/口算/竖式/填空等）不要放这里
   "question_count": 正整数或 null,
   "question_type_hint": "口算/竖式/应用题/填空/判断/选择题等，或 null",
   "difficulty_hint": "难度提示原话，或 null",
@@ -53,9 +53,26 @@ _INTENT_USER_TEMPLATE = """请解析下面的出题需求：
   "include_extended": true/false/null    // 用户是否要求拔高/引入新知识点
 }}"""
 
+# 题型词白名单：LLM 偶发把题型塞进 knowledge_points（真机实测：「应用题」混入），
+# 出题 prompt 会把它当考点注入 ⇒ 出参前剔除；question_type_hint 为空时回填第一个命中词。
+_QUESTION_TYPE_WORDS = (
+    "口算",
+    "竖式",
+    "应用题",
+    "解决问题",
+    "填空题",
+    "填空",
+    "判断题",
+    "判断",
+    "选择题",
+    "选择",
+    "解答题",
+    "计算题",
+)
+
 
 def parse_intent_response(text: str) -> dict:
-    """解析意图 JSON（容错）；`knowledge_points` 归一为 `list[str]`。"""
+    """解析意图 JSON（容错）；`knowledge_points` 归一为 `list[str]` 并剔除题型词。"""
     parsed = _parse_llm_json(text)
     kps = parsed.get("knowledge_points")
     if isinstance(kps, str):
@@ -64,6 +81,13 @@ def parse_intent_response(text: str) -> dict:
         parsed["knowledge_points"] = []
     else:
         parsed["knowledge_points"] = [str(k).strip() for k in kps if str(k).strip()]
+    type_words = [k for k in parsed["knowledge_points"] if k in _QUESTION_TYPE_WORDS]
+    if type_words:
+        parsed["knowledge_points"] = [
+            k for k in parsed["knowledge_points"] if k not in _QUESTION_TYPE_WORDS
+        ]
+        if not str(parsed.get("question_type_hint") or "").strip():
+            parsed["question_type_hint"] = type_words[0]
     return parsed
 
 
@@ -183,6 +207,14 @@ async def parseQuizIntent(
         if not intent.get("question_count"):
             intent["question_count"] = slow.get("question_count")
 
+    # 缺槽推导：整编图缺位（慢路径）时，从意图本身推导 missing（前端追问条数据源）；
+    # 与 meta.missing_required 合并去重（快路径产物缺 knowledge_points/count 时同样生效）
+    missing = list(meta.get("missing_required") or [])
+    if not (intent.get("knowledge_points") or []) and "knowledge_points" not in missing:
+        missing.append("knowledge_points")
+    if not intent.get("question_count") and "question_count" not in missing:
+        missing.append("question_count")
+
     # 教材 grounding
     grounded = await load_grounded_kps(db, intent.get("knowledge_points") or [])
 
@@ -191,7 +223,7 @@ async def parseQuizIntent(
         "intent": intent,
         "grounded_kps": grounded,
         "intent_suggestions": [],  # 追问话术由前端依 intent_missing 生成（§4.5）
-        "intent_missing": list(meta.get("missing_required") or []),
+        "intent_missing": missing,
         "intent_confidence": float(meta.get("slot_confidence") or 0.0),
         "canonical_text": str(meta.get("canonical_text") or ""),
         "intake_meta": meta_out,
