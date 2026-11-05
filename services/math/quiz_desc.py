@@ -298,10 +298,19 @@ async def generateQuizFromDescription(
     )
 
     if not ok:
-        reason = next(
-            (w for w in warnings if w.startswith("DESC_GRAPH_ERROR")),
-            "未生成有效题目，请补充描述后重试",
+        graph_err = next(
+            (w for w in warnings if w.startswith("DESC_GRAPH_ERROR")), ""
         )
+        codes = _validation_reasons(warnings)
+        if graph_err:
+            reason = f"出题失败：{graph_err}，请稍后重试"
+        elif codes:
+            # 真机自解释：不带原因码时用户只看到泛化文案，无法判断是超时还是校验剔除
+            reason = (
+                f"未生成有效题目（原因码：{'、'.join(codes)}），请换个说法或补充描述后重试"
+            )
+        else:
+            reason = "未生成有效题目，请补充描述后重试"
         return {
             "quiz_id": "",
             "status": "failed",

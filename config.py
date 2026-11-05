@@ -266,6 +266,10 @@ DESC_INTAKE_SLOT_CONFIDENCE_MIN = float(os.environ.get("DESC_INTAKE_SLOT_CONFIDE
 DESC_INTAKE_LLM_MODEL = os.environ.get("DESC_INTAKE_LLM_MODEL", "") or VOLCANO_CHAT_MODEL
 DESC_INTAKE_LLM_TIMEOUT_SECONDS = int(os.environ.get("DESC_INTAKE_LLM_TIMEOUT_SECONDS", 15))
 
+# 出题主图 LLM 读超时（秒）：推理型模型单次出 5~10 题（reasoning + 完整 JSON）
+# 实测 > 30s（真机 ReadTimeout 复现），默认 180s；超时由图内「空产出重出」兜底
+DESC_QUIZ_LLM_TIMEOUT_SECONDS = int(os.environ.get("DESC_QUIZ_LLM_TIMEOUT_SECONDS", 180))
+
 # ==================== 翻译评估 v2 配置（ADR-0022 决策 B） ====================
 
 # LLM 单次调用超时上限（秒，默认 300s = 5 分钟，可配置）：

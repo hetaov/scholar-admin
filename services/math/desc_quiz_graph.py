@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 
 from config import (
     DESC_QUIZ_BASIC_MAX_RETRIES,
+    DESC_QUIZ_LLM_TIMEOUT_SECONDS,
     DESC_INTAKE_LLM_MODEL,
     VOLCANO_API_KEY,
     VOLCANO_BASE_URL,
@@ -115,8 +116,10 @@ async def _call_chat(*, system: str, user: str) -> str:
 
     2026-11-05 由混元 tokenhub 切换：该网关不认 hunyuan-pro 等服务 ID（恒 400
     Bad Request）→ 慢路径恒降级、意图卡全空。对齐既有出题链路（VOLCANO_*）。
+    读超时 DESC_QUIZ_LLM_TIMEOUT_SECONDS（默认 180s）：推理型模型单次出 5~10 题
+    实测 > 30s（真机 ReadTimeout → 0 题 failed 复现）。
     """
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=DESC_QUIZ_LLM_TIMEOUT_SECONDS) as client:
         resp = await client.post(
             f"{VOLCANO_BASE_URL}/chat/completions",
             headers={
@@ -334,6 +337,10 @@ async def _node_generate_basic(state: DescQuizState) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[desc_quiz_graph] 生成失败: {type(e).__name__}: {e}")
         items = []
+        # 留痕：0 题时前端只见「未生成有效题目」，凭此码可区分超时/解析失败
+        state_warnings = list(state.get("warnings") or [])
+        state_warnings.append(f"{W_ITEM_DROPPED}[GEN_FAILED]: {type(e).__name__}: {str(e)[:80]}")
+        return {"items": items, "warnings": state_warnings}
     return {"items": items}
 
 
@@ -359,6 +366,26 @@ def _node_validate_basic(state: DescQuizState) -> dict:
             prior.append(str(it.get("question") or ""))
 
     failed_pairs = [(i, c) for i, c in enumerate(issues_per_item) if c]
+    # 空产出（LLM 超时/输出不合法）：零 token 校验放行会「看似成功实则 0 题」→
+    # 触发一次重出（仅一次，防超时×重试把总时长拖爆；仍空则落 failed 带原因）
+    if not items:
+        if retry < 1:
+            return {
+                "validation_failed": True,
+                "failure_feedback": "上一轮未返回任何题目（超时或输出不合法），请严格按要求的 JSON 格式输出全部题目",
+                "basic_retry": retry + 1,
+            }
+        # 不再重试：标记失败原因（前端 error_message 会展示）
+        warnings = list(state.get("warnings") or [])
+        if not any(w.startswith(W_ITEM_DROPPED) for w in warnings):
+            warnings.append(f"{W_ITEM_DROPPED}[GEN_EMPTY]: 连续两次未返回题目")
+        return {
+            "validation_failed": False,
+            "failure_feedback": "",
+            "items": [],
+            "warnings": warnings,
+            "status": "basic_ok",
+        }
     if failed_pairs and retry < max_retries:
         feedback = "\n".join(
             f"- 第{i + 1}题「{str(items[i].get('question'))[:40]}…」: {','.join(c)}"

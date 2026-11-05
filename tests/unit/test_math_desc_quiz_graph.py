@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pytest
 
 from services.math import desc_quiz_graph as qg
@@ -163,6 +164,45 @@ class TestDeconstructGraph:
         assert "V2_ANSWER_WRONG" in stub.last_user  # 定向修正 prompt 附失败原因
         assert out["retries_used"] == 1
         assert out["items"]
+
+    def test_empty_generation_retried_once_then_ok(self, monkeypatch):
+        """空产出（超时/不合法）→ 重出一次；第二次正常 → 照常返回（真机 ReadTimeout 回归）"""
+        stub = _ChatStub(
+            monkeypatch,
+            [_card_text(), '{"items": []}', _items_text(_good_items())],
+        )
+        out = _run(qg.run_desc_quiz_basic(grounded_kps=_KP_GROUNDED, question_count=4))
+        assert stub.n_calls == 3  # 解剖 1 + 空产出 1 + 重出 1
+        assert len(out["items"]) == 4
+
+    def test_empty_generation_retry_prompt_mentions_empty(self, monkeypatch):
+        stub = _ChatStub(
+            monkeypatch,
+            [_card_text(), '{"items": []}', _items_text(_good_items())],
+        )
+        _run(qg.run_desc_quiz_basic(grounded_kps=_KP_GROUNDED, question_count=2))
+        assert "未返回任何题目" in stub.last_user
+
+    def test_timeout_generation_leaves_gen_failed_warning(self, monkeypatch):
+        """LLM 抛超时异常 → 生成节点留 GEN_FAILED 告警（前端失败文案可区分）"""
+        stub = _ChatStub(
+            monkeypatch,
+            [_card_text(), httpx.ReadTimeout("timed out"), _items_text(_good_items())],
+        )
+        out = _run(qg.run_desc_quiz_basic(grounded_kps=_KP_GROUNDED, question_count=2))
+        assert any("GEN_FAILED" in w for w in out["warnings"])
+        assert out["items"]
+
+    def test_empty_generation_twice_fails_with_gen_empty(self, monkeypatch):
+        """连续两次空产出 → 停止重试，items=[] + GEN_EMPTY 告警（failed 文案带原因码）"""
+        stub = _ChatStub(
+            monkeypatch,
+            [_card_text(), '{"items": []}', '{"items": []}'],
+        )
+        out = _run(qg.run_desc_quiz_basic(grounded_kps=_KP_GROUNDED, question_count=2))
+        assert stub.n_calls == 3  # 解剖 1 + 两次生成（只重出一次）
+        assert out["items"] == []
+        assert any("GEN_EMPTY" in w for w in out["warnings"])
 
 
 # ===========================================================================
@@ -399,7 +439,10 @@ class TestValidateRoute:
         assert len(out["items"]) == 1
         assert any(qg.W_ITEM_DROPPED in w and "V2" in w for w in out["warnings"])
 
-    def test_never_raises(self):
+    def test_never_raises(self, monkeypatch):
+        # 打桩：此用例验证「异常永不向上抛」，不能打真 LLM（混元时代因 400 快速失败
+        # 碰巧通过；切火山后真实出题 30s+ 且耗 token）
+        _ChatStub(monkeypatch, [httpx.ConnectError("offline")])
         out = _run(
             qg.run_desc_quiz_basic(grounded_kps=_KP_GROUNDED, question_count=4, max_retries=0)
         )
