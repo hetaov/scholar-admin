@@ -74,6 +74,7 @@ AUDIT_ACTION_DEDUPLICATE_ENGLISH_SENTENCES = "deduplicate_english_sentences"  # 
 AUDIT_ACTION_QUIZ_RECOGNIZE = "quiz_recognize"  # 接口 28 拍照题识别（Judge 付费调用）
 AUDIT_ACTION_QUIZ_GENERATE = "quiz_generate"    # 接口 29 出同类型题（LLM 付费调用）
 AUDIT_ACTION_QUIZ_RENDER = "quiz_render"        # 接口 30 确认打印 / 异步渲染
+AUDIT_ACTION_QUIZ_INTENT = "quiz_intent"        # 语音描述出题·意图解析（LLM 调用，方案 §7.1）
 
 # 必审动作全集（DM-4 定稿：5+3+1+3+5+3+3+1+3 = 27 类）
 # — 命名约定：双常量等价，REQUIRED_AUDIT_ACTIONS 为契约对外命名；MUST_AUDIT_ACTIONS 为历史命名（向后兼容）
@@ -115,6 +116,7 @@ MUST_AUDIT_ACTIONS = frozenset(
         AUDIT_ACTION_QUIZ_RECOGNIZE,
         AUDIT_ACTION_QUIZ_GENERATE,
         AUDIT_ACTION_QUIZ_RENDER,
+        AUDIT_ACTION_QUIZ_INTENT,
     }
 )
 REQUIRED_AUDIT_ACTIONS = MUST_AUDIT_ACTIONS  # 契约命名别名（DM-4 REQUIRED_AUDIT_ACTIONS）

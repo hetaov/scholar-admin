@@ -18,12 +18,13 @@ from __future__ import annotations
 
 
 class TestRequiredAuditActionsLength:
-    def test_required_audit_actions_len_27(self):
-        """契约 DM-4 ⑨ 组：QZ 数学同类型题 3 类并入后全集 = 27 类。"""
+    def test_required_audit_actions_len_28(self):
+        """契约 DM-4 ⑨ 组：QZ 数学同类型题 3 类并入后全集 = 27 类；
+        G5 语音描述出题新增 `quiz_intent`（方案 §7.1）→ 28 类。"""
         from services.audit import REQUIRED_AUDIT_ACTIONS
 
         assert REQUIRED_AUDIT_ACTIONS is not None
-        assert len(REQUIRED_AUDIT_ACTIONS) == 27
+        assert len(REQUIRED_AUDIT_ACTIONS) == 28
 
     def test_must_audit_actions_alias_equals_required(self):
         """向后兼容：`MUST_AUDIT_ACTIONS` 历史别名仍可用且内容等价于 REQUIRED。"""

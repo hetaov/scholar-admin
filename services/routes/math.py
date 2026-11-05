@@ -91,6 +91,8 @@ from services.math.quiz import (
     generateQuiz,
     getQuizById,
 )
+from services.math.quiz_desc import generateQuizFromDescription
+from services.math.quiz_intent import parseQuizIntent
 from services.math.quiz_recognizer import recognize_quiz_scan
 from services.math.skill_progress import build_skill_progress
 from services.math.error_scanner import (
@@ -1392,6 +1394,41 @@ class GenerateQuizRequest(BaseModel):
         QUIZ_DEFAULT_COUNT_PER_SOURCE, description="每道源题出几道（1~3 整数，非法 → 400）"
     )
     include_extended: bool = Field(False, description="P1 拔高题开关（本期前端不传）")
+    # —— 描述模式扩展（方案 §7.2）：intent 有值走描述分支，与 source_questions 互斥 ——
+    intent: GenerateQuizDescIntent | None = Field(
+        None, description="描述模式意图（有值 → 语音描述出题分支）"
+    )
+    structure_mode: bool = Field(True, description="false = 既有单步直出（请求级旁路）")
+    intake_meta: dict | None = Field(None, description="整编图产物（落库溯源）")
+    grounded_kps: list[dict] | None = Field(
+        None, description="/quiz/intent 产物回传（含 summary，注入出题 prompt）"
+    )
+
+
+class QuizIntentRequest(BaseModel):
+    """POST /math/quiz/intent 请求体（语音描述出题 · 方案 §7.1）
+
+    `description` 保留兼容（intake 回退时前端用 ASR 原文走此字段）；
+    `asr_raw_text` + `intake_meta` 为整编图产物回传。
+    """
+
+    scholar_id: str = Field("", description="学者 id（必）")
+    description: str = Field("", description="兼容字段：裸需求文本")
+    asr_raw_text: str = Field("", description="ASR 原文（sanitize 前后均可）")
+    intake_meta: dict | None = Field(
+        None, description="整编图产物（slots/intake_meta/canonical_text/intent）"
+    )
+
+
+class GenerateQuizDescIntent(BaseModel):
+    """描述模式 `intent` 入参（方案 §7.2）"""
+
+    knowledge_points: list[str] = Field(default_factory=list, description="考点名（可空）")
+    question_count: Any = Field(None, description="出题数量（1~20，非法 → 400）")
+    question_type_hint: str = Field("", description="题型提示")
+    difficulty_hint: str = Field("", description="难度提示")
+    scenario: str = Field("", description="情境词")
+    include_extended: bool = Field(False, description="是否要求拔高")
 
 
 class RenderQuizRequest(BaseModel):
@@ -1455,6 +1492,40 @@ async def math_quiz_recognize(
         raise _quiz_recognize_error_to_http(e) from e
 
 
+@router.post("/quiz/intent")
+async def math_quiz_intent(
+    body: QuizIntentRequest,
+    request: Request,
+    db: CloudBaseNoSQLClient = Depends(get_db),
+):
+    """POST 出题意图解析（语音描述出题 · 方案 §7.1）
+
+    快路径：`intake_meta.intent` 直接采纳（零 token）；慢路径：LLM 单步解析
+    （输入优先 `canonical_text`）。两路径共用教材 grounding → `grounded_kps[]`。
+    """
+    actor = get_request_openid(request) or "anonymous"
+    if not body.scholar_id.strip():
+        raise HTTPException(status_code=400, detail="缺少 scholar_id")
+    if not (
+        body.description.strip()
+        or body.asr_raw_text.strip()
+        or (body.intake_meta or {})
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="缺少需求文本（description/asr_raw_text/intake_meta 至少其一）",
+        )
+    data = await parseQuizIntent(
+        db,
+        scholar_id=body.scholar_id,
+        description=body.description,
+        asr_raw_text=body.asr_raw_text,
+        intake_meta=body.intake_meta,
+        actor=actor,
+    )
+    return {"success": True, "data": data}
+
+
 @router.post("/quiz/generate")
 async def math_quiz_generate(
     body: GenerateQuizRequest,
@@ -1468,6 +1539,27 @@ async def math_quiz_generate(
     **`answer` / `hint` 不出参**（红线 R3）。幂等：同参数 10 分钟窗口内返回既有 `quiz_id`（D8）。
     """
     actor = get_request_openid(request) or "anonymous"
+    # —— 描述模式分支（方案 §7.2）：intent 有值 → 语音描述出题（与 source_questions 互斥）——
+    if body.intent is not None:
+        if body.source_questions:
+            raise HTTPException(
+                status_code=400, detail="intent 与 source_questions 不可同时提供"
+            )
+        try:
+            data = await generateQuizFromDescription(
+                db,
+                scholar_id=body.scholar_id,
+                intent=body.intent.model_dump(),
+                grounded_kps=body.grounded_kps or [],
+                intake_meta=body.intake_meta,
+                include_extended=body.intent.include_extended,
+                structure_mode=body.structure_mode,
+                scan_id=body.scan_id or None,
+                actor=actor,
+            )
+            return {"success": True, "data": data}
+        except InvalidQuizSourceError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     try:
         data = await generateQuiz(
             db,

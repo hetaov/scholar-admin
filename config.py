@@ -244,6 +244,27 @@ HUNYUAN_EVAL_PASS_THRESHOLD = float(os.environ.get("HUNYUAN_EVAL_PASS_THRESHOLD"
 # 评估最大重试次数（不达标时回到生成节点重试）
 HUNYUAN_EVAL_MAX_RETRIES = int(os.environ.get("HUNYUAN_EVAL_MAX_RETRIES", 2))
 
+# ==================== 数学语音出题 LangGraph 编排配置（2026-11-05，方案 §7.3） ====================
+
+# 语音描述出题主图总开关：默认开启；置 false 回退既有单步出题（对齐 ADR-0015 / R18）
+USE_LANGGRAPH_DESC_QUIZ = os.environ.get("USE_LANGGRAPH_DESC_QUIZ", "true").lower() == "true"
+
+# 语义整编子开关：关 = 跳过整编图，ASR 原文直进既有意图解析（出参不加新字段）
+DESC_INTAKE_ENABLED = os.environ.get("DESC_INTAKE_ENABLED", "true").lower() == "true"
+
+# 基础题段 validate_basic 定向重试上限（超限题目级降级，方案 §5.4）
+DESC_QUIZ_BASIC_MAX_RETRIES = int(os.environ.get("DESC_QUIZ_BASIC_MAX_RETRIES", 2))
+
+# 拔高段降档总上限（水位归零剔除该题，方案 §6.4）
+DESC_QUIZ_EXTEND_MAX_DOWNGRADE = int(os.environ.get("DESC_QUIZ_EXTEND_MAX_DOWNGRADE", 2))
+
+# 槽位低置信门限：低于它的非 optional 槽位不直接采纳，转意图卡可编辑项（方案 §4.2）
+DESC_INTAKE_SLOT_CONFIDENCE_MIN = float(os.environ.get("DESC_INTAKE_SLOT_CONFIDENCE_MIN", 0.6))
+
+# slot_extract LLM 模型与超时（走混元通道，复用 HUNYUAN 鉴权）
+DESC_INTAKE_LLM_MODEL = os.environ.get("DESC_INTAKE_LLM_MODEL", "hunyuan-pro")
+DESC_INTAKE_LLM_TIMEOUT_SECONDS = int(os.environ.get("DESC_INTAKE_LLM_TIMEOUT_SECONDS", 15))
+
 # ==================== 翻译评估 v2 配置（ADR-0022 决策 B） ====================
 
 # LLM 单次调用超时上限（秒，默认 300s = 5 分钟，可配置）：
